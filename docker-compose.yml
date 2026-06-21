@@ -8,5 +8,7 @@ services:
       - "1337:1337"
     volumes:
       - ./data:/app/data
+      # Live-serve the client from the repo so web/ edits show on refresh (no rebuild).
+      - ./web:/app/web:ro
     environment:
       PORT: "1337"

@@ -39,6 +39,7 @@ const Menu = (function () {
   let rooms = [];             // last ROOM_LIST payload (array of RoomSummary)
   let currentRoom = null;     // last ROOM_JOINED / ROOM_UPDATE RoomInfo
   let lobbyCanvases = [];     // {canvas, character} pending redraw
+  let soloPending = false;    // auto-start a solo (vs-bots) match after CREATE_ROOM
 
   const LIST_REFRESH_MS = 2500;
 
@@ -143,7 +144,9 @@ const Menu = (function () {
       'M12 3 C16 7 16 17 12 21'
     ],
     sword: ['M14 4 L20 4 L20 10', 'M20 4 L11 13', 'M4 16 L8 20', 'M9 15 L6 18'],
-    storm: ['M5 13 A6 6 0 1 1 17 11', 'M13 9 L9 15 H13 L9 21']
+    storm: ['M5 13 A6 6 0 1 1 17 11', 'M13 9 L9 15 H13 L9 21'],
+    bot: ['M6 9 H18 V19 H6 Z', 'M12 4 V9', 'M10.5 3.5 A1.5 1.5 0 1 0 13.5 3.5 A1.5 1.5 0 1 0 10.5 3.5', 'M9 13 H11', 'M13 13 H15', 'M3 12 H6', 'M18 12 H21'],
+    code: ['M9 8 L5 12 L9 16', 'M15 8 L19 12 L15 16']
   };
 
   // ---- mode helpers ------------------------------------------------------
@@ -237,7 +240,14 @@ const Menu = (function () {
       onclick: onClickEditCharacter
     }, [icon('user', 16), el('span', { text: t('nav.editChar', 'Edit Character') })]);
 
-    const actionRow = el('div', { class: 'menu-actions' }, [playBtn, editBtn]);
+    const singleBtn = el('button', {
+      id: 'menu-solo-btn',
+      class: 'pixbtn',
+      type: 'button',
+      onclick: onClickSinglePlayer
+    }, [icon('bot', 16), el('span', { text: t('nav.singlePlayer', 'Single Player') })]);
+
+    const actionRow = el('div', { class: 'menu-actions' }, [playBtn, singleBtn, editBtn]);
 
     // ---------- Public room browser ----------
     const refreshBtn = el('button', {
@@ -286,13 +296,23 @@ const Menu = (function () {
 
   function footerNodes() {
     // A wink to Clobi: vim, Fisherman's Friend menthol, and a firm NO to Windows.
-    return [
+    const tribute = el('div', { class: 'footer-line' }, [
       'In honor of Clobi -- vim, ',
       el('span', { class: 'accent-mint', text: "Fisherman's Friend" }),
       ', and a militant ',
       el('span', { class: 'accent-blue', text: 'NO' }),
       ' to Windows.'
-    ];
+    ]);
+    // Open-source indicator linking to the project repo.
+    const oss = el('a', {
+      id: 'menu-oss',
+      class: 'menu-oss',
+      href: 'https://github.com/FabioCG01/clobi-the-game',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+      title: 'Open source on GitHub'
+    }, [icon('code', 12), el('span', { text: t('footer.openSource', 'Open source on GitHub') })]);
+    return [tribute, oss];
   }
 
   // Recompute all static (non-list) labels after a language switch.
@@ -501,6 +521,16 @@ const Menu = (function () {
     currentRoom = normalizeRoomInfo(payload);
     if (!currentRoom) return;
     closeAnyModal();
+    // Single-player: we created a private practice room — auto-ready and start
+    // immediately so the match fills with CPU bots (no waiting in an empty lobby).
+    if (soloPending) {
+      soloPending = false;
+      if (typeof Net !== 'undefined' && Net.send) {
+        Net.send(Protocol.READY, { ready: true });
+        Net.send(Protocol.START_GAME, {});
+      }
+      return;
+    }
     showLobbyPane();
     renderLobby();
   }
@@ -830,6 +860,45 @@ const Menu = (function () {
     if (panel && panel.scrollIntoView) {
       panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  }
+
+  // ---- Single Player / Practice vs bots ---------------------------------
+  function onClickSinglePlayer() {
+    const smash = el('button', {
+      class: 'pixbtn pixbtn-primary sp-mode', type: 'button',
+      onclick: function () { startSolo(MODE_SMASH); }
+    }, [modeIcon(MODE_SMASH, 18), el('span', { text: modeLabel(MODE_SMASH) })]);
+    const royale = el('button', {
+      class: 'pixbtn sp-mode', type: 'button',
+      onclick: function () { startSolo(MODE_ROYALE); }
+    }, [modeIcon(MODE_ROYALE, 18), el('span', { text: modeLabel(MODE_ROYALE) })]);
+    const body = [
+      el('p', { class: 'sp-hint', text: t('sp.hint', 'Practice against bots -- pick a mode:') }),
+      el('div', { class: 'sp-modes' }, [smash, royale])
+    ];
+    openModal(modalShell(t('nav.singlePlayer', 'Single Player'), body));
+  }
+
+  const SOLO_NAMES = ['Penguin', 'TuxFan', 'Rookie', 'Challenger', 'Hacker', 'Player'];
+  function randomName() {
+    return SOLO_NAMES[Math.floor(Math.random() * SOLO_NAMES.length)] +
+      Math.floor(Math.random() * 90 + 10);
+  }
+
+  function startSolo(mode) {
+    closeAnyModal();
+    let nick = getNickname().trim();
+    if (!nick) { nick = randomName(); setNickname(nick); }
+    if (typeof Net === 'undefined' || !Net.send || typeof Protocol === 'undefined') return;
+    // Announce identity, then create a private practice room and auto-start it.
+    Net.send(Protocol.HELLO, { nickname: nick, character: getCharacter() });
+    soloPending = true;
+    Net.send(Protocol.CREATE_ROOM, {
+      name: nick + "'s Practice",
+      password: '',
+      maxPlayers: (mode === MODE_ROYALE) ? 8 : 4,
+      mode: mode
+    });
   }
 
   function onClickEditCharacter() {
@@ -1444,6 +1513,14 @@ const Menu = (function () {
       '.mode-desc{font-size:7px;color:#646b8a;line-height:1.7;margin-top:8px;min-height:14px;}',
       // footer
       '.menu-footer{margin-top:30px;text-align:center;font-size:8px;line-height:1.9;color:#646b8a;}',
+      '.footer-line{margin-bottom:12px;}',
+      '.menu-oss{display:inline-flex;align-items:center;gap:6px;color:#7ff9e0;',
+      '  text-decoration:none;border:2px solid #2a3350;background:#11131f;padding:6px 11px;',
+      '  font-size:8px;letter-spacing:1px;}',
+      '.menu-oss:hover{background:#7ff9e0;color:#11131f;border-color:#7ff9e0;}',
+      '.sp-hint{font-size:9px;color:#9aa3bf;text-align:center;margin:0 0 12px;line-height:1.7;}',
+      '.sp-modes{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}',
+      '.sp-mode{min-width:150px;justify-content:center;}',
       '.accent-mint{color:#7ff9e0;}',
       '.accent-blue{color:#2b5fff;}',
       // modal
