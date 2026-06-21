@@ -1,553 +1,426 @@
 // sprites.js — procedural 8-bit pixel art for "Tux Smash Royale". Single global:
-// Sprites. Pure fillRect art on a virtual pixel grid; NO image asset files.
+// Sprites. Pure fillRect art on a 32x36 virtual grid (2x the old resolution);
+// the part catalogs + colour presets live in the editable web/assets/parts.js.
 //
-// THE UNIVERSAL CHARACTER
-// -----------------------
-// One character object is used across BOTH game modes and BOTH body types. It is
-// a plain, JSON-serializable bag of indices that travels over the wire and is
-// stored in accounts.json (see Go protocol.Character — field names match):
+// THE UNIVERSAL CHARACTER (v2) — one object across both modes + both bodies:
 //   {
-//     name:      string  display name (cosmetic; not drawn on the sprite itself)
-//     bodyType:  'tux' | 'humanoid'   selects the silhouette renderer
-//     body:      int  index into PARTS.BODY_COLORS    (primary color)
-//     belly:     int  index into PARTS.BELLY_COLORS   (belly / shirt color)
-//     feet:      int  index into PARTS.FEET_COLORS    (feet / shoes color)
-//     hat:       int  index into PARTS.HATS           (0 = none)
-//     eyes:      int  index into PARTS.EYES
-//     accessory: int  index into PARTS.ACCESSORIES    (0 = none)
-//     cape:      int  index into PARTS.CAPES          (0 = none)
+//     name, bodyType:'tux'|'humanoid', gender:'male'|'female',
+//     body, belly, feet,        // hex colours (tux: body/belly/feet)
+//     skin, hairColor, beardColor, // hex colours (humanoid)
+//     hair, beard,              // style indices (humanoid)
+//     hat, eyes, accessory, cape   // style indices (shared)
 //   }
+// Colours are full hex strings so the editor can offer a free colour picker.
+// For the humanoid, `belly` doubles as the shirt colour and `skin` is the face.
 //
-// The SAME shared parts (colors, hat, eyes, accessory, cape) are applied to
-// whichever body is selected, so a saved character reads clearly as either a
-// penguin or a person.
-//
-// drawCharacter(ctx, character, x, y, scale, facing):
-//   (x, y) is the CENTER of the character in destination (canvas) pixels.
-//   `scale` is destination-pixels per sprite-pixel (the art grid is 16 wide).
-//   `facing` is +1 (right) or -1 (left); the whole sprite is mirrored for -1.
-
+// drawCharacter(ctx, character, x, y, scale, facing): (x,y) is the sprite CENTRE
+// in canvas px; `scale` is destination px per OLD-16-grid cell (kept stable so
+// callers don't change); `facing` is +1 right / -1 left (whole sprite mirrors).
 var Sprites = (function () {
   'use strict';
 
-  // ---- Palette catalogs ----------------------------------------------------
-  // Index 0 of each color list is the classic-Tux default. The catalogs are
-  // generous so randomized bots (server picks indices up to 5/3/2) always land
-  // on a valid, good-looking entry.
+  var P = (window.ClobiParts) || {};
+  var GW = P.GRID_W || 32;
+  var GH = P.GRID_H || 36;
 
-  var BODY_COLORS = [
-    '#11131c', // 0 classic black (Tux)
-    '#1b2a4a', // 1 midnight blue
-    '#3a1d4a', // 2 royal purple
-    '#143a2a', // 3 forest green
-    '#4a1320', // 4 dark crimson
-    '#2b2b2b', // 5 charcoal
-    '#103a44', // 6 deep teal
-    '#3a2a10'  // 7 dark bronze
-  ];
-
-  var BELLY_COLORS = [
-    '#fdfdfd', // 0 classic white
-    '#7ff9e0', // 1 minty cyan (Fisherman's)
-    '#ffe7b0', // 2 cream
-    '#ffd0e0', // 3 pale pink
-    '#cfe9ff', // 4 ice blue
-    '#d8ffcf', // 5 mint green
-    '#fff27f', // 6 lemon
-    '#e8e8f0'  // 7 silver
-  ];
-
-  var FEET_COLORS = [
-    '#ff9e2c', // 0 classic penguin orange
-    '#ffcf3c', // 1 gold
-    '#ff5a3c', // 2 coral red
-    '#ff7fd0', // 3 hot pink
-    '#7ff9e0', // 4 minty
-    '#9cff5a', // 5 lime
-    '#ffffff', // 6 white
-    '#b06a2c'  // 7 brown
-  ];
-
-  // Hats: name + geometry kind. kind 'none' draws nothing. c1/c2 are the two
-  // chunky colors; extra fields tweak per-kind details.
-  var HATS = [
-    { name: 'None',       kind: 'none' },
-    { name: 'Vim Cap',    kind: 'cap',    c1: '#1b7a3a', c2: '#0f4a24', logo: '#cfe9ff' },
-    { name: 'Wizard',     kind: 'wizard', c1: '#3a1d4a', c2: '#7ff9e0', star: '#fff27f' },
-    { name: 'Tux Crown',  kind: 'crown',  c1: '#ffcf3c', c2: '#ff9e2c', gem: '#ff5a3c' },
-    { name: 'Beanie',     kind: 'beanie', c1: '#ff5a3c', c2: '#fdfdfd' },
-    { name: 'Tophat',     kind: 'tophat', c1: '#11131c', c2: '#7ff9e0' },
-    { name: 'Headphones', kind: 'phones', c1: '#2b2b2b', c2: '#ff9e2c' },
-    { name: 'Halo',       kind: 'halo',   c1: '#fff27f', c2: '#ffcf3c' }
-  ];
-
-  // Eyes: name + style flag.
-  var EYES = [
-    { name: 'Classic',  kind: 'classic' }, // two dot eyes
-    { name: 'Angry',    kind: 'angry' },
-    { name: 'Sleepy',   kind: 'sleepy' },
-    { name: 'Shades',   kind: 'shades' },   // 8-bit sunglasses
-    { name: 'Cyclops',  kind: 'cyclops' },
-    { name: 'Sparkle',  kind: 'sparkle' }
-  ];
-
-  // Accessories: name + kind. kind 'none' draws nothing. Drawn over the body.
-  var ACCESSORIES = [
-    { name: 'None',          kind: 'none' },
-    { name: 'Bowtie',        kind: 'bowtie',   c1: '#ff5a3c' },
-    { name: 'Fisherman\'s',  kind: 'fish',     c1: '#7ff9e0', c2: '#11131c' }, // menthol tin held to chest
-    { name: 'Scarf',         kind: 'scarf',    c1: '#ff9e2c' },
-    { name: 'Necklace',      kind: 'necklace', c1: '#fff27f' },
-    { name: 'Badge',         kind: 'badge',    c1: '#9cff5a' }
-  ];
-
-  // Capes: name + kind. kind 'none' draws nothing. Drawn behind the body.
-  var CAPES = [
-    { name: 'None',   kind: 'none' },
-    { name: 'Hero',   kind: 'cape', c1: '#ff5a3c', c2: '#b3331f' },
-    { name: 'Mint',   kind: 'cape', c1: '#7ff9e0', c2: '#3fb59c' },
-    { name: 'Royal',  kind: 'cape', c1: '#3a1d4a', c2: '#7a52a0' },
-    { name: 'Gold',   kind: 'cape', c1: '#ffcf3c', c2: '#b3870f' }
-  ];
-
-  var PARTS = {
-    BODY_COLORS: BODY_COLORS,
-    BELLY_COLORS: BELLY_COLORS,
-    FEET_COLORS: FEET_COLORS,
-    HATS: HATS,
-    EYES: EYES,
-    ACCESSORIES: ACCESSORIES,
-    CAPES: CAPES
+  // Fallback colour presets if the data file failed to load.
+  var PRESETS = P.presets || {
+    skin: ['#f3c69a'], hair: ['#b07a43'], body: ['#11131c'],
+    belly: ['#fdfdfd'], shirt: ['#fdfdfd'], feet: ['#ff9e2c'], beard: ['#7a4a1f']
+  };
+  var HAIRS = P.hair || [{ name: 'Short', px: [[12, 2, 8, 1], [11, 3, 10, 1]] }];
+  var BEARDS = P.beard || [{ name: 'None', px: [] }];
+  var HATS = P.hats || [{ name: 'None', kind: 'none' }];
+  var EYES = P.eyes || [{ name: 'Classic', kind: 'classic' }];
+  var ACC = P.accessories || [{ name: 'None', kind: 'none' }];
+  var CAPES = P.capes || [{ name: 'None', kind: 'none' }];
+  var CLOBI = P.clobi || {
+    gender: 'male', skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f',
+    belly: '#fdfdfd', feet: '#5a3a22', hair: 0, beard: 1
   };
 
-  // ---- Character factories -------------------------------------------------
+  // PARTS is consumed by the editor (colour presets + catalogs + counts).
+  var PARTS = {
+    presets: PRESETS,
+    HAIRS: HAIRS, BEARDS: BEARDS, HATS: HATS,
+    EYES: EYES, ACCESSORIES: ACC, CAPES: CAPES
+  };
+
+  // ---- character factories -------------------------------------------------
 
   function defaultCharacter() {
     return {
-      name: '',
-      bodyType: 'tux',
-      body: 0,   // classic black
-      belly: 0,  // white
-      feet: 0,   // orange
-      hat: 0,    // none
-      eyes: 0,   // classic
-      accessory: 0,
-      cape: 0
+      name: '', bodyType: 'tux', gender: 'male',
+      body: '#11131c', belly: '#fdfdfd', feet: '#ff9e2c',
+      skin: CLOBI.skin, hairColor: CLOBI.hairColor, beardColor: CLOBI.beardColor,
+      hair: CLOBI.hair, beard: CLOBI.beard,
+      hat: 0, eyes: 0, accessory: 0, cape: 0
     };
+  }
+
+  // clobiHumanoid returns a humanoid that looks like Clobi (the default person):
+  // light-brown ponytail, a small beard, a white shirt. Keeps the given name.
+  function clobiHumanoid(base) {
+    var c = sanitize(base || {});
+    c.bodyType = 'humanoid';
+    c.gender = CLOBI.gender;
+    c.skin = CLOBI.skin;
+    c.hairColor = CLOBI.hairColor;
+    c.beardColor = CLOBI.beardColor;
+    c.belly = CLOBI.belly;
+    c.feet = CLOBI.feet;
+    c.hair = CLOBI.hair;
+    c.beard = CLOBI.beard;
+    return c;
   }
 
   function randInt(n) { return Math.floor(Math.random() * n); }
+  function pickArr(a) { return a[randInt(a.length)]; }
 
   function randomCharacter() {
+    var humanoid = Math.random() < 0.5;
     return {
       name: '',
-      bodyType: (Math.random() < 0.5 ? 'tux' : 'humanoid'),
-      body: randInt(BODY_COLORS.length),
-      belly: randInt(BELLY_COLORS.length),
-      feet: randInt(FEET_COLORS.length),
-      hat: randInt(HATS.length),
-      eyes: randInt(EYES.length),
-      accessory: randInt(ACCESSORIES.length),
-      cape: randInt(CAPES.length)
+      bodyType: humanoid ? 'humanoid' : 'tux',
+      gender: Math.random() < 0.5 ? 'male' : 'female',
+      body: pickArr(PRESETS.body), belly: pickArr(PRESETS.belly), feet: pickArr(PRESETS.feet),
+      skin: pickArr(PRESETS.skin), hairColor: pickArr(PRESETS.hair), beardColor: pickArr(PRESETS.beard),
+      hair: randInt(HAIRS.length), beard: randInt(BEARDS.length),
+      hat: randInt(HATS.length), eyes: randInt(EYES.length),
+      accessory: randInt(ACC.length), cape: randInt(CAPES.length)
     };
   }
 
-  // sanitize coerces an arbitrary/partial character into a fully valid one so the
-  // renderer never indexes out of range (bot characters, old saves, etc.).
+  // sanitize coerces an arbitrary/partial/old character into a valid v2 one.
   function sanitize(c) {
     var d = defaultCharacter();
     if (!c || typeof c !== 'object') { return d; }
-    function pick(v, len, def) {
-      v = (v | 0);
-      if (v < 0 || v >= len) { return def; }
+    function col(v, def) {
+      return (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v)) ? v : def;
+    }
+    function idx(v, len, def) {
+      v = (typeof v === 'number') ? Math.floor(v) : def;
+      if (v < 0 || v >= len) { return 0; }
       return v;
     }
     return {
       name: (typeof c.name === 'string') ? c.name : '',
       bodyType: (c.bodyType === 'humanoid') ? 'humanoid' : 'tux',
-      body: pick(c.body, BODY_COLORS.length, d.body),
-      belly: pick(c.belly, BELLY_COLORS.length, d.belly),
-      feet: pick(c.feet, FEET_COLORS.length, d.feet),
-      hat: pick(c.hat, HATS.length, d.hat),
-      eyes: pick(c.eyes, EYES.length, d.eyes),
-      accessory: pick(c.accessory, ACCESSORIES.length, d.accessory),
-      cape: pick(c.cape, CAPES.length, d.cape)
+      gender: (c.gender === 'female') ? 'female' : 'male',
+      body: col(c.body, d.body),
+      belly: col(c.belly, d.belly),
+      feet: col(c.feet, d.feet),
+      skin: col(c.skin, d.skin),
+      hairColor: col(c.hairColor, d.hairColor),
+      beardColor: col(c.beardColor, d.beardColor),
+      hair: idx(c.hair, HAIRS.length, 0),
+      beard: idx(c.beard, BEARDS.length, 0),
+      hat: idx(c.hat, HATS.length, 0),
+      eyes: idx(c.eyes, EYES.length, 0),
+      accessory: idx(c.accessory, ACC.length, 0),
+      cape: idx(c.cape, CAPES.length, 0)
     };
   }
 
-  // ---- Low-level pixel helpers --------------------------------------------
-  //
-  // The art is authored on a virtual 16x16-ish grid. We draw each "pixel" as a
-  // filled rectangle. A small drawing context (P) carries the mapping from grid
-  // coordinates to canvas pixels, with horizontal mirroring baked in so every
-  // module can author art facing right.
-
-  // makePen builds a pixel pen. cx,cy = canvas center; s = canvas px per grid px;
-  // gw = grid width (used to mirror around the grid center); flip = -1 mirrors.
-  function makePen(ctx, cx, cy, s, gw, gh, flip) {
-    var halfW = gw / 2;
-    var halfH = gh / 2;
+  // ---- low-level pixel pen -------------------------------------------------
+  // makePen: cx,cy = canvas centre; s = canvas px per grid cell; flip -1 mirrors.
+  function makePen(ctx, cx, cy, s, flip) {
+    var halfW = GW / 2, halfH = GH / 2;
     return {
-      ctx: ctx,
-      s: s,
-      // px draws a single grid cell at (gx,gy) sized (w,h) grid cells.
       px: function (gx, gy, w, h, color) {
         if (!color) { return; }
         w = (w === undefined ? 1 : w);
         h = (h === undefined ? 1 : h);
         var lx = gx;
-        if (flip < 0) { lx = gw - (gx + w); }
+        if (flip < 0) { lx = GW - (gx + w); }
         var X = cx + (lx - halfW) * s;
         var Y = cy + (gy - halfH) * s;
         ctx.fillStyle = color;
-        // +1 device px overdraw kills hairline seams between adjacent cells.
         ctx.fillRect(Math.round(X), Math.round(Y),
           Math.ceil(w * s) + 1, Math.ceil(h * s) + 1);
       }
     };
   }
 
-  // ---- Public entry: dispatch on body type --------------------------------
-
+  // ---- public entry --------------------------------------------------------
   function drawCharacter(ctx, character, x, y, scale, facing) {
     var c = sanitize(character);
     var flip = (facing < 0) ? -1 : 1;
-    if (c.bodyType === 'humanoid') {
-      drawHumanoid(ctx, c, x, y, scale, flip);
-    } else {
-      drawTux(ctx, c, x, y, scale, flip);
-    }
+    // Keep visual size stable vs the old 16-wide reference grid.
+    var s = scale * 16 / GW;
+    var pen = makePen(ctx, x, y, s, flip);
+    if (c.bodyType === 'humanoid') { drawHumanoid(pen, c); }
+    else { drawTux(pen, c); }
   }
 
-  // =========================================================================
-  // TUX — the 8-bit penguin. Grid is 16 wide x 18 tall. The classic egg body,
-  // white belly oval, flippers, orange feet + beak.
-  // =========================================================================
-  function drawTux(ctx, c, cx, cy, scale, flip) {
-    var bodyCol = BODY_COLORS[c.body];
-    var bellyCol = BELLY_COLORS[c.belly];
-    var feetCol = FEET_COLORS[c.feet];
-    var GW = 16, GH = 18;
-    // `scale` is destination px per sprite pixel of a ~16px reference; map the
-    // 16-wide grid to that so size matches across body types.
-    var s = scale;
-    var P = makePen(ctx, cx, cy, s, GW, GH, flip);
+  // ===========================================================================
+  // TUX — the 8-bit penguin (32x36). Classic egg body + belly + flippers + feet.
+  // ===========================================================================
+  function drawTux(P0, c) {
+    var bodyCol = c.body, bellyCol = c.belly, feetCol = c.feet;
 
-    // Cape (behind everything).
-    drawCape(P, c, GW, GH, 'tux');
+    drawCape(P0, c, 'tux');
 
-    // ---- Body silhouette (rounded egg) ----
-    // Row-by-row spans of the black body. Coordinates are grid cells.
+    // Body (egg) — rows as [x,y,w] painted 2 tall.
     var body = [
-      [6, 2, 4],   // y=2 head top
-      [5, 3, 6],
-      [4, 4, 8],
-      [4, 5, 8],
-      [3, 6, 10],
-      [3, 7, 10],
-      [3, 8, 10],
-      [3, 9, 10],
-      [3, 10, 10],
-      [4, 11, 8],
-      [4, 12, 8],
-      [5, 13, 6]
+      [12, 4, 8], [10, 6, 12], [8, 8, 16], [8, 10, 16],
+      [6, 12, 20], [6, 14, 20], [6, 16, 20], [6, 18, 20],
+      [6, 20, 20], [8, 22, 16], [8, 24, 16], [10, 26, 12]
     ];
     for (var i = 0; i < body.length; i++) {
-      P.px(body[i][0], body[i][1], body[i][2], 1, bodyCol);
+      P0.px(body[i][0], body[i][1], body[i][2], 2, bodyCol);
     }
-
-    // ---- Belly (white oval inset) ----
+    // Belly (white oval inset).
     var belly = [
-      [6, 6, 4],
-      [5, 7, 6],
-      [5, 8, 6],
-      [5, 9, 6],
-      [5, 10, 6],
-      [6, 11, 4],
-      [6, 12, 4]
+      [12, 12, 8], [10, 14, 12], [10, 16, 12], [10, 18, 12],
+      [10, 20, 12], [12, 22, 8], [12, 24, 8]
     ];
     for (var b = 0; b < belly.length; b++) {
-      P.px(belly[b][0], belly[b][1], belly[b][2], 1, bellyCol);
+      P0.px(belly[b][0], belly[b][1], belly[b][2], 2, bellyCol);
+    }
+    // Flippers.
+    P0.px(4, 14, 2, 8, bodyCol);
+    P0.px(26, 14, 2, 8, bodyCol);
+    // Feet.
+    P0.px(8, 28, 6, 2, feetCol);
+    P0.px(18, 28, 6, 2, feetCol);
+    P0.px(8, 30, 8, 2, feetCol);
+    P0.px(16, 30, 8, 2, feetCol);
+    // Beak.
+    P0.px(14, 10, 4, 2, feetCol);
+    P0.px(14, 12, 4, 1, feetCol);
+    // Eyes on the upper body/face.
+    drawEyes(P0, c, 12, 18, 8);
+    drawAccessory(P0, c, 'tux');
+    drawHat(P0, c, { cx: 16, headTop: 4, headW: 16 });
+  }
+
+  // ===========================================================================
+  // HUMANOID — an 8-bit person (32x36). FIX: `body` no longer tints the hair —
+  // `skin` is the face, `hairColor` the hair, `beardColor` the beard, `belly`
+  // the shirt. Gender slightly changes the silhouette.
+  // ===========================================================================
+  function drawHumanoid(P0, c) {
+    var skin = c.skin, shirt = c.belly, shoe = c.feet;
+    var pants = mix(shirt, '#000000', 0.55);
+    var female = (c.gender === 'female');
+
+    drawCape(P0, c, 'humanoid');
+
+    // Hair BEHIND head (back layer: ponytail tails etc. read as behind).
+    drawHairLayer(P0, c, true);
+
+    // Head (skin).
+    P0.px(13, 4, 6, 1, skin);
+    P0.px(12, 5, 8, 1, skin);
+    P0.px(11, 6, 10, 5, skin); // face block y6..10
+    P0.px(12, 11, 8, 1, skin);
+    P0.px(14, 12, 4, 1, skin); // chin
+    P0.px(10, 8, 1, 2, skin);  // left ear
+    P0.px(21, 8, 1, 2, skin);  // right ear
+    P0.px(14, 13, 4, 1, skin); // neck
+
+    // Hair ON TOP of head.
+    drawHairLayer(P0, c, false);
+    // Beard over the lower face.
+    drawBeard(P0, c);
+    // Eyes.
+    drawEyes(P0, c, 13, 17, 8);
+
+    // Torso / shirt.
+    var shW = female ? 10 : 12;
+    var shX = 16 - shW / 2;
+    P0.px(shX, 14, shW, 2, shirt);            // shoulders
+    P0.px(female ? 12 : 11, 16, female ? 8 : 10, 6, shirt); // chest..belly
+    if (female) {
+      P0.px(13, 22, 6, 1, shirt);             // taper to waist
+    } else {
+      P0.px(12, 22, 8, 1, shirt);
     }
 
-    // ---- Flippers (body color, sticking out the sides) ----
-    P.px(2, 7, 1, 4, bodyCol);  // left flipper
-    P.px(13, 7, 1, 4, bodyCol); // right flipper
+    // Arms (shirt sleeves + skin hands).
+    P0.px(9, 15, 2, 5, shirt);
+    P0.px(21, 15, 2, 5, shirt);
+    P0.px(9, 20, 2, 1, skin);
+    P0.px(21, 20, 2, 1, skin);
 
-    // ---- Feet (orange) ----
-    P.px(4, 14, 3, 1, feetCol);
-    P.px(9, 14, 3, 1, feetCol);
-    P.px(4, 15, 4, 1, feetCol);
-    P.px(8, 15, 4, 1, feetCol);
+    // Legs (pants).
+    P0.px(12, 24, 3, 7, pants);
+    P0.px(17, 24, 3, 7, pants);
+    // Shoes.
+    P0.px(11, 31, 5, 2, shoe);
+    P0.px(16, 31, 5, 2, shoe);
 
-    // ---- Beak (orange) ----
-    P.px(7, 5, 2, 1, feetCol);
-    P.px(7, 6, 2, 1, feetCol);
-
-    // ---- Eyes ----
-    // White backing patches around grid columns 6 and 9, row 4.
-    drawEyes(P, c, { lx: 6, rx: 9, ey: 4, sep: 3 });
-
-    // ---- Accessory (in front of the belly) ----
-    drawAccessory(P, c, GW, GH, 'tux');
-
-    // ---- Hat (top of head ~ rows 0-3, centered over x=8) ----
-    drawHat(P, c, { topY: 0, headTop: 2, cx: 8, headW: 8 }, 'tux');
+    drawAccessory(P0, c, 'humanoid');
+    drawHat(P0, c, { cx: 16, headTop: 2, headW: 11 });
   }
 
-  // =========================================================================
-  // HUMANOID — an 8-bit person. Grid 16 wide x 18 tall: head, torso (shirt =
-  // belly color), arms, legs, and shoes (feet color). `body` color tints hair
-  // + sleeves/shorts so the shared palette still reads clearly.
-  // =========================================================================
-  function drawHumanoid(ctx, c, cx, cy, scale, flip) {
-    var hairCol = BODY_COLORS[c.body];
-    var shirtCol = BELLY_COLORS[c.belly];
-    var shoeCol = FEET_COLORS[c.feet];
-    var skinCol = '#f3c69a';
-    var pantsCol = mix(hairCol, '#000000', 0.15); // slightly darker trousers
-    var GW = 16, GH = 18;
-    var s = scale;
-    var P = makePen(ctx, cx, cy, s, GW, GH, flip);
-
-    // Cape (behind everything).
-    drawCape(P, c, GW, GH, 'humanoid');
-
-    // ---- Head (skin) rows 2-5, centered ----
-    P.px(6, 2, 4, 1, skinCol);
-    P.px(5, 3, 6, 1, skinCol);
-    P.px(5, 4, 6, 1, skinCol);
-    P.px(5, 5, 6, 1, skinCol);
-    // Neck.
-    P.px(7, 6, 2, 1, skinCol);
-
-    // ---- Hair (body color) — cap over the top + side fringe ----
-    P.px(5, 1, 6, 1, hairCol);
-    P.px(5, 2, 1, 1, hairCol);
-    P.px(10, 2, 1, 1, hairCol);
-    P.px(4, 2, 1, 2, hairCol); // left sideburn
-    P.px(11, 2, 1, 2, hairCol); // right sideburn
-
-    // ---- Torso / shirt (belly color) rows 7-11 ----
-    P.px(5, 7, 6, 1, shirtCol);
-    P.px(4, 8, 8, 1, shirtCol);
-    P.px(4, 9, 8, 1, shirtCol);
-    P.px(4, 10, 8, 1, shirtCol);
-    P.px(5, 11, 6, 1, shirtCol);
-
-    // ---- Arms (skin hands + body-color sleeves) ----
-    P.px(3, 7, 1, 3, hairCol); // left sleeve
-    P.px(12, 7, 1, 3, hairCol); // right sleeve
-    P.px(3, 10, 1, 1, skinCol); // left hand
-    P.px(12, 10, 1, 1, skinCol); // right hand
-
-    // ---- Legs (pants) rows 12-14 ----
-    P.px(5, 12, 2, 1, pantsCol);
-    P.px(9, 12, 2, 1, pantsCol);
-    P.px(5, 13, 2, 1, pantsCol);
-    P.px(9, 13, 2, 1, pantsCol);
-    P.px(5, 14, 2, 1, pantsCol);
-    P.px(9, 14, 2, 1, pantsCol);
-
-    // ---- Shoes (feet color) row 15 ----
-    P.px(4, 15, 3, 1, shoeCol);
-    P.px(9, 15, 3, 1, shoeCol);
-
-    // ---- Eyes (row 4 on the face) ----
-    drawEyes(P, c, { lx: 6, rx: 9, ey: 4, sep: 3 });
-
-    // ---- Accessory (over the shirt) ----
-    drawAccessory(P, c, GW, GH, 'humanoid');
-
-    // ---- Hat (over the hair, head top ~ row 1-2) ----
-    drawHat(P, c, { topY: -1, headTop: 1, cx: 8, headW: 7 }, 'humanoid');
+  // ---- hair + beard (data-driven from parts.js) ----------------------------
+  // Front pass draws the cap/top; back pass draws trailing pieces (ponytail).
+  function drawHairLayer(P0, c, back) {
+    var style = HAIRS[c.hair] || HAIRS[0];
+    if (!style || !style.px) { return; }
+    for (var i = 0; i < style.px.length; i++) {
+      var r = style.px[i];
+      var isBack = (r[0] < 11); // pieces left of the skull = behind (ponytail)
+      if (isBack !== !!back) { continue; }
+      P0.px(r[0], r[1], r[2], r[3], c.hairColor);
+    }
   }
 
-  // ---- Shared part renderers ----------------------------------------------
+  function drawBeard(P0, c) {
+    var style = BEARDS[c.beard] || BEARDS[0];
+    if (!style || !style.px) { return; }
+    for (var i = 0; i < style.px.length; i++) {
+      var r = style.px[i];
+      P0.px(r[0], r[1], r[2], r[3], c.beardColor);
+    }
+  }
 
-  // drawEyes places the eyes at the face row. `g` gives left/right eye columns,
-  // eye row, and separation. Works for both bodies because positions match.
-  function drawEyes(P, c, g) {
+  // ---- eyes ----------------------------------------------------------------
+  function drawEyes(P0, c, lx, rx, ey) {
     var e = EYES[c.eyes] || EYES[0];
-    var white = '#ffffff';
-    var dark = '#11131c';
+    var white = '#ffffff', dark = '#11131c';
     switch (e.kind) {
       case 'angry':
-        // Slanted brows + dot pupils.
-        P.px(g.lx - 1, g.ey - 1, 2, 1, dark);
-        P.px(g.rx, g.ey - 1, 2, 1, dark);
-        P.px(g.lx, g.ey, 1, 1, white);
-        P.px(g.rx, g.ey, 1, 1, white);
-        P.px(g.lx, g.ey, 1, 1, dark);
-        P.px(g.rx, g.ey, 1, 1, dark);
+        P0.px(lx - 1, ey - 1, 3, 1, dark);
+        P0.px(rx, ey - 1, 3, 1, dark);
+        P0.px(lx, ey, 2, 2, white); P0.px(rx, ey, 2, 2, white);
+        P0.px(lx + 1, ey, 1, 1, dark); P0.px(rx, ey, 1, 1, dark);
         break;
       case 'sleepy':
-        // Half-lidded: a flat line.
-        P.px(g.lx - 1, g.ey, 2, 1, dark);
-        P.px(g.rx, g.ey, 2, 1, dark);
+        P0.px(lx - 1, ey + 1, 3, 1, dark);
+        P0.px(rx, ey + 1, 3, 1, dark);
         break;
       case 'shades':
-        // 8-bit sunglasses bar.
-        P.px(g.lx - 1, g.ey - 1, 6, 1, dark);
-        P.px(g.lx - 1, g.ey, 2, 1, dark);
-        P.px(g.rx, g.ey, 2, 1, dark);
-        // Glint.
-        P.px(g.lx, g.ey - 1, 1, 1, '#7ff9e0');
-        break;
-      case 'cyclops':
-        // One big central eye.
-        P.px(7, g.ey - 1, 2, 3, white);
-        P.px(7, g.ey, 2, 1, dark);
+        P0.px(lx - 1, ey - 1, rx - lx + 4, 2, dark);
+        P0.px(lx, ey + 1, 1, 1, '#7ff9e0');
         break;
       case 'sparkle':
-        // Bright eyes with a highlight.
-        P.px(g.lx, g.ey, 1, 1, white);
-        P.px(g.rx, g.ey, 1, 1, white);
-        P.px(g.lx, g.ey, 1, 1, '#7ff9e0');
-        P.px(g.rx, g.ey, 1, 1, '#7ff9e0');
+        P0.px(lx, ey - 1, 2, 3, white); P0.px(rx, ey - 1, 2, 3, white);
+        P0.px(lx, ey, 1, 1, '#7ff9e0'); P0.px(rx, ey, 1, 1, '#7ff9e0');
         break;
       case 'classic':
       default:
-        // Two white patches with dark pupils.
-        P.px(g.lx, g.ey - 1, 1, 2, white);
-        P.px(g.rx, g.ey - 1, 1, 2, white);
-        P.px(g.lx, g.ey, 1, 1, dark);
-        P.px(g.rx, g.ey, 1, 1, dark);
+        P0.px(lx, ey - 1, 2, 3, white); P0.px(rx, ey - 1, 2, 3, white);
+        P0.px(lx, ey, 1, 2, dark); P0.px(rx, ey, 1, 2, dark);
         break;
     }
   }
 
-  // drawHat renders the chosen hat centered over the head. `h` provides topY (top
-  // grid row to start), headTop (where the skull begins), cx (head center col),
-  // headW (head width in cells).
-  function drawHat(P, c, h, bodyType) {
+  // ---- hats (scaled to the 32 grid) ----------------------------------------
+  function drawHat(P0, c, h) {
     var hat = HATS[c.hat] || HATS[0];
-    if (hat.kind === 'none') { return; }
+    if (!hat || hat.kind === 'none') { return; }
     var left = h.cx - Math.floor(h.headW / 2);
-    var w = h.headW;
+    var w = h.headW, top = h.headTop;
     switch (hat.kind) {
       case 'cap':
-        // Brim + dome + tiny logo.
-        P.px(left, h.headTop, w, 1, hat.c1);
-        P.px(left + 1, h.headTop - 1, w - 2, 1, hat.c1);
-        P.px(left - 1, h.headTop + 1, w + 2, 1, hat.c2); // brim
-        P.px(h.cx, h.headTop, 1, 1, hat.logo); // logo pixel
+        P0.px(left, top, w, 2, hat.c1);
+        P0.px(left + 1, top - 2, w - 2, 2, hat.c1);
+        P0.px(left - 2, top + 2, w + 4, 1, hat.c2);
+        P0.px(h.cx - 1, top, 2, 2, hat.logo);
         break;
       case 'wizard':
-        // Tall cone with a star.
-        P.px(h.cx, h.headTop - 4, 1, 1, hat.c1);
-        P.px(h.cx, h.headTop - 3, 2, 1, hat.c1);
-        P.px(h.cx - 1, h.headTop - 2, 3, 1, hat.c1);
-        P.px(left, h.headTop, w, 1, hat.c2); // mint brim
-        P.px(left + 1, h.headTop - 1, w - 2, 1, hat.c1);
-        P.px(h.cx, h.headTop - 3, 1, 1, hat.star); // star
+        P0.px(h.cx, top - 8, 2, 2, hat.c1);
+        P0.px(h.cx - 1, top - 6, 4, 2, hat.c1);
+        P0.px(h.cx - 2, top - 4, 6, 2, hat.c1);
+        P0.px(left, top - 2, w, 2, hat.c1);
+        P0.px(left - 1, top, w + 2, 1, hat.c2);
+        P0.px(h.cx, top - 6, 1, 1, hat.star);
         break;
       case 'crown':
-        P.px(left + 1, h.headTop, w - 2, 1, hat.c1);
-        P.px(left + 1, h.headTop - 1, 1, 1, hat.c1);
-        P.px(h.cx, h.headTop - 1, 1, 1, hat.c1);
-        P.px(left + w - 2, h.headTop - 1, 1, 1, hat.c1);
-        P.px(h.cx, h.headTop, 1, 1, hat.gem); // center gem
+        P0.px(left + 2, top, w - 4, 2, hat.c1);
+        P0.px(left + 2, top - 2, 2, 2, hat.c1);
+        P0.px(h.cx - 1, top - 2, 2, 2, hat.c1);
+        P0.px(left + w - 4, top - 2, 2, 2, hat.c1);
+        P0.px(h.cx - 1, top, 2, 2, hat.gem);
         break;
       case 'beanie':
-        P.px(left, h.headTop, w, 1, hat.c1);
-        P.px(left + 1, h.headTop - 1, w - 2, 1, hat.c1);
-        P.px(left, h.headTop + 1, w, 1, hat.c2); // fold band
-        P.px(h.cx, h.headTop - 2, 1, 1, hat.c2); // pom
+        P0.px(left, top - 1, w, 3, hat.c1);
+        P0.px(left, top + 2, w, 1, hat.c2);
+        P0.px(h.cx - 1, top - 3, 2, 2, hat.c2);
         break;
       case 'tophat':
-        P.px(left, h.headTop + 1, w, 1, hat.c1); // brim
-        P.px(left + 2, h.headTop - 3, w - 4, 4, hat.c1); // stack
-        P.px(left + 2, h.headTop - 1, w - 4, 1, hat.c2); // mint band
+        P0.px(left - 1, top + 2, w + 2, 1, hat.c1);
+        P0.px(left + 2, top - 6, w - 4, 8, hat.c1);
+        P0.px(left + 2, top - 2, w - 4, 1, hat.c2);
         break;
       case 'phones':
-        // Headphone band over the head + ear cups on the sides.
-        P.px(left, h.headTop - 1, w, 1, hat.c1);
-        P.px(left - 1, h.headTop + 1, 1, 2, hat.c2); // left cup
-        P.px(left + w, h.headTop + 1, 1, 2, hat.c2); // right cup
+        P0.px(left, top - 2, w, 2, hat.c1);
+        P0.px(left - 2, top + 1, 2, 3, hat.c2);
+        P0.px(left + w, top + 1, 2, 3, hat.c2);
         break;
       case 'halo':
-        // Floating ring above.
-        P.px(left + 1, h.headTop - 3, w - 2, 1, hat.c1);
-        P.px(left, h.headTop - 3, 1, 1, hat.c2);
-        P.px(left + w - 1, h.headTop - 3, 1, 1, hat.c2);
+        P0.px(left + 1, top - 5, w - 2, 1, hat.c1);
+        P0.px(left, top - 5, 1, 1, hat.c2);
+        P0.px(left + w - 1, top - 5, 1, 1, hat.c2);
         break;
-      default:
-        break;
+      default: break;
     }
   }
 
-  // drawAccessory renders the chosen accessory over the chest/torso.
-  function drawAccessory(P, c, GW, GH, bodyType) {
-    var a = ACCESSORIES[c.accessory] || ACCESSORIES[0];
-    if (a.kind === 'none') { return; }
-    var chestY = (bodyType === 'humanoid') ? 7 : 7;
+  // ---- accessories ---------------------------------------------------------
+  function drawAccessory(P0, c, bodyType) {
+    var a = ACC[c.accessory] || ACC[0];
+    if (!a || a.kind === 'none') { return; }
+    var chestY = (bodyType === 'humanoid') ? 15 : 13;
     switch (a.kind) {
       case 'bowtie':
-        P.px(7, 6, 1, 1, a.c1);
-        P.px(8, 6, 1, 1, a.c1);
-        P.px(6, 6, 1, 1, a.c1);
-        P.px(9, 6, 1, 1, a.c1);
+        P0.px(14, 13, 4, 2, a.c1);
+        P0.px(12, 13, 2, 2, a.c1);
+        P0.px(18, 13, 2, 2, a.c1);
         break;
       case 'fish':
-        // Fisherman's Friend menthol tin held to the chest.
-        P.px(7, chestY + 1, 3, 2, a.c1);
-        P.px(7, chestY + 1, 3, 1, '#ffffff'); // label highlight
-        P.px(8, chestY + 2, 1, 1, a.c2); // dark text mark
+        P0.px(14, chestY + 2, 4, 3, a.c1);
+        P0.px(14, chestY + 2, 4, 1, '#ffffff');
+        P0.px(15, chestY + 3, 2, 1, a.c2);
         break;
       case 'scarf':
-        P.px(5, 6, 6, 1, a.c1);
-        P.px(6, 7, 1, 2, a.c1); // hanging end
-        break;
-      case 'necklace':
-        P.px(6, 6, 4, 1, a.c1);
-        P.px(8, 7, 1, 1, a.c1); // pendant
+        P0.px(11, 13, 10, 2, a.c1);
+        P0.px(13, 15, 2, 3, a.c1);
         break;
       case 'badge':
-        P.px(5, chestY + 1, 1, 1, a.c1);
-        P.px(5, chestY, 1, 1, '#ffffff');
+        P0.px(11, chestY + 2, 2, 2, '#ffffff');
+        P0.px(11, chestY + 2, 2, 1, a.c1);
         break;
-      default:
-        break;
+      default: break;
     }
   }
 
-  // drawCape renders a flowing cape BEHIND the body. Anchored at the shoulders,
-  // flaring down and slightly back (toward the mirrored side).
-  function drawCape(P, c, GW, GH, bodyType) {
+  // ---- capes ---------------------------------------------------------------
+  function drawCape(P0, c, bodyType) {
     var cp = CAPES[c.cape] || CAPES[0];
-    if (cp.kind === 'none') { return; }
-    // Cape billows to the LEFT in art space (the trailing edge). Because the pen
-    // mirrors on facing, it naturally trails behind whichever way we face.
-    var topY = (bodyType === 'humanoid') ? 7 : 6;
-    P.px(2, topY, 3, 1, cp.c1);
-    P.px(1, topY + 1, 4, 1, cp.c1);
-    P.px(1, topY + 2, 4, 1, cp.c2);
-    P.px(0, topY + 3, 4, 1, cp.c1);
-    P.px(0, topY + 4, 4, 1, cp.c2);
-    P.px(1, topY + 5, 3, 1, cp.c1);
-    P.px(2, topY + 6, 2, 1, cp.c2);
+    if (!cp || cp.kind === 'none') { return; }
+    var topY = (bodyType === 'humanoid') ? 14 : 12;
+    P0.px(4, topY, 6, 2, cp.c1);
+    P0.px(2, topY + 2, 8, 2, cp.c1);
+    P0.px(2, topY + 4, 8, 2, cp.c2);
+    P0.px(0, topY + 6, 8, 2, cp.c1);
+    P0.px(0, topY + 8, 8, 2, cp.c2);
+    P0.px(2, topY + 10, 6, 2, cp.c1);
+    P0.px(4, topY + 12, 4, 2, cp.c2);
   }
 
-  // ---- color utility -------------------------------------------------------
-  // mix blends two #rrggbb colors by t in [0,1] (0 => a, 1 => b).
+  // ---- colour utils --------------------------------------------------------
   function mix(a, b, t) {
     var ca = hexToRgb(a), cb = hexToRgb(b);
-    var r = Math.round(ca[0] + (cb[0] - ca[0]) * t);
-    var g = Math.round(ca[1] + (cb[1] - ca[1]) * t);
-    var bl = Math.round(ca[2] + (cb[2] - ca[2]) * t);
-    return 'rgb(' + r + ',' + g + ',' + bl + ')';
+    return 'rgb(' + Math.round(ca[0] + (cb[0] - ca[0]) * t) + ',' +
+      Math.round(ca[1] + (cb[1] - ca[1]) * t) + ',' +
+      Math.round(ca[2] + (cb[2] - ca[2]) * t) + ')';
   }
   function hexToRgb(h) {
-    if (h[0] === '#') { h = h.slice(1); }
+    if (!h || h[0] !== '#') { return [128, 128, 128]; }
+    h = h.slice(1);
     if (h.length === 3) { h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; }
-    var n = parseInt(h, 16);
+    var n = parseInt(h.slice(0, 6), 16);
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
   return {
     PARTS: PARTS,
     defaultCharacter: defaultCharacter,
+    clobiHumanoid: clobiHumanoid,
     randomCharacter: randomCharacter,
     sanitize: sanitize,
     drawCharacter: drawCharacter

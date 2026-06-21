@@ -1098,15 +1098,31 @@ func randomBotCharacter(rng *rand.Rand) protocol.Character {
 	if rng.Intn(2) == 0 {
 		bodyType = "humanoid"
 	}
+	pick := func(a []string) string { return a[rng.Intn(len(a))] }
+	bodyCols := []string{"#11131c", "#1b2a4a", "#3a1d4a", "#143a2a", "#4a1320", "#2b2b2b"}
+	bellyCols := []string{"#fdfdfd", "#7ff9e0", "#ffe7b0", "#ffd0e0", "#cfe9ff", "#d8ffcf"}
+	feetCols := []string{"#ff9e2c", "#ffcf3c", "#ff5a3c", "#ff7fd0", "#7ff9e0", "#9cff5a"}
+	skinCols := []string{"#ffd9b3", "#f3c69a", "#e0a878", "#c68642", "#8d5524"}
+	hairCols := []string{"#b07a43", "#7a4a1f", "#2b2b2b", "#11131c", "#d9b15a", "#a0522d"}
+	gender := "male"
+	if rng.Intn(2) == 0 {
+		gender = "female"
+	}
 	return protocol.Character{
-		Name:      "",
-		BodyType:  bodyType,
-		Body:      rng.Intn(6),
-		Belly:     rng.Intn(6),
-		Feet:      rng.Intn(6),
-		Hat:       rng.Intn(4),
-		Eyes:      rng.Intn(3),
-		Accessory: rng.Intn(3),
-		Cape:      rng.Intn(3),
+		Name:       "",
+		BodyType:   bodyType,
+		Gender:     gender,
+		Body:       pick(bodyCols),
+		Belly:      pick(bellyCols),
+		Feet:       pick(feetCols),
+		Skin:       pick(skinCols),
+		HairColor:  pick(hairCols),
+		BeardColor: pick(hairCols),
+		Hair:       rng.Intn(6),
+		Beard:      rng.Intn(4),
+		Hat:        rng.Intn(4),
+		Eyes:       rng.Intn(3),
+		Accessory:  rng.Intn(3),
+		Cape:       rng.Intn(3),
 	}
 }

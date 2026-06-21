@@ -125,15 +125,21 @@ func newToken() (string, error) {
 // indices line up with the client's Sprites.PARTS default selection.
 func defaultCharacter(name string) protocol.Character {
 	return protocol.Character{
-		Name:      name,
-		BodyType:  "tux",
-		Body:      0,
-		Belly:     0,
-		Feet:      0,
-		Hat:       0,
-		Eyes:      0,
-		Accessory: 0,
-		Cape:      0,
+		Name:       name,
+		BodyType:   "tux",
+		Gender:     "male",
+		Body:       "#11131c",
+		Belly:      "#fdfdfd",
+		Feet:       "#ff9e2c",
+		Skin:       "#f3c69a",
+		HairColor:  "#b07a43",
+		BeardColor: "#7a4a1f",
+		Hair:       0,
+		Beard:      0,
+		Hat:        0,
+		Eyes:       0,
+		Accessory:  0,
+		Cape:       0,
 	}
 }
 
