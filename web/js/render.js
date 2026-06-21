@@ -74,6 +74,20 @@ var Render = (function () {
     ctx.imageSmoothingEnabled = false; // crisp pixels
   }
 
+  // Re-measure each frame so the canvas tracks its CSS box even if it was hidden
+  // (size 0 -> fallback) at init time. Fixes the "tiny screen" on the first match.
+  function maybeResize() {
+    if (!canvas) { return; }
+    var rect = canvas.getBoundingClientRect();
+    var w = Math.floor(rect.width || canvas.clientWidth || 0);
+    var h = Math.floor(rect.height || canvas.clientHeight || 0);
+    if (w < 2 || h < 2) { return; } // not visible yet; keep last good size
+    if (w !== viewW || h !== viewH ||
+        canvas.width !== w * dpr || canvas.height !== h * dpr) {
+      resize();
+    }
+  }
+
   // camera: uniform fit of the square world into the view, centered.
   function camera() {
     // Re-sync if the canvas backing store drifted from the view size.
@@ -98,6 +112,7 @@ var Render = (function () {
 
   function drawFrame(state, localPlayerId) {
     if (!ctx) { return; }
+    maybeResize();
     var t = nowMs();
     var cam = camera();
 

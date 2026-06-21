@@ -152,6 +152,16 @@ a {
   background: var(--c-ink);
 }
 
+/* The match canvas fills the whole viewport (the renderer letterboxes the
+   square world inside it). Without this it sat at its intrinsic 960x600. */
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--c-ink);
+  touch-action: none;
+}
+
 /* ---------------------------------------------------------------- */
 /* Headings + text helpers                                          */
 /* ---------------------------------------------------------------- */

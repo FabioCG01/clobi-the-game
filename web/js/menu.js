@@ -711,12 +711,14 @@ const Menu = (function () {
     // Controls: Ready toggle + (host) Start
     const readyBtn = el('button', {
       id: 'lobby-ready-btn',
-      class: 'pixbtn ' + (amReady ? 'pixbtn-ready-on' : 'pixbtn-ready-off'),
+      class: 'pixbtn ' + (amReady ? 'pixbtn-ready-on' : 'pixbtn-primary pixbtn-ready-off'),
       type: 'button',
       onclick: function () { toggleReady(!amReady); }
     }, [
-      amReady ? icon('check', 16) : icon('x', 16),
-      el('span', { text: amReady ? t('lobby.ready', 'Ready') : t('lobby.notReady', 'Not ready') })
+      icon('check', 16),
+      el('span', { text: amReady
+        ? t('lobby.readyCancel', 'Ready! (click to cancel)')
+        : t('lobby.readyUp', 'Ready up!') })
     ]);
 
     const controls = el('div', { class: 'lobby-controls' }, [readyBtn]);
