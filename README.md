@@ -96,6 +96,30 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o clobi ./cmd/server
 Runtime data (the account store, `data/accounts.json`) is created automatically on first use inside
 the `DATA_DIR` directory.
 
+### Option C — Docker Compose (recommended for a server; autostarts on reboot)
+
+A `docker-compose.yml` is included:
+
+```bash
+docker compose up -d     # build + run in the background
+docker compose logs -f   # follow logs
+docker compose down      # stop and remove
+```
+
+It publishes port `1337`, persists `./data`, and sets `restart: unless-stopped`. Combined with a
+boot-enabled Docker daemon (`sudo systemctl enable --now docker`), the container **comes back
+automatically after a reboot** — no extra wiring needed.
+
+> ⚠️ **Data directory permissions.** The container runs as a **non-root** user (`uid 100`,
+> `gid 101`). When you bind-mount `./data`, make it writable by that user **once**:
+>
+> ```bash
+> sudo chown -R 100:101 data
+> ```
+>
+> Otherwise the server can't write `accounts.json` and will crash-loop on startup with
+> `permission denied`.
+
 ---
 
 ## Controls

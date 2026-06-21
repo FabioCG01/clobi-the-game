@@ -7,6 +7,8 @@
 .gitattributes
 .dockerignore
 Dockerfile
+compose.yml
+docker-compose.yml
 .claude
 
 # Docs (not needed inside the image)

@@ -1,0 +1,12 @@
+services:
+  clobi:
+    build: .
+    image: tux-smash-royale:latest
+    container_name: clobi
+    restart: unless-stopped
+    ports:
+      - "1337:1337"
+    volumes:
+      - ./data:/app/data
+    environment:
+      PORT: "1337"
