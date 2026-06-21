@@ -1,0 +1,31 @@
+# Keep the Docker build context tiny: only go.mod/go.sum, cmd/, internal/ and
+# web/ are actually needed to build the image.
+
+# VCS + tooling
+.git
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+.claude
+
+# Docs (not needed inside the image)
+*.md
+
+# Runtime data — never bake accounts.json or other state into the image.
+data
+
+# Leftover Node tooling from the pre-Go prototype (not used by the Go build).
+node_modules
+npm-debug.log*
+package.json
+package-lock.json
+client
+server
+
+# Editor / OS noise
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store

@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+
+# Local editor / agent settings — not part of the project
+.claude/
+
+# Runtime data — keep the directory, ignore its generated contents.
+data/*
+!data/.gitkeep

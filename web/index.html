@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1d2e">
+  <meta name="description" content="TUX SMASH ROYALE — an 8-bit online PvP penguin brawler. A tribute to Clobi: vim, Linux, and Fisherman's Friend forever.">
+  <title>TUX SMASH ROYALE</title>
+
+  <!-- Press Start 2P from Google Fonts CDN, with a monospace fallback handled in CSS. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ============================================================= -->
+  <!-- SCREEN: MENU  (rendered/populated by menu.js)                  -->
+  <!-- ============================================================= -->
+  <div id="screen-menu" class="screen active"></div>
+
+  <!-- ============================================================= -->
+  <!-- SCREEN: EDITOR  (rendered/populated by editor.js)             -->
+  <!-- ============================================================= -->
+  <div id="screen-editor" class="screen"></div>
+
+  <!-- ============================================================= -->
+  <!-- SCREEN: GAME  (canvas drawn by render.js, driven by game.js)  -->
+  <!-- ============================================================= -->
+  <div id="screen-game" class="screen">
+    <canvas id="game-canvas" width="960" height="600"></canvas>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- ACTIVATE WINDOWS GAG OVERLAY (populated by gag.js)            -->
+  <!-- Always on top, outside the screens, ignores pointer events.   -->
+  <!-- ============================================================= -->
+  <div id="gag-overlay" aria-hidden="true"></div>
+
+  <!-- ============================================================= -->
+  <!-- MODAL ROOT (account + language popups, outside screens)      -->
+  <!-- ============================================================= -->
+  <div id="modal-root"></div>
+
+  <!-- ============================================================= -->
+  <!-- SCRIPTS — exact dependency load order. Each assigns ONE global -->
+  <!-- ============================================================= -->
+  <script src="js/protocol.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/sprites.js"></script>
+  <script src="js/gag.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/game.js"></script>
+  <script src="js/editor.js"></script>
+  <script src="js/menu.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,1268 @@
+/* ===================================================================
+   TUX SMASH ROYALE — 8-bit visual system.
+   A respectful, comedic tribute to Clobi: vim, Linux, Fisherman's Friend.
+
+   Limited NES-like palette. Press Start 2P. Chunky blocky UI:
+   3-4px hard solid borders, hard offset drop-shadows, no rounded
+   corners, no gradients, no anti-aliasing. Buttons invert on hover.
+   Everything pixel-perfect.
+   =================================================================== */
+
+/* ---------------------------------------------------------------- */
+/* Palette + global tokens                                          */
+/* ---------------------------------------------------------------- */
+:root {
+  /* Accents (from the style guide) */
+  --c-mint:    #7ff9e0;   /* Fisherman's minty cyan */
+  --c-orange:  #ff9e2c;   /* penguin orange */
+  --c-blue:    #2b5fff;   /* villain Windows-blue */
+  --c-bg:      #1a1d2e;   /* dark slate background */
+
+  /* Extended NES-like support colours */
+  --c-bg-2:    #12141f;   /* deeper slate (panels/insets) */
+  --c-panel:   #232844;   /* raised panel surface */
+  --c-panel-2: #2e3457;   /* lighter panel / row */
+  --c-ink:     #0b0c14;   /* near-black ink (shadows/borders) */
+  --c-white:   #f4f7ff;   /* off-white text */
+  --c-grey:    #8a90b8;   /* muted text */
+  --c-grey-d:  #565c84;   /* dim/disabled */
+  --c-red:     #ff4d5e;   /* danger / lose */
+  --c-green:   #5dff8f;   /* ready / win */
+  --c-yellow:  #ffe34d;   /* highlight */
+
+  /* Structural sizes */
+  --border:    4px;
+  --border-sm: 3px;
+  --shadow:    6px;
+  --shadow-sm: 4px;
+
+  /* Type scale (Press Start 2P is large per glyph) */
+  --fs-xs:  8px;
+  --fs-sm:  10px;
+  --fs-md:  12px;
+  --fs-lg:  16px;
+  --fs-xl:  22px;
+}
+
+/* ---------------------------------------------------------------- */
+/* Reset + base                                                     */
+/* ---------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: 'Press Start 2P', 'Courier New', monospace;
+  background-color: var(--c-bg);
+  /* Subtle pixel checker so the void isn't flat. Pure CSS, no images. */
+  background-image:
+    linear-gradient(45deg, var(--c-bg-2) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--c-bg-2) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--c-bg-2) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--c-bg-2) 75%);
+  background-size: 32px 32px;
+  background-position: 0 0, 0 16px, 16px -16px, -16px 0;
+  color: var(--c-white);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: none;
+  -moz-osx-font-smoothing: unset;
+}
+
+/* Everything pixelated: canvases + any future bitmaps. */
+canvas,
+img {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* No anti-aliasing-friendly defaults: kill rounded corners app-wide. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  border-radius: 0;
+  outline: none;
+}
+
+a {
+  color: var(--c-mint);
+  text-decoration: none;
+}
+
+::selection {
+  background: var(--c-mint);
+  color: var(--c-ink);
+}
+
+/* Chunky pixel scrollbars where supported. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-mint) var(--c-bg-2);
+}
+*::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+*::-webkit-scrollbar-track {
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--c-mint);
+  border: var(--border-sm) solid var(--c-ink);
+}
+
+/* ---------------------------------------------------------------- */
+/* Screen manager: only .active is shown                            */
+/* ---------------------------------------------------------------- */
+.screen {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+.screen.active {
+  display: block;
+}
+
+#screen-game.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--c-ink);
+}
+
+/* ---------------------------------------------------------------- */
+/* Headings + text helpers                                          */
+/* ---------------------------------------------------------------- */
+h1, h2, h3 {
+  font-weight: normal;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.text-mint   { color: var(--c-mint); }
+.text-orange { color: var(--c-orange); }
+.text-blue   { color: var(--c-blue); }
+.text-grey   { color: var(--c-grey); }
+.text-red    { color: var(--c-red); }
+.text-green  { color: var(--c-green); }
+
+.hidden,
+[hidden] {
+  display: none !important;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- */
+/* Buttons — chunky, hard shadow, INVERT on hover                   */
+/* ---------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 18px;
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--c-white);
+  background: var(--c-panel);
+  border: var(--border) solid var(--c-ink);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: none; /* no smoothing — instant 8-bit feedback */
+  image-rendering: pixelated;
+}
+
+/* INVERT on hover: swap fg/bg, keep the chunky frame. */
+.btn:hover,
+.btn:focus-visible {
+  color: var(--c-bg);
+  background: var(--c-white);
+}
+
+/* Pressed: sink into the drop-shadow for a tactile click. */
+.btn:active {
+  transform: translate(var(--shadow-sm), var(--shadow-sm));
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+}
+
+.btn:disabled,
+.btn[disabled] {
+  background: var(--c-bg-2);
+  color: var(--c-grey-d);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn:disabled:hover {
+  color: var(--c-grey-d);
+  background: var(--c-bg-2);
+}
+
+/* Primary = minty Fisherman's call-to-action. */
+.btn-primary {
+  background: var(--c-mint);
+  color: var(--c-ink);
+}
+.btn-primary:hover,
+.btn-primary:focus-visible {
+  background: var(--c-ink);
+  color: var(--c-mint);
+}
+
+/* Accent = penguin orange. */
+.btn-accent {
+  background: var(--c-orange);
+  color: var(--c-ink);
+}
+.btn-accent:hover,
+.btn-accent:focus-visible {
+  background: var(--c-ink);
+  color: var(--c-orange);
+}
+
+/* Danger = ring-out red. */
+.btn-danger {
+  background: var(--c-red);
+  color: var(--c-ink);
+}
+.btn-danger:hover,
+.btn-danger:focus-visible {
+  background: var(--c-ink);
+  color: var(--c-red);
+}
+
+/* Active/selected toggle (ready, mode pick, tabs). */
+.btn-on,
+.btn.is-active {
+  background: var(--c-green);
+  color: var(--c-ink);
+}
+.btn-on:hover,
+.btn.is-active:hover {
+  background: var(--c-ink);
+  color: var(--c-green);
+}
+
+.btn-small {
+  padding: 8px 12px;
+  font-size: var(--fs-xs);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+}
+.btn-small:active {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+}
+
+.btn-block {
+  display: flex;
+  width: 100%;
+}
+
+/* ---------------------------------------------------------------- */
+/* Inputs / selects — inset blocky fields                           */
+/* ---------------------------------------------------------------- */
+.field-label {
+  display: block;
+  margin: 14px 0 8px;
+  font-size: var(--fs-xs);
+  color: var(--c-mint);
+  text-transform: uppercase;
+}
+.field-label .field-hint,
+.field-hint {
+  color: var(--c-grey);
+}
+
+.text-field,
+.select-field {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  font-size: var(--fs-sm);
+  color: var(--c-white);
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: inset 3px 3px 0 0 rgba(0, 0, 0, 0.45);
+  text-transform: uppercase;
+}
+
+.text-field::placeholder {
+  color: var(--c-grey-d);
+}
+
+.text-field:focus,
+.select-field:focus {
+  border-color: var(--c-mint);
+  background: var(--c-bg);
+  box-shadow: inset 3px 3px 0 0 rgba(0, 0, 0, 0.45), 0 0 0 3px var(--c-mint);
+}
+
+/* Native select arrow replaced by a blocky pixel triangle. */
+.select-field {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--c-mint) 50%),
+    linear-gradient(135deg, var(--c-mint) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% - 2px),
+    calc(100% - 12px) calc(50% - 2px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+  padding-right: 36px;
+}
+.select-field option {
+  background: var(--c-bg-2);
+  color: var(--c-white);
+}
+
+.form-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-size: var(--fs-xs);
+  color: var(--c-ink);
+  background: var(--c-red);
+  border: var(--border-sm) solid var(--c-ink);
+  line-height: 1.5;
+}
+
+.form-note {
+  margin-top: 12px;
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  line-height: 1.7;
+}
+
+/* ---------------------------------------------------------------- */
+/* Generic panel surface                                            */
+/* ---------------------------------------------------------------- */
+.panel {
+  background: var(--c-panel);
+  border: var(--border) solid var(--c-ink);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+  padding: 20px;
+}
+
+.panel-heading {
+  font-size: var(--fs-sm);
+  color: var(--c-orange);
+  text-transform: uppercase;
+}
+
+/* ============================================================= */
+/* MENU SCREEN                                                   */
+/* ============================================================= */
+.menu-wrap {
+  position: relative;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 28px 18px 64px;
+  min-height: 100%;
+}
+
+.menu-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+/* Stacked, multi-colour 8-bit title with hard offset shadow. */
+.game-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
+  margin-bottom: 10px;
+}
+.title-line {
+  font-size: var(--fs-xl);
+  text-shadow:
+    4px 4px 0 var(--c-ink),
+    4px 4px 0 var(--c-ink);
+  letter-spacing: 2px;
+}
+.title-tux    { color: var(--c-white); }
+.title-smash  { color: var(--c-orange); }
+.title-royale { color: var(--c-mint); }
+
+.game-subtitle,
+.game-tagline {
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  text-transform: uppercase;
+}
+
+.menu-panel {
+  background: var(--c-panel);
+  border: var(--border) solid var(--c-ink);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+  padding: 20px;
+  margin-bottom: 22px;
+}
+
+.menu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 18px;
+}
+.menu-actions .btn {
+  flex: 1 1 0;
+  min-width: 140px;
+}
+
+.nickname-field {
+  font-size: var(--fs-md);
+  text-align: center;
+  letter-spacing: 2px;
+}
+
+/* ---- Top-right corner: SUBTLE sign-in + language switcher ------ */
+.menu-corner {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 8px;
+  z-index: 20;
+}
+
+/* Subtle, NOT flashy: small ghost button, faint border, no big shadow. */
+.corner-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  background: transparent;
+  border: var(--border-sm) solid var(--c-grey-d);
+  box-shadow: 3px 3px 0 0 var(--c-ink);
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.corner-btn:hover,
+.corner-btn:focus-visible {
+  color: var(--c-bg);
+  background: var(--c-grey);
+  border-color: var(--c-ink);
+}
+.corner-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 0 var(--c-ink);
+}
+
+.corner-btn .corner-icon {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+}
+.corner-btn .corner-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* When signed-in, the sign-in pill turns minty to confirm state. */
+.corner-btn.is-auth {
+  color: var(--c-mint);
+  border-color: var(--c-mint);
+}
+.corner-btn.is-auth:hover {
+  color: var(--c-bg);
+  background: var(--c-mint);
+}
+
+/* ---- Room list / lobby bar ------------------------------------ */
+.lobby {
+  margin-top: 22px;
+}
+.lobby-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.lobby-bar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.room-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.room-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+  cursor: pointer;
+}
+.room-row:hover {
+  background: var(--c-panel-2);
+  border-color: var(--c-mint);
+}
+.room-row:active {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+}
+
+.room-name {
+  flex: 1 1 auto;
+  font-size: var(--fs-sm);
+  color: var(--c-white);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Mode tag pill on each room row. */
+.room-mode {
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+  border: var(--border-sm) solid var(--c-ink);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.room-mode.mode-smash {
+  background: var(--c-orange);
+  color: var(--c-ink);
+}
+.room-mode.mode-royale {
+  background: var(--c-mint);
+  color: var(--c-ink);
+}
+
+.room-count {
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  white-space: nowrap;
+}
+
+.room-lock {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  color: var(--c-yellow);
+}
+.room-lock svg {
+  width: 100%;
+  height: 100%;
+}
+
+.room-state {
+  font-size: var(--fs-xs);
+  color: var(--c-grey-d);
+  text-transform: uppercase;
+}
+.room-state.is-playing {
+  color: var(--c-red);
+}
+
+.room-empty {
+  list-style: none;
+  padding: 24px 14px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  background: var(--c-bg-2);
+  border: var(--border-sm) dashed var(--c-grey-d);
+}
+
+/* ---- Mode selector (in create-room) --------------------------- */
+.mode-select {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  text-align: left;
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+  cursor: pointer;
+}
+.mode-card:hover {
+  border-color: var(--c-mint);
+}
+.mode-card.is-active {
+  background: var(--c-panel-2);
+  border-color: var(--c-mint);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-mint);
+}
+.mode-card .mode-title {
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+}
+.mode-card.mode-smash .mode-title  { color: var(--c-orange); }
+.mode-card.mode-royale .mode-title { color: var(--c-mint); }
+.mode-card .mode-desc {
+  font-size: var(--fs-xs);
+  color: var(--c-grey);
+  line-height: 1.7;
+}
+
+/* ============================================================= */
+/* IN-ROOM LOBBY: player list                                    */
+/* ============================================================= */
+.player-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+}
+.player-row.is-self {
+  border-color: var(--c-mint);
+}
+/* Each player preview is a tiny canvas drawn by Sprites. */
+.player-row canvas,
+.player-avatar {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  background: var(--c-ink);
+  border: var(--border-sm) solid var(--c-ink);
+  image-rendering: pixelated;
+}
+.player-name {
+  flex: 1 1 auto;
+  font-size: var(--fs-sm);
+  color: var(--c-white);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.player-host {
+  font-size: var(--fs-xs);
+  color: var(--c-yellow);
+  text-transform: uppercase;
+}
+.player-ready {
+  font-size: var(--fs-xs);
+  padding: 4px 8px;
+  border: var(--border-sm) solid var(--c-ink);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.player-ready.is-ready {
+  background: var(--c-green);
+  color: var(--c-ink);
+}
+.player-ready.not-ready {
+  background: var(--c-bg);
+  color: var(--c-grey);
+}
+
+/* ============================================================= */
+/* EDITOR SCREEN                                                 */
+/* ============================================================= */
+.editor-wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 18px 64px;
+  min-height: 100%;
+}
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.screen-title {
+  font-size: var(--fs-lg);
+  color: var(--c-mint);
+  text-shadow: 3px 3px 0 var(--c-ink);
+}
+
+.editor-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 22px;
+  align-items: start;
+}
+
+/* Live preview column. */
+.editor-preview {
+  position: sticky;
+  top: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 18px;
+  background: var(--c-panel);
+  border: var(--border) solid var(--c-ink);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+}
+#editor-preview-canvas,
+.editor-preview canvas {
+  width: 192px;
+  height: 192px;
+  background: var(--c-bg-2);
+  border: var(--border) solid var(--c-ink);
+  image-rendering: pixelated;
+}
+
+/* Body-type toggle (TUX <-> HUMANOID). */
+.bodytype-toggle {
+  display: flex;
+  gap: 0;
+  width: 100%;
+}
+.bodytype-toggle .btn {
+  flex: 1 1 0;
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+}
+
+/* Controls column. */
+.editor-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.part-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+}
+.part-label {
+  flex: 0 0 90px;
+  font-size: var(--fs-xs);
+  color: var(--c-mint);
+  text-transform: uppercase;
+}
+.part-arrow {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: var(--fs-md);
+  background: var(--c-panel);
+  border: var(--border-sm) solid var(--c-ink);
+  color: var(--c-white);
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+  cursor: pointer;
+}
+.part-arrow:hover {
+  background: var(--c-white);
+  color: var(--c-bg);
+}
+.part-arrow:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.part-value {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--c-white);
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Colour swatch grid for body/belly/feet. */
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+.swatch {
+  width: 22px;
+  height: 22px;
+  border: var(--border-sm) solid var(--c-ink);
+  cursor: pointer;
+  image-rendering: pixelated;
+}
+.swatch.is-active {
+  border-color: var(--c-mint);
+  box-shadow: 0 0 0 2px var(--c-mint);
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+.editor-actions .btn {
+  flex: 1 1 0;
+  min-width: 120px;
+}
+
+.editor-saved {
+  font-size: var(--fs-xs);
+  color: var(--c-green);
+  text-transform: uppercase;
+}
+
+/* ============================================================= */
+/* GAME SCREEN                                                   */
+/* ============================================================= */
+#game-canvas {
+  display: block;
+  width: 960px;
+  height: 600px;
+  max-width: 100vw;
+  max-height: 100vh;
+  background: var(--c-bg);
+  border: var(--border) solid var(--c-ink);
+  image-rendering: pixelated;
+}
+
+/* HUD overlay (render.js paints HUD on-canvas, but text helpers
+   are available if menu/game.js add DOM overlays for results). */
+.hud {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+  font-size: var(--fs-xs);
+}
+.hud-block {
+  background: rgba(11, 12, 20, 0.8);
+  border: var(--border-sm) solid var(--c-ink);
+  padding: 8px 10px;
+  color: var(--c-mint);
+}
+
+/* Game-over banner (game.js may inject this on top of the canvas). */
+.gameover-banner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  background: rgba(11, 12, 20, 0.86);
+  text-align: center;
+  z-index: 30;
+}
+.gameover-title {
+  font-size: var(--fs-xl);
+  text-shadow: 4px 4px 0 var(--c-ink);
+}
+.gameover-title.win  { color: var(--c-green); }
+.gameover-title.lose { color: var(--c-red); }
+.gameover-sub {
+  font-size: var(--fs-sm);
+  color: var(--c-white);
+}
+
+/* ============================================================= */
+/* VIM COMMAND LINE (opened by input.js on "/")                  */
+/* Looks like a vim/terminal status line bottom of the screen.   */
+/* ============================================================= */
+.vim-line {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  background: #0a0c12;
+  border-top: var(--border) solid var(--c-mint);
+  z-index: 40;
+  font-size: var(--fs-sm);
+}
+.vim-line .vim-prompt {
+  color: var(--c-mint);
+}
+.vim-line .vim-input {
+  flex: 1 1 auto;
+  padding: 4px 4px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--c-green);
+  text-transform: none;
+  caret-color: var(--c-green);
+}
+.vim-line .vim-input:focus {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+/* Solid blocky terminal caret hint. */
+.vim-line .vim-hint {
+  font-size: var(--fs-xs);
+  color: var(--c-grey-d);
+}
+
+/* ============================================================= */
+/* MODALS (account + create-room) injected into #modal-root      */
+/* ============================================================= */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(11, 12, 20, 0.82);
+  z-index: 1000;
+}
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal {
+  width: 100%;
+  max-width: 440px;
+  background: var(--c-panel);
+  border: var(--border) solid var(--c-ink);
+  box-shadow: var(--shadow) var(--shadow) 0 0 var(--c-ink);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--c-bg-2);
+  border-bottom: var(--border) solid var(--c-ink);
+}
+.modal-title {
+  font-size: var(--fs-md);
+  color: var(--c-mint);
+}
+.modal-close {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: var(--fs-md);
+  color: var(--c-white);
+  background: var(--c-red);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+  cursor: pointer;
+  line-height: 1;
+}
+.modal-close:hover {
+  background: var(--c-ink);
+  color: var(--c-red);
+}
+.modal-close:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.modal-body {
+  padding: 16px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 14px 16px;
+  border-top: var(--border) solid var(--c-ink);
+}
+
+/* Tabs (login / register) inside the account modal. */
+.tab-row {
+  display: flex;
+  gap: 0;
+  margin-bottom: 6px;
+}
+.tab-btn {
+  flex: 1 1 0;
+  padding: 10px;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  color: var(--c-grey);
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  cursor: pointer;
+}
+.tab-btn.is-active,
+.tab-btn.active {
+  color: var(--c-ink);
+  background: var(--c-mint);
+}
+.tab-btn:not(.is-active):hover {
+  color: var(--c-white);
+  background: var(--c-panel-2);
+}
+
+.profile-line {
+  font-size: var(--fs-sm);
+  color: var(--c-white);
+}
+.profile-line strong {
+  color: var(--c-mint);
+}
+
+/* ============================================================= */
+/* LANGUAGE POPUP (first-visit + on-demand) in #modal-root       */
+/* ============================================================= */
+.lang-popup .modal {
+  max-width: 380px;
+}
+.lang-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lang-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px;
+  font-size: var(--fs-sm);
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--c-white);
+  background: var(--c-bg-2);
+  border: var(--border-sm) solid var(--c-ink);
+  box-shadow: var(--shadow-sm) var(--shadow-sm) 0 0 var(--c-ink);
+  cursor: pointer;
+}
+.lang-option:hover {
+  background: var(--c-white);
+  color: var(--c-bg);
+}
+.lang-option:active {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 0 var(--c-ink);
+}
+/* English highlighted as default. */
+.lang-option.is-default {
+  border-color: var(--c-mint);
+}
+.lang-option.is-current {
+  background: var(--c-mint);
+  color: var(--c-ink);
+}
+.lang-code {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  font-size: var(--fs-xs);
+  color: var(--c-ink);
+  background: var(--c-orange);
+  border: var(--border-sm) solid var(--c-ink);
+}
+
+/* ============================================================= */
+/* ACTIVATE WINDOWS GAG OVERLAY                                  */
+/* Fixed, full-viewport, max z-index, ignores pointer events.    */
+/* Authentic translucent light-grey watermark bottom-right.      */
+/* ============================================================= */
+#gag-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483647; /* max */
+  display: none;
+}
+#gag-overlay.is-active {
+  display: block;
+}
+
+/* While active: desaturate + dim the whole page behind the overlay.
+   gag.js toggles this class on <body>. */
+body.gag-active {
+  filter: grayscale(0.85) brightness(0.78) contrast(0.95);
+}
+
+/* A faint tint layer reinforcing the washed-out "unactivated" look. */
+.gag-tint {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 24, 34, 0.18);
+  pointer-events: none;
+}
+
+/* The watermark itself, bottom-right, authentic light-grey + translucent. */
+.gag-watermark {
+  position: absolute;
+  right: 56px;
+  bottom: 48px;
+  text-align: left;
+  pointer-events: none;
+  /* The real watermark uses a soft system font, NOT the pixel font. */
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, Arial, sans-serif;
+  text-transform: none;
+  letter-spacing: 0;
+  color: rgba(255, 255, 255, 0.42);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  user-select: none;
+  -webkit-user-select: none;
+  will-change: transform, opacity;
+}
+.gag-watermark .gag-line1 {
+  font-size: 30px;
+  line-height: 1.25;
+  font-weight: 400;
+}
+.gag-watermark .gag-line2 {
+  font-size: 16px;
+  line-height: 1.4;
+  font-weight: 400;
+}
+
+/* Drifting duplicate watermarks are dimmer. */
+.gag-watermark.gag-drift {
+  opacity: 0.5;
+}
+
+/* JITTER + flicker: gag.js can also nudge inline transform, but a
+   keyframe gives a baseline annoyance even without JS ticking. */
+@keyframes gag-jitter {
+  0%   { transform: translate(0, 0); }
+  20%  { transform: translate(2px, -1px); }
+  40%  { transform: translate(-1px, 2px); }
+  60%  { transform: translate(1px, 1px); }
+  80%  { transform: translate(-2px, 0); }
+  100% { transform: translate(0, 0); }
+}
+@keyframes gag-flicker {
+  0%, 100% { opacity: 0.42; }
+  47%      { opacity: 0.30; }
+  53%      { opacity: 0.50; }
+}
+.gag-watermark.gag-animate {
+  animation:
+    gag-jitter 1.7s steps(5, end) infinite,
+    gag-flicker 2.3s steps(2, end) infinite;
+}
+
+/* ============================================================= */
+/* MENU FOOTER (tribute line)                                    */
+/* ============================================================= */
+.menu-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px 18px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--c-grey-d);
+  pointer-events: none;
+}
+
+/* ============================================================= */
+/* RESPONSIVE — keep it chunky, just reflow on small screens     */
+/* ============================================================= */
+@media (max-width: 640px) {
+  :root {
+    --fs-xl: 18px;
+    --fs-lg: 14px;
+  }
+  .editor-layout {
+    grid-template-columns: 1fr;
+  }
+  .editor-preview {
+    position: static;
+  }
+  .mode-select {
+    grid-template-columns: 1fr;
+  }
+  .menu-actions .btn {
+    min-width: 0;
+  }
+  .gag-watermark {
+    right: 24px;
+    bottom: 28px;
+  }
+  .gag-watermark .gag-line1 { font-size: 22px; }
+  .gag-watermark .gag-line2 { font-size: 13px; }
+}
+
+@media (max-width: 420px) {
+  .menu-corner {
+    position: static;
+    justify-content: flex-end;
+    margin-bottom: 12px;
+  }
+}
+
+/* Respect reduced-motion: stop the gag animation churn (it still
+   shows + dims; it just won't seizure-jitter). */
+@media (prefers-reduced-motion: reduce) {
+  .gag-watermark.gag-animate {
+    animation: gag-flicker 3s steps(2, end) infinite;
+  }
+}
