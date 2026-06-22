@@ -57,6 +57,116 @@ const Game = (function () {
   var prevAtk = false, prevThr = false, prevDash = false;
   var prevLocalDamage = 0, prevLocalStocks = 99, prevLocalAlive = true, lastPickupCount = -1;
 
+  // ---- client-side prediction (local fighter) ---------------------------
+  // Simulate the LOCAL player immediately from input (no network wait) and
+  // gently reconcile toward the authoritative server position each snapshot.
+  // Physics constants MUST mirror clobi/internal/game/game.go.
+  var predict = null;
+  var PHYS = {
+    playerR: 22, baseSpeed: 360, friction: 0.86,
+    sGrav: 2000, sMove: 360, sJump: 640, sMaxJumps: 2,
+    sGroundFric: 0.78, sAirFric: 0.985, sFastFall: 1100, sMaxFall: 1150, sAirCtrl: 0.72
+  };
+  var PLATS = [
+    { x0: 300, x1: 700, y: 640 }, { x0: 215, x1: 375, y: 500 },
+    { x0: 625, x1: 785, y: 500 }, { x0: 430, x1: 570, y: 375 }
+  ];
+  function clampn(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+  function resetPredict() {
+    predict = { x: 0, y: 0, vx: 0, vy: 0, grounded: false, jumpsLeft: 2, jumpWasDown: false, facing: 1, active: false };
+  }
+
+  function predictStep(dt, mode, st) {
+    if (!predict || !predict.active) return;
+    var p = predict;
+    if (mode === 'smash') {
+      var lvx = (st.dx || 0) * PHYS.sMove * (p.grounded ? 1 : PHYS.sAirCtrl);
+      if (st.jump && !p.jumpWasDown && p.jumpsLeft > 0) { p.vy = -PHYS.sJump; p.jumpsLeft--; p.grounded = false; }
+      p.jumpWasDown = !!st.jump;
+      p.vy += PHYS.sGrav * dt;
+      if ((st.dy || 0) > 0.4 && p.vy > -60) p.vy += PHYS.sFastFall * dt;
+      if (p.vy > PHYS.sMaxFall) p.vy = PHYS.sMaxFall;
+      var oldY = p.y;
+      p.x += (lvx + p.vx) * dt;
+      p.y += p.vy * dt;
+      p.grounded = false;
+      if (p.vy >= 0) {
+        var fo = oldY + PHYS.playerR, fn = p.y + PHYS.playerR;
+        for (var i = 0; i < PLATS.length; i++) {
+          var pf = PLATS[i];
+          if (p.x >= pf.x0 && p.x <= pf.x1 && fo <= pf.y + 4 && fn >= pf.y) {
+            p.y = pf.y - PHYS.playerR; p.vy = 0; p.grounded = true; p.jumpsLeft = PHYS.sMaxJumps; break;
+          }
+        }
+      }
+      p.vx *= (p.grounded ? PHYS.sGroundFric : PHYS.sAirFric);
+      if (Math.abs(p.vx) < 3) p.vx = 0;
+    } else {
+      var mx = st.dx || 0, my = st.dy || 0;
+      var mag = Math.hypot(mx, my); if (mag > 1) { mx /= mag; my /= mag; }
+      p.x += (mx * PHYS.baseSpeed + p.vx) * dt;
+      p.y += (my * PHYS.baseSpeed + p.vy) * dt;
+      p.vx *= PHYS.friction; p.vy *= PHYS.friction;
+      if (Math.hypot(p.vx, p.vy) < 4) { p.vx = 0; p.vy = 0; }
+      predictResolveObstacles();
+      if (townW) {
+        p.x = clampn(p.x, 40 + PHYS.playerR, townW - 40 - PHYS.playerR);
+        p.y = clampn(p.y, 40 + PHYS.playerR, townH - 40 - PHYS.playerR);
+      }
+    }
+    if ((st.dx || 0) > 0.1) p.facing = 1; else if ((st.dx || 0) < -0.1) p.facing = -1;
+  }
+
+  function predictResolveObstacles() {
+    if (!townObstacles) return;
+    var p = predict, rad = PHYS.playerR;
+    for (var i = 0; i < townObstacles.length; i++) {
+      var o = townObstacles[i];
+      var left = o.x - rad, right = o.x + o.w + rad, top = o.y - rad, bot = o.y + o.h + rad;
+      if (p.x <= left || p.x >= right || p.y <= top || p.y >= bot) continue;
+      var dl = p.x - left, dr = right - p.x, du = p.y - top, dd = bot - p.y;
+      var mn = Math.min(dl, dr, du, dd);
+      if (mn === dl) { p.x = left; if (p.vx > 0) p.vx = 0; }
+      else if (mn === dr) { p.x = right; if (p.vx < 0) p.vx = 0; }
+      else if (mn === du) { p.y = top; if (p.vy > 0) p.vy = 0; }
+      else { p.y = bot; if (p.vy < 0) p.vy = 0; }
+    }
+  }
+
+  // Pull the prediction toward the authoritative server position. Big errors
+  // (knockback / respawn / first sync) snap; small ones correct gently.
+  function reconcilePredict(snap) {
+    if (!predict) resetPredict();
+    var id = resolveLocalPlayerId(snap);
+    if (!id || !Array.isArray(snap.players)) return;
+    var me = null;
+    for (var i = 0; i < snap.players.length; i++) { if (snap.players[i].id === id) { me = snap.players[i]; break; } }
+    if (!me) return;
+    var ex = me.x - predict.x, ey = me.y - predict.y;
+    var err = Math.hypot(ex, ey);
+    if (!predict.active || err > 140 || !me.alive) {
+      predict.x = me.x; predict.y = me.y; predict.vx = 0; predict.vy = 0;
+      predict.facing = me.facing || predict.facing; predict.active = true;
+      predict.grounded = false; predict.jumpsLeft = PHYS.sMaxJumps;
+    } else {
+      var k = (err > 50) ? 0.35 : 0.12;
+      predict.x += ex * k; predict.y += ey * k;
+    }
+  }
+
+  // Mouse aim direction relative to the local fighter's screen position.
+  function computeAim() {
+    if (!predict || !predict.active || !window.Input || !Input.getMouse ||
+        !window.Render || !Render.worldToScreen) return { x: 0, y: 0 };
+    var m = Input.getMouse();
+    if (!m || !m.moved) return { x: 0, y: 0 };
+    var sp = Render.worldToScreen(predict.x, predict.y);
+    var ax = m.x - sp.x, ay = m.y - sp.y;
+    var mag = Math.hypot(ax, ay);
+    if (mag < 10) return { x: 0, y: 0 };
+    return { x: ax / mag, y: ay / mag };
+  }
+
   // Registered Net handlers, kept so we can detach them on stop().
   var netHandlers = []; // [{type, handler}]
 
@@ -130,6 +240,23 @@ const Game = (function () {
     s.w = townW || s.w || 0;
     s.h = townH || s.h || 0;
     s.obstacles = townObstacles || s.obstacles || null;
+    // Render the local fighter at its predicted position (no input lag).
+    if (predict && predict.active && localPlayerId && Array.isArray(s.players)) {
+      var arr = s.players.slice();
+      for (var k = 0; k < arr.length; k++) {
+        if (arr[k].id === localPlayerId) {
+          var lp = arr[k];
+          arr[k] = {
+            id: lp.id, nickname: lp.nickname, character: lp.character,
+            x: predict.x, y: predict.y, hp: lp.hp, damage: lp.damage,
+            facing: predict.facing, alive: lp.alive, boost: lp.boost,
+            stocks: lp.stocks, windowsUntil: lp.windowsUntil
+          };
+          break;
+        }
+      }
+      s.players = arr;
+    }
     return s;
   }
 
@@ -252,6 +379,7 @@ const Game = (function () {
     }
 
     resolveLocalPlayerId(payload);
+    reconcilePredict(payload);
     maybeTriggerGag(payload);
     audioFromSnapshot(payload);
   }
@@ -405,6 +533,11 @@ const Game = (function () {
     }
     prevAtk = !!state.attack; prevThr = !!state.throw; prevDash = !!state.dash;
 
+    // Client-side prediction (instant local movement) + mouse aim.
+    var mode = (lastSnap && lastSnap.mode) || 'smash';
+    predictStep(1 / 30, mode, state);
+    var aim = computeAim();
+
     inputSeq += 1;
 
     // Flat InputMsg shape — matches Go protocol.InputMsg json tags exactly.
@@ -416,6 +549,8 @@ const Game = (function () {
       throw: !!state.throw,
       dash: !!state.dash,
       jump: !!state.jump,
+      aimx: aim.x,
+      aimy: aim.y,
       vim: vim || '',
     };
 
@@ -486,6 +621,7 @@ const Game = (function () {
     townH = 0;
     prevAtk = prevThr = prevDash = false;
     prevLocalDamage = 0; prevLocalStocks = 99; prevLocalAlive = true; lastPickupCount = -1;
+    resetPredict();
     if (window.Sound) window.Sound.music('game');
 
     // Resolve our id eagerly if App already knows it.

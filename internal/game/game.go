@@ -55,7 +55,7 @@ const (
 // Player / movement tuning.
 const (
 	playerRadius   = 22.0
-	baseSpeed      = 165.0 // units per second
+	baseSpeed      = 360.0 // royale top-down speed (scaled up for the big town map)
 	boostSpeedMul  = 1.45
 	friction       = 0.86 // per-tick velocity damping applied to knockback
 	maxStartLives  = 3
@@ -89,7 +89,7 @@ const (
 // lost stock.
 const (
 	smashGravity    = 2000.0
-	smashMoveSpeed  = 300.0
+	smashMoveSpeed  = 360.0
 	smashJumpVel    = 640.0
 	smashMaxJumps   = 2
 	smashGroundFric = 0.78
@@ -779,11 +779,15 @@ func (m *Match) doMelee(att *player) {
 // doThrow spawns a LibreOffice frisbee projectile in the attacker's facing.
 func (m *Match) doThrow(att *player) {
 	dirx, diry := float64(att.facing), 0.0
-	// Aim slightly toward current movement intent if present.
-	if att.in.Dx != 0 || att.in.Dy != 0 {
-		if mag := math.Hypot(att.in.Dx, att.in.Dy); mag > 0 {
-			dirx = att.in.Dx / mag
-			diry = att.in.Dy / mag
+	in := att.in
+	// Prefer the mouse aim direction; otherwise the movement intent.
+	if in.Aimx != 0 || in.Aimy != 0 {
+		if mag := math.Hypot(in.Aimx, in.Aimy); mag > 0 {
+			dirx, diry = in.Aimx/mag, in.Aimy/mag
+		}
+	} else if in.Dx != 0 || in.Dy != 0 {
+		if mag := math.Hypot(in.Dx, in.Dy); mag > 0 {
+			dirx, diry = in.Dx/mag, in.Dy/mag
 		}
 	}
 	m.projectiles = append(m.projectiles, &projectile{

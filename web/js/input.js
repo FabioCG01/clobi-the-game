@@ -37,6 +37,10 @@ const Input = (function () {
     return code === 'Space' || code === 'KeyW' || code === 'ArrowUp';
   }
 
+  // Mouse: aim position (viewport px) + buttons (left = attack, right = throw).
+  var mouseX = 0, mouseY = 0, mouseMoved = false;
+  var mAttack = false, mThrow = false;
+
   var initialized = false;
 
   // ---- vim command overlay state ---------------------------------------
@@ -79,6 +83,7 @@ const Input = (function () {
     held.up = held.down = held.left = held.right = false;
     held.attack = held.throw = held.dash = false;
     jumpKeyHeld = false;
+    mAttack = mThrow = false;
   }
 
   // ---- vim command overlay ---------------------------------------------
@@ -308,6 +313,23 @@ const Input = (function () {
     btn.addEventListener('mousedown', go);
   }
 
+  // Mouse controls: aim by moving the mouse; left-click = attack, right = throw.
+  function setupMouse() {
+    var cv = document.getElementById('game-canvas');
+    if (!cv) return;
+    cv.addEventListener('mousemove', function (e) { mouseX = e.clientX; mouseY = e.clientY; mouseMoved = true; });
+    cv.addEventListener('mousedown', function (e) {
+      mouseX = e.clientX; mouseY = e.clientY; mouseMoved = true;
+      if (e.button === 0) { mAttack = true; }
+      else if (e.button === 2) { mThrow = true; e.preventDefault(); }
+    });
+    window.addEventListener('mouseup', function (e) {
+      if (e.button === 0) mAttack = false;
+      else if (e.button === 2) mThrow = false;
+    });
+    cv.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  }
+
   function tcBtn(label, cls) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -397,6 +419,7 @@ const Input = (function () {
     // Build the overlay once the DOM is ready.
     function buildOverlays() {
       buildVimOverlay();
+      setupMouse();
       if (IS_TOUCH) {
         document.body.classList.add('touch');
         buildTouchControls();
@@ -432,11 +455,15 @@ const Input = (function () {
     return {
       dx: dx,
       dy: dy,
-      attack: held.attack,
-      throw: held.throw,
+      attack: held.attack || mAttack,
+      throw: held.throw || mThrow,
       dash: held.dash,
       jump: jump,
     };
+  }
+
+  function getMouse() {
+    return { x: mouseX, y: mouseY, moved: mouseMoved };
   }
 
   function consumeVimCommand() {
@@ -461,6 +488,7 @@ const Input = (function () {
     getState: getState,
     consumeVimCommand: consumeVimCommand,
     fireVim: fireVim,
+    getMouse: getMouse,
     isVimOpen: isVimOpen,
   };
 })();

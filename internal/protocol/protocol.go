@@ -99,7 +99,9 @@ type InputMsg struct {
 	Attack bool    `json:"attack"`
 	Throw  bool    `json:"throw"`
 	Dash   bool    `json:"dash"`
-	Jump   bool    `json:"jump"` // side-view Smash: rising-edge jump request
+	Jump   bool    `json:"jump"`  // side-view Smash: rising-edge jump request
+	Aimx   float64 `json:"aimx"`  // mouse aim direction (throws), 0 = none
+	Aimy   float64 `json:"aimy"`
 	Vim    string  `json:"vim"`
 }
 

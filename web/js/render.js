@@ -65,6 +65,8 @@ var Render = (function () {
   var ctx = null;
   var viewW = 0, viewH = 0; // CSS pixel size of the canvas
   var dpr = 1;
+  var ro = null;       // ResizeObserver on the canvas
+  var lastCam = null;  // last camera transform (for worldToScreen / mouse aim)
 
   // ---- setup ---------------------------------------------------------------
 
@@ -72,6 +74,15 @@ var Render = (function () {
     canvas = c;
     ctx = canvas.getContext('2d');
     window.addEventListener('resize', resize);
+    // Track the canvas box with a ResizeObserver (fires on show + resize) instead
+    // of measuring every frame, which forced a layout reflow each rAF (= jank).
+    if (window.ResizeObserver) {
+      try {
+        if (ro) ro.disconnect();
+        ro = new ResizeObserver(function () { resize(); });
+        ro.observe(canvas);
+      } catch (e) { /* ignore */ }
+    }
     resize();
   }
 
@@ -133,7 +144,6 @@ var Render = (function () {
 
   function drawFrame(state, localPlayerId) {
     if (!ctx) { return; }
-    maybeResize();
     var t = nowMs();
     var mode = (state && state.mode) || 'smash';
 
@@ -145,6 +155,7 @@ var Render = (function () {
     var players = state.players || [];
     var local = findById(players, localPlayerId);
     var cam = camera(mode, state, local);
+    lastCam = cam;
 
     if (mode === 'royale') {
       drawTownArena(cam, state, t);
@@ -835,9 +846,17 @@ var Render = (function () {
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
+  // worldToScreen maps a world point to canvas px using the last frame's camera
+  // (used by the input layer to compute mouse-aim relative to the local player).
+  function worldToScreen(x, y) {
+    if (!lastCam) { return { x: viewW / 2, y: viewH / 2 }; }
+    return { x: lastCam.ox + x * lastCam.s, y: lastCam.oy + y * lastCam.s };
+  }
+
   return {
     init: init,
-    drawFrame: drawFrame
+    drawFrame: drawFrame,
+    worldToScreen: worldToScreen
   };
 })();
 
