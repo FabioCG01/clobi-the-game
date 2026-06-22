@@ -1,17 +1,17 @@
 {
-  "_comment": "TUX SMASH ROYALE audio. Everything plays from a built-in WebAudio chiptune synth by default. To use YOUR OWN audio, drop a file in this folder (web/assets/audio/) and put its name in the matching \"file\" below (mp3/ogg/wav). Music entries (menuMusic/gameMusic) loop; the rest are one-shot SFX.",
+  "_comment": "TUX SMASH ROYALE audio. These WAV files are generated 8-bit sounds you can EDIT or REPLACE — drop your own file here (mp3/ogg/wav) and change the matching name below. Music entries (menuMusic/gameMusic) loop; the rest are one-shot SFX. Set a name to \"\" to fall back to the built-in WebAudio synth.",
   "sounds": {
-    "menuMusic": { "file": "" },
-    "gameMusic": { "file": "" },
-    "click":     { "file": "" },
-    "jump":      { "file": "" },
-    "attack":    { "file": "" },
-    "throw":     { "file": "" },
-    "dash":      { "file": "" },
-    "hit":       { "file": "" },
-    "ko":        { "file": "" },
-    "pickup":    { "file": "" },
-    "win":       { "file": "" },
-    "lose":      { "file": "" }
+    "menuMusic": { "file": "menuMusic.wav" },
+    "gameMusic": { "file": "gameMusic.wav" },
+    "click":     { "file": "click.wav" },
+    "jump":      { "file": "jump.wav" },
+    "attack":    { "file": "attack.wav" },
+    "throw":     { "file": "throw.wav" },
+    "dash":      { "file": "dash.wav" },
+    "hit":       { "file": "hit.wav" },
+    "ko":        { "file": "ko.wav" },
+    "pickup":    { "file": "pickup.wav" },
+    "win":       { "file": "win.wav" },
+    "lose":      { "file": "lose.wav" }
   }
 }
