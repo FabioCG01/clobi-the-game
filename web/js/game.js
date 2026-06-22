@@ -357,6 +357,7 @@ const Game = (function () {
       attack: !!state.attack,
       throw: !!state.throw,
       dash: !!state.dash,
+      jump: !!state.jump,
       vim: vim || '',
     };
 

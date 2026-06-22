@@ -24,6 +24,15 @@ var Render = (function () {
   var PLAT_L = 250, PLAT_T = 250, PLAT_R = 750, PLAT_B = 750;
   var ARENA_MARGIN = 40;
 
+  // Side-view Smash stage — MUST match smashPlatforms + blast bounds in game.go.
+  var SMASH_PLATFORMS = [
+    { x0: 300, x1: 700, y: 640 },
+    { x0: 215, x1: 375, y: 500 },
+    { x0: 625, x1: 785, y: 500 },
+    { x0: 430, x1: 570, y: 375 }
+  ];
+  var SMASH_BLAST = { l: 55, r: 945, t: 40, b: 965 };
+
   // 8-bit NES-like palette + theme accents from the style guide.
   var COL = {
     void: '#0c0d16',     // deep void around the smash platform
@@ -88,16 +97,18 @@ var Render = (function () {
     }
   }
 
-  // camera: uniform fit of the square world into the view, centered.
-  function camera() {
-    // Re-sync if the canvas backing store drifted from the view size.
-    if (canvas && (canvas.width !== viewW * dpr || canvas.height !== viewH * dpr)) {
-      resize();
+  // camera: uniform fit of a world window into the view, centered. Smash frames
+  // a tighter window around the stage so fighters read bigger; royale shows the
+  // whole arena.
+  function camera(mode) {
+    var vs, ccx, ccy;
+    if (mode === 'smash') {
+      vs = 860; ccx = 500; ccy = 510;
+    } else {
+      vs = WORLD; ccx = WORLD / 2; ccy = WORLD / 2;
     }
-    var s = Math.min(viewW, viewH) / WORLD;
-    var ox = (viewW - WORLD * s) / 2;
-    var oy = (viewH - WORLD * s) / 2;
-    return { s: s, ox: ox, oy: oy };
+    var s = Math.min(viewW, viewH) / vs;
+    return { s: s, ox: viewW / 2 - ccx * s, oy: viewH / 2 - ccy * s };
   }
 
   function wx(cam, x) { return cam.ox + x * cam.s; }
@@ -114,14 +125,14 @@ var Render = (function () {
     if (!ctx) { return; }
     maybeResize();
     var t = nowMs();
-    var cam = camera();
+    var mode = (state && state.mode) || 'smash';
+    var cam = camera(mode);
 
     // Clear to background.
     ctx.fillStyle = COL.bg;
     ctx.fillRect(0, 0, viewW, viewH);
 
     if (!state) { return; }
-    var mode = state.mode || 'smash';
     var players = state.players || [];
     var local = findById(players, localPlayerId);
 
@@ -144,44 +155,39 @@ var Render = (function () {
   // ---- SMASH arena: platform + void + danger edge --------------------------
 
   function drawSmashArena(cam, t) {
-    // Fill the whole view with void.
+    // Void fill behind the floating stage.
     ctx.fillStyle = COL.void;
     ctx.fillRect(0, 0, viewW, viewH);
 
-    var x0 = wx(cam, PLAT_L), y0 = wy(cam, PLAT_T);
-    var x1 = wx(cam, PLAT_R), y1 = wy(cam, PLAT_B);
-    var pw = x1 - x0, ph = y1 - y0;
+    // Pulsing blast-zone frame (KO bounds): dashed danger rectangle.
+    var pulse = 0.35 + 0.3 * (0.5 + 0.5 * Math.sin(t / 260));
+    var bl = wx(cam, SMASH_BLAST.l), br = wx(cam, SMASH_BLAST.r);
+    var bt = wy(cam, SMASH_BLAST.t), bb = wy(cam, SMASH_BLAST.b);
+    ctx.strokeStyle = withAlpha(COL.danger, pulse);
+    ctx.lineWidth = Math.max(2, 3 * cam.s);
+    var dash = Math.max(6, 12 * cam.s);
+    ctx.setLineDash([dash, dash]);
+    ctx.strokeRect(bl, bt, br - bl, bb - bt);
+    ctx.setLineDash([]);
 
-    // Drop "lip" shadow under the platform (8-bit hard offset).
-    var lip = Math.max(4, 8 * cam.s);
-    ctx.fillStyle = COL.platLip;
-    ctx.fillRect(Math.round(x0), Math.round(y0 + lip),
-      Math.round(pw), Math.round(ph));
-
-    // Platform body.
-    ctx.fillStyle = COL.platTop;
-    ctx.fillRect(Math.round(x0), Math.round(y0), Math.round(pw), Math.round(ph));
-
-    // Checker tiles for an 8-bit floor.
-    var cells = 10;
-    var cw = pw / cells, ch = ph / cells;
-    for (var gy = 0; gy < cells; gy++) {
-      for (var gx = 0; gx < cells; gx++) {
-        if (((gx + gy) & 1) === 0) { continue; }
-        ctx.fillStyle = COL.tileB;
-        ctx.fillRect(Math.round(x0 + gx * cw), Math.round(y0 + gy * ch),
-          Math.ceil(cw) + 1, Math.ceil(ch) + 1);
-      }
+    // Platforms (chunky 8-bit ledges; index 0 = main stage).
+    for (var i = 0; i < SMASH_PLATFORMS.length; i++) {
+      var pf = SMASH_PLATFORMS[i];
+      var px0 = wx(cam, pf.x0), px1 = wx(cam, pf.x1), py = wy(cam, pf.y);
+      var w = px1 - px0;
+      var thick = Math.max(8, 22 * cam.s);
+      // Drop shadow.
+      ctx.fillStyle = COL.platLip;
+      ctx.fillRect(Math.round(px0), Math.round(py + 4), Math.round(w), Math.round(thick));
+      // Body.
+      ctx.fillStyle = (i === 0) ? COL.platTop : '#2a3157';
+      ctx.fillRect(Math.round(px0), Math.round(py), Math.round(w), Math.round(thick));
+      // Mint top edge (the standable surface).
+      ctx.fillStyle = COL.mint;
+      ctx.fillRect(Math.round(px0), Math.round(py), Math.round(w), Math.max(2, 3 * cam.s));
+      // Border.
+      strokeRectPx(px0, py, w, thick, Math.max(2, 3 * cam.s), COL.platEdge);
     }
-
-    // Pulsing danger edge — a chunky border that warns of the void.
-    var pulse = 0.5 + 0.5 * Math.sin(t / 220);
-    var edgeCol = blend(COL.orange, COL.danger, pulse);
-    var bw = Math.max(3, 4 * cam.s);
-    strokeRectPx(x0, y0, pw, ph, bw, edgeCol);
-    // Inner mint guideline.
-    strokeRectPx(x0 + bw, y0 + bw, pw - 2 * bw, ph - 2 * bw,
-      Math.max(2, 2 * cam.s), withAlpha(COL.mint, 0.35));
   }
 
   // ---- ROYALE arena: enclosed walls + floor --------------------------------
@@ -528,6 +534,16 @@ var Render = (function () {
         setFont(Math.max(6, Math.round(6 * cam.s)));
         ctx.fillStyle = dmgColor(frac);
         ctx.fillText(Math.round(dmg) + '%', x, by + bh + 8 * cam.s);
+        // Stock pips.
+        var stk = (p.stocks == null) ? 0 : p.stocks;
+        var pip = Math.max(2, 3 * cam.s);
+        var gap = pip + Math.max(1, 2 * cam.s);
+        var sx = x - (stk * gap) / 2 + gap / 2;
+        ctx.fillStyle = COL.orange;
+        for (var s2 = 0; s2 < stk; s2++) {
+          ctx.fillRect(Math.round(sx + s2 * gap - pip / 2),
+            Math.round(by + bh + 12 * cam.s), Math.round(pip), Math.round(pip));
+        }
       }
     }
   }
@@ -579,8 +595,9 @@ var Render = (function () {
       line2 = tr('game.alive', 'ALIVE') + ' ' + aliveCount;
     } else {
       var d = local ? Math.round(local.damage || 0) : 0;
+      var st = local ? (local.stocks || 0) : 0;
       line1 = tr('game.damage', 'DMG') + ' ' + d + '%';
-      line2 = tr('game.alive', 'ALIVE') + ' ' + aliveCount;
+      line2 = tr('game.stocks', 'LIVES') + ' ' + st + '  ' + tr('game.alive', 'LEFT') + ' ' + aliveCount;
     }
     ctx.fillStyle = COL.mint;
     ctx.fillText(line1, pad + 10, pad + 10);

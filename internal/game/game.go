@@ -84,6 +84,41 @@ const (
 	windowsDebuffDur = 10 * time.Second
 )
 
+// Side-view Smash physics + stage geometry. y increases downward; a jump sets a
+// negative vy. The stage floats in a void; knockback past the blast bounds = a
+// lost stock.
+const (
+	smashGravity    = 2000.0
+	smashMoveSpeed  = 300.0
+	smashJumpVel    = 640.0
+	smashMaxJumps   = 2
+	smashGroundFric = 0.78
+	smashAirFric    = 0.985
+	smashFastFall   = 1100.0
+	smashMaxFall    = 1150.0
+	smashAirCtrl    = 0.72
+
+	smashMainL = 300.0 // main stage span + surface y
+	smashMainR = 700.0
+	smashMainY = 640.0
+
+	smashBlastL = 55.0
+	smashBlastR = 945.0
+	smashBlastT = 40.0
+	smashBlastB = 965.0
+)
+
+type platformRect struct{ x0, x1, y float64 }
+
+// smashPlatforms: a floating main stage + two side platforms + a top platform.
+// MUST match SMASH_PLATFORMS in web/js/render.js.
+var smashPlatforms = []platformRect{
+	{x0: smashMainL, x1: smashMainR, y: smashMainY},
+	{x0: 215, x1: 375, y: 500},
+	{x0: 625, x1: 785, y: 500},
+	{x0: 430, x1: 570, y: 375},
+}
+
 // Vim special tuning.
 const (
 	blinkDist     = 150.0
@@ -163,6 +198,11 @@ type player struct {
 	windows int64   // unix-millis: Activate Windows debuff expiry
 	forkT   float64 // remaining lifetime for fork clones (0 = permanent)
 	isFork  bool    // spawned by the fork pickup
+
+	// side-view smash physics
+	grounded    bool
+	jumpsLeft   int
+	jumpWasDown bool
 
 	// latest input for this tick
 	in protocol.InputMsg
@@ -280,23 +320,36 @@ func (m *Match) newPlayer(p Participant) *player {
 		alive:     true,
 		ammo:      1,
 		meter:     1.0,
+		jumpsLeft: smashMaxJumps,
 	}
 	return pl
 }
 
 // spawnPositions arranges players on a ring so nobody overlaps at the start.
 func (m *Match) spawnPositions() {
-	var cx, cy, r float64
-	if m.mode == ModeSmash {
-		cx = (platformLeft + platformRight) / 2
-		cy = (platformTop + platformBottom) / 2
-		r = (platformRight - platformLeft) / 2 * 0.6
-	} else {
-		cx = worldW / 2
-		cy = worldH / 2
-		r = zoneStartR * 0.7
-	}
 	n := len(m.players)
+	if m.mode == ModeSmash {
+		// Spread fighters across the central half of the main stage (well clear
+		// of the edges so nobody gets shoved into the void at the buzzer).
+		mid := (smashMainL + smashMainR) / 2
+		span := (smashMainR - smashMainL) * 0.5
+		for i, pl := range m.players {
+			frac := 0.5
+			if n > 1 {
+				frac = float64(i) / float64(n-1)
+			}
+			pl.x = mid - span/2 + span*frac
+			pl.y = smashMainY - playerRadius
+			pl.grounded = true
+			pl.jumpsLeft = smashMaxJumps
+			pl.facing = 1
+			if pl.x > mid {
+				pl.facing = -1
+			}
+		}
+		return
+	}
+	cx, cy, r := worldW/2, worldH/2, zoneStartR*0.7
 	for i, pl := range m.players {
 		ang := (float64(i) / float64(n)) * 2 * math.Pi
 		pl.x = cx + math.Cos(ang)*r
@@ -356,15 +409,14 @@ func (m *Match) updateZone(dt float64) {
 	m.zoneR = zoneStartR + (zoneEndR-zoneStartR)*frac
 }
 
-// applyMovementAndActions integrates per-player intent: movement, dash, melee,
-// throw and vim specials, then resolves collisions and integrates velocity.
+// applyMovementAndActions integrates per-player intent: shared actions (melee,
+// throw, vim) then mode-specific physics (smash platformer vs royale top-down).
 func (m *Match) applyMovementAndActions(dt float64) {
 	for _, pl := range m.players {
 		if !pl.alive {
 			continue
 		}
 		m.tickTimers(pl, dt)
-
 		in := pl.in
 
 		// Facing from horizontal intent.
@@ -374,67 +426,27 @@ func (m *Match) applyMovementAndActions(dt float64) {
 			pl.facing = -1
 		}
 
-		// Normalize movement vector.
-		mx, my := in.Dx, in.Dy
-		if mag := math.Hypot(mx, my); mag > 1 {
-			mx /= mag
-			my /= mag
-		}
-
-		speed := baseSpeed
-		if pl.boostT > 0 {
-			speed *= boostSpeedMul
-		}
-
-		// Dash: a short burst of high speed in the facing/move direction.
-		if in.Dash && pl.dashCD <= 0 && pl.dashT <= 0 {
-			dx, dy := mx, my
-			if dx == 0 && dy == 0 {
-				dx = float64(pl.facing)
-			}
-			if mag := math.Hypot(dx, dy); mag > 0 {
-				dx /= mag
-				dy /= mag
-			}
-			pl.vx += dx * dashSpeed
-			pl.vy += dy * dashSpeed
-			pl.dashT = dashDuration
-			pl.dashCD = dashCooldown
-			pl.invuln = math.Max(pl.invuln, 0.12)
-		}
-
-		// Base locomotion (added to decaying knockback/dash velocity).
-		moveVX := mx * speed
-		moveVY := my * speed
-
 		// Melee belly-bash.
 		if in.Attack && pl.meleeCD <= 0 {
 			m.doMelee(pl)
 			pl.meleeCD = meleeCooldown
 		}
-
 		// LibreOffice frisbee throw.
 		if in.Throw && pl.throwCD <= 0 && pl.ammo > 0 {
 			m.doThrow(pl)
 			pl.throwCD = throwCooldown
 			pl.ammo--
 		}
-
 		// Vim specials (consume the command for this tick).
 		if cmd := strings.TrimSpace(strings.ToLower(in.Vim)); cmd != "" {
 			m.doVim(pl, cmd)
 		}
-		pl.in.Vim = "" // command is one-shot
+		pl.in.Vim = ""
 
-		// Integrate position: locomotion + decaying velocity.
-		pl.x += (moveVX + pl.vx) * dt
-		pl.y += (moveVY + pl.vy) * dt
-
-		// Decay knockback/dash velocity.
-		pl.vx *= friction
-		pl.vy *= friction
-		if math.Hypot(pl.vx, pl.vy) < 4 {
-			pl.vx, pl.vy = 0, 0
+		if m.mode == ModeSmash {
+			m.smashMove(pl, in, dt)
+		} else {
+			m.royaleMove(pl, in, dt)
 		}
 
 		// Sudo meter regen.
@@ -446,7 +458,6 @@ func (m *Match) applyMovementAndActions(dt float64) {
 		}
 	}
 
-	// Soft player-vs-player separation so bodies don't fully overlap.
 	m.separatePlayers()
 
 	// Royale: keep players inside the arena walls (no void to fall into).
@@ -458,6 +469,127 @@ func (m *Match) applyMovementAndActions(dt float64) {
 			pl.x = clamp(pl.x, arenaMargin+playerRadius, worldW-arenaMargin-playerRadius)
 			pl.y = clamp(pl.y, arenaMargin+playerRadius, worldH-arenaMargin-playerRadius)
 		}
+	}
+}
+
+// royaleMove is the top-down integration: 8-direction locomotion blended with
+// decaying knockback/dash velocity.
+func (m *Match) royaleMove(pl *player, in protocol.InputMsg, dt float64) {
+	mx, my := in.Dx, in.Dy
+	if mag := math.Hypot(mx, my); mag > 1 {
+		mx /= mag
+		my /= mag
+	}
+	speed := baseSpeed
+	if pl.boostT > 0 {
+		speed *= boostSpeedMul
+	}
+	if in.Dash && pl.dashCD <= 0 && pl.dashT <= 0 {
+		dx, dy := mx, my
+		if dx == 0 && dy == 0 {
+			dx = float64(pl.facing)
+		}
+		if mag := math.Hypot(dx, dy); mag > 0 {
+			dx /= mag
+			dy /= mag
+		}
+		pl.vx += dx * dashSpeed
+		pl.vy += dy * dashSpeed
+		pl.dashT = dashDuration
+		pl.dashCD = dashCooldown
+		pl.invuln = math.Max(pl.invuln, 0.12)
+	}
+	pl.x += (mx*speed + pl.vx) * dt
+	pl.y += (my*speed + pl.vy) * dt
+	pl.vx *= friction
+	pl.vy *= friction
+	if math.Hypot(pl.vx, pl.vy) < 4 {
+		pl.vx, pl.vy = 0, 0
+	}
+}
+
+// smashMove is the side-view platformer integration: horizontal control + air
+// control, gravity, double-jump, one-way platform landing, and persistent
+// knockback that can launch a fighter off the stage.
+func (m *Match) smashMove(pl *player, in protocol.InputMsg, dt float64) {
+	target := in.Dx * smashMoveSpeed
+	if pl.boostT > 0 {
+		target *= boostSpeedMul
+	}
+	lvx := target
+	if !pl.grounded {
+		lvx *= smashAirCtrl
+	}
+
+	// Horizontal dash burst.
+	if in.Dash && pl.dashCD <= 0 && pl.dashT <= 0 {
+		d := float64(pl.facing)
+		if in.Dx > 0.1 {
+			d = 1
+		} else if in.Dx < -0.1 {
+			d = -1
+		}
+		pl.vx += d * dashSpeed
+		pl.dashT = dashDuration
+		pl.dashCD = dashCooldown
+		pl.invuln = math.Max(pl.invuln, 0.12)
+	}
+
+	// Jump: rising edge for humans, ground-hop for bots.
+	pressed := in.Jump && !pl.jumpWasDown
+	if pl.bot {
+		pressed = in.Jump && pl.grounded
+	}
+	if pressed && pl.jumpsLeft > 0 {
+		pl.vy = -smashJumpVel
+		pl.jumpsLeft--
+		pl.grounded = false
+	}
+	pl.jumpWasDown = in.Jump
+
+	// Gravity + optional fast-fall.
+	pl.vy += smashGravity * dt
+	if in.Dy > 0.4 && pl.vy > -60 {
+		pl.vy += smashFastFall * dt
+	}
+	if pl.vy > smashMaxFall {
+		pl.vy = smashMaxFall
+	}
+
+	// Bot recovery: hop back toward the stage when drifting to a blast zone.
+	if pl.bot && !pl.grounded && pl.jumpsLeft > 0 &&
+		(pl.x < smashMainL+15 || pl.x > smashMainR-15 || pl.y > smashMainY+70) {
+		pl.vy = -smashJumpVel
+		pl.jumpsLeft--
+	}
+
+	oldY := pl.y
+	pl.x += (lvx + pl.vx) * dt
+	pl.y += pl.vy * dt
+
+	// One-way platform landing (only while falling, feet crossing the top).
+	pl.grounded = false
+	if pl.vy >= 0 {
+		feetOld := oldY + playerRadius
+		feetNew := pl.y + playerRadius
+		for _, pf := range smashPlatforms {
+			if pl.x >= pf.x0 && pl.x <= pf.x1 && feetOld <= pf.y+4 && feetNew >= pf.y {
+				pl.y = pf.y - playerRadius
+				pl.vy = 0
+				pl.grounded = true
+				pl.jumpsLeft = smashMaxJumps
+				break
+			}
+		}
+	}
+
+	if pl.grounded {
+		pl.vx *= smashGroundFric
+	} else {
+		pl.vx *= smashAirFric
+	}
+	if math.Abs(pl.vx) < 3 {
+		pl.vx = 0
 	}
 }
 
@@ -685,8 +817,9 @@ func (m *Match) spawnPickup() {
 
 	var x, y float64
 	if m.mode == ModeSmash {
-		x = platformLeft + 40 + m.rng.Float64()*(platformRight-platformLeft-80)
-		y = platformTop + 40 + m.rng.Float64()*(platformBottom-platformTop-80)
+		pf := smashPlatforms[m.rng.Intn(len(smashPlatforms))]
+		x = pf.x0 + 20 + m.rng.Float64()*math.Max(1, pf.x1-pf.x0-40)
+		y = pf.y - playerRadius - 18
 	} else {
 		// Spawn inside the current zone so it is reachable.
 		ang := m.rng.Float64() * 2 * math.Pi
@@ -736,6 +869,7 @@ func (m *Match) spawnFork(owner *player) {
 		alive:     true,
 		ammo:      1,
 		meter:     1,
+		jumpsLeft: smashMaxJumps,
 		isFork:    true,
 		forkT:     float64(forkLifetime) / float64(time.Second),
 	}
@@ -758,9 +892,9 @@ func (m *Match) applyEnvironment(dt float64) {
 		}
 
 		if m.mode == ModeSmash {
-			// Ring-out: off the platform = lose a life.
-			if pl.x < platformLeft || pl.x > platformRight ||
-				pl.y < platformTop || pl.y > platformBottom {
+			// Blast zone: launched past the stage bounds = lose a stock.
+			if pl.x < smashBlastL || pl.x > smashBlastR ||
+				pl.y < smashBlastT || pl.y > smashBlastB {
 				m.killOrRespawn(pl)
 			}
 		} else {
@@ -787,12 +921,14 @@ func (m *Match) killOrRespawn(pl *player) {
 		pl.alive = false
 		return
 	}
-	// Respawn at center, reset velocity & damage.
-	pl.x = (platformLeft + platformRight) / 2
-	pl.y = (platformTop + platformBottom) / 2
+	// Respawn high above the stage, reset velocity & damage.
+	pl.x = (smashMainL + smashMainR) / 2
+	pl.y = 180
 	pl.vx, pl.vy = 0, 0
+	pl.grounded = false
+	pl.jumpsLeft = smashMaxJumps
 	pl.damage = 0
-	pl.invuln = 1.2
+	pl.invuln = 1.5
 }
 
 // separatePlayers pushes overlapping live players apart a little each tick.
@@ -816,9 +952,13 @@ func (m *Match) separatePlayers() {
 				nx := dx / dist
 				ny := dy / dist
 				a.x -= nx * push
-				a.y -= ny * push
 				b.x += nx * push
-				b.y += ny * push
+				// In smash, never push vertically — it would lift fighters off
+				// platforms or sink them through the stage.
+				if m.mode != ModeSmash {
+					a.y -= ny * push
+					b.y += ny * push
+				}
 			}
 		}
 	}
@@ -872,6 +1012,11 @@ func (m *Match) updateBots(dt float64) {
 			in.Dash = true
 		}
 
+		// Smash: hop up toward a target standing on a higher platform.
+		if m.mode == ModeSmash && target != nil && pl.grounded && target.y < pl.y-55 {
+			in.Jump = true
+		}
+
 		pl.in = in
 	}
 }
@@ -903,29 +1048,12 @@ func (m *Match) nearestEnemy(pl *player) *player {
 // royale).
 func (m *Match) dangerVector(pl *player) (float64, float64, bool) {
 	if m.mode == ModeSmash {
-		margin := 70.0
-		var sx, sy float64
-		danger := false
-		if pl.x < platformLeft+margin {
-			sx += 1
-			danger = true
+		// Steer horizontally back toward the main stage near its edges.
+		if pl.x < smashMainL+55 {
+			return 1, 0, true
 		}
-		if pl.x > platformRight-margin {
-			sx -= 1
-			danger = true
-		}
-		if pl.y < platformTop+margin {
-			sy += 1
-			danger = true
-		}
-		if pl.y > platformBottom-margin {
-			sy -= 1
-			danger = true
-		}
-		if danger {
-			if mag := math.Hypot(sx, sy); mag > 0 {
-				return sx / mag, sy / mag, true
-			}
+		if pl.x > smashMainR-55 {
+			return -1, 0, true
 		}
 		return 0, 0, false
 	}
@@ -945,7 +1073,7 @@ func (m *Match) dangerVector(pl *player) (float64, float64, bool) {
 // safeCenter returns a point bots should gravitate toward when idle.
 func (m *Match) safeCenter() (float64, float64) {
 	if m.mode == ModeSmash {
-		return (platformLeft + platformRight) / 2, (platformTop + platformBottom) / 2
+		return (smashMainL + smashMainR) / 2, smashMainY - playerRadius
 	}
 	return m.zoneCx, m.zoneCy
 }
@@ -1004,6 +1132,7 @@ func (m *Match) snapshot() protocol.Snapshot {
 			Facing:       pl.facing,
 			Alive:        pl.alive,
 			Boost:        pl.boostT > 0,
+			Stocks:       pl.lives,
 			WindowsUntil: win,
 		})
 	}

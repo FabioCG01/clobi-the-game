@@ -99,6 +99,7 @@ type InputMsg struct {
 	Attack bool    `json:"attack"`
 	Throw  bool    `json:"throw"`
 	Dash   bool    `json:"dash"`
+	Jump   bool    `json:"jump"` // side-view Smash: rising-edge jump request
 	Vim    string  `json:"vim"`
 }
 
@@ -154,6 +155,7 @@ type SnapshotPlayer struct {
 	Facing       int       `json:"facing"`
 	Alive        bool      `json:"alive"`
 	Boost        bool      `json:"boost"`
+	Stocks       int       `json:"stocks"` // smash lives remaining
 	WindowsUntil int64     `json:"windowsUntil"`
 }
 

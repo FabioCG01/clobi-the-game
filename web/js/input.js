@@ -30,6 +30,13 @@ const Input = (function () {
     dash: false,
   };
 
+  // Jump is edge-triggered (one jump per press); jumpKeyHeld guards OS key-repeat.
+  var jumpEdge = false;
+  var jumpKeyHeld = false;
+  function isJumpCode(code) {
+    return code === 'Space' || code === 'KeyW' || code === 'ArrowUp';
+  }
+
   var initialized = false;
 
   // ---- vim command overlay state ---------------------------------------
@@ -55,8 +62,8 @@ const Input = (function () {
       case 'KeyD':
       case 'ArrowRight':
         return 'right';
-      case 'Space':
       case 'KeyJ':
+      case 'KeyL':
         return 'attack';
       case 'KeyK':
         return 'throw';
@@ -71,6 +78,7 @@ const Input = (function () {
   function clearHeld() {
     held.up = held.down = held.left = held.right = false;
     held.attack = held.throw = held.dash = false;
+    jumpKeyHeld = false;
   }
 
   // ---- vim command overlay ---------------------------------------------
@@ -243,6 +251,13 @@ const Input = (function () {
 
     if (shouldIgnoreGlobalKeys(e)) return;
 
+    // Jump (Space / W / Up) — rising edge only.
+    if (isJumpCode(e.code)) {
+      if (!jumpKeyHeld) jumpEdge = true;
+      jumpKeyHeld = true;
+      e.preventDefault();
+    }
+
     var flag = mapKey(e);
     if (flag) {
       held[flag] = true;
@@ -255,6 +270,7 @@ const Input = (function () {
     // While the vim line is open everything is already cleared and stays that
     // way; ignore key-ups so a stray release can't toggle a flag.
     if (vimOpen) return;
+    if (isJumpCode(e.code)) jumpKeyHeld = false;
     var flag = mapKey(e);
     if (flag) {
       held[flag] = false;
@@ -264,6 +280,92 @@ const Input = (function () {
   function onBlur() {
     // Losing window focus: release everything so the character stops moving.
     clearHeld();
+  }
+
+  // ---- mobile touch controls -------------------------------------------
+  var IS_TOUCH = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  var touchBuilt = false;
+
+  function bindHold(btn, onDown, onUp) {
+    function down(e) { e.preventDefault(); onDown(); }
+    function up(e) { e.preventDefault(); if (onUp) onUp(); }
+    btn.addEventListener('touchstart', down, { passive: false });
+    btn.addEventListener('touchend', up, { passive: false });
+    btn.addEventListener('touchcancel', up, { passive: false });
+    btn.addEventListener('mousedown', down);
+    btn.addEventListener('mouseup', up);
+    btn.addEventListener('mouseleave', up);
+  }
+
+  function tcBtn(label, cls) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tc-btn ' + (cls || '');
+    b.textContent = label;
+    return b;
+  }
+
+  function buildTouchControls() {
+    if (touchBuilt) return;
+    touchBuilt = true;
+    injectTouchStyle();
+
+    var wrap = document.createElement('div');
+    wrap.id = 'touch-controls';
+
+    // Left: move + fast-fall.
+    var left = document.createElement('div');
+    left.className = 'tc-cluster tc-left';
+    var bL = tcBtn('◀', 'tc-move'), bD = tcBtn('▼', 'tc-move'), bR = tcBtn('▶', 'tc-move');
+    bindHold(bL, function () { held.left = true; }, function () { held.left = false; });
+    bindHold(bR, function () { held.right = true; }, function () { held.right = false; });
+    bindHold(bD, function () { held.down = true; }, function () { held.down = false; });
+    left.appendChild(bL); left.appendChild(bD); left.appendChild(bR);
+
+    // Right: jump + actions + vim.
+    var right = document.createElement('div');
+    right.className = 'tc-cluster tc-right';
+    var rTop = document.createElement('div'); rTop.className = 'tc-row';
+    var rBot = document.createElement('div'); rBot.className = 'tc-row';
+    var bVim = tcBtn(':', 'tc-vim'), bJump = tcBtn('▲', 'tc-jump');
+    var bThr = tcBtn('T', 'tc-thr'), bAtk = tcBtn('A', 'tc-atk'), bDash = tcBtn('»', 'tc-dash');
+    bindHold(bJump, function () { jumpEdge = true; }, null);
+    bindHold(bAtk, function () { held.attack = true; }, function () { held.attack = false; });
+    bindHold(bThr, function () { held.throw = true; }, function () { held.throw = false; });
+    bindHold(bDash, function () { held.dash = true; }, function () { held.dash = false; });
+    bVim.addEventListener('touchstart', function (e) { e.preventDefault(); openVim(''); }, { passive: false });
+    bVim.addEventListener('mousedown', function (e) { e.preventDefault(); openVim(''); });
+    rTop.appendChild(bVim); rTop.appendChild(bJump);
+    rBot.appendChild(bThr); rBot.appendChild(bAtk); rBot.appendChild(bDash);
+    right.appendChild(rTop); right.appendChild(rBot);
+
+    wrap.appendChild(left); wrap.appendChild(right);
+    var host = document.getElementById('screen-game') || document.body;
+    host.appendChild(wrap);
+  }
+
+  function injectTouchStyle() {
+    if (document.getElementById('touch-style')) return;
+    var css = [
+      '#touch-controls{position:fixed;left:0;right:0;bottom:0;z-index:8500;display:none;',
+      'justify-content:space-between;align-items:flex-end;padding:14px;pointer-events:none;',
+      'font-family:"Press Start 2P",monospace;}',
+      'body.touch #touch-controls{display:flex;}',
+      '.tc-cluster{display:flex;gap:10px;pointer-events:none;}',
+      '.tc-left{align-items:flex-end;}',
+      '.tc-right{flex-direction:column;align-items:flex-end;}',
+      '.tc-row{display:flex;gap:10px;}',
+      '.tc-btn{pointer-events:auto;width:58px;height:58px;font-family:inherit;font-size:16px;',
+      'color:#e8ecff;background:rgba(17,19,31,0.72);border:3px solid #7ff9e0;box-shadow:3px 3px 0 #000;',
+      'border-radius:0;-webkit-user-select:none;user-select:none;touch-action:none;}',
+      '.tc-btn:active{background:#7ff9e0;color:#11131f;transform:translate(3px,3px);box-shadow:0 0 0 #000;}',
+      '.tc-jump{border-color:#ff9e2c;width:70px;height:70px;}',
+      '.tc-atk{border-color:#ff5a3c;}',
+      '.tc-vim{border-color:#9cff5a;font-size:20px;}',
+      '@media (max-width:520px){.tc-btn{width:50px;height:50px;font-size:13px;}.tc-jump{width:60px;height:60px;}}'
+    ].join('');
+    var st = document.createElement('style'); st.id = 'touch-style'; st.textContent = css;
+    document.head.appendChild(st);
   }
 
   // ---- public API -------------------------------------------------------
@@ -278,17 +380,25 @@ const Input = (function () {
     window.addEventListener('blur', onBlur);
 
     // Build the overlay once the DOM is ready.
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', buildVimOverlay, { once: true });
-    } else {
+    function buildOverlays() {
       buildVimOverlay();
+      if (IS_TOUCH) {
+        document.body.classList.add('touch');
+        buildTouchControls();
+      }
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', buildOverlays, { once: true });
+    } else {
+      buildOverlays();
     }
   }
 
   function getState() {
     // Movement is suppressed entirely while the vim line is focused.
     if (vimOpen) {
-      return { dx: 0, dy: 0, attack: false, throw: false, dash: false };
+      jumpEdge = false;
+      return { dx: 0, dy: 0, attack: false, throw: false, dash: false, jump: false };
     }
 
     // Derive a movement vector from held flags. Normalize diagonals so they
@@ -302,12 +412,15 @@ const Input = (function () {
       dy *= inv;
     }
 
+    var jump = jumpEdge;
+    jumpEdge = false;
     return {
       dx: dx,
       dy: dy,
       attack: held.attack,
       throw: held.throw,
       dash: held.dash,
+      jump: jump,
     };
   }
 
