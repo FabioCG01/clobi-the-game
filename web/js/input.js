@@ -251,6 +251,11 @@ const Input = (function () {
 
     if (shouldIgnoreGlobalKeys(e)) return;
 
+    // Direct vim specials (1/2/3) — fire instantly, never interrupt movement.
+    if (e.code === 'Digit1' || e.code === 'Numpad1') { fireVim(':wq'); e.preventDefault(); return; }
+    if (e.code === 'Digit2' || e.code === 'Numpad2') { fireVim('dd'); e.preventDefault(); return; }
+    if (e.code === 'Digit3' || e.code === 'Numpad3') { fireVim('sudo'); e.preventDefault(); return; }
+
     // Jump (Space / W / Up) — rising edge only.
     if (isJumpCode(e.code)) {
       if (!jumpKeyHeld) jumpEdge = true;
@@ -297,6 +302,12 @@ const Input = (function () {
     btn.addEventListener('mouseleave', up);
   }
 
+  function bindTap(btn, fn) {
+    function go(e) { e.preventDefault(); fn(); }
+    btn.addEventListener('touchstart', go, { passive: false });
+    btn.addEventListener('mousedown', go);
+  }
+
   function tcBtn(label, cls) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -325,19 +336,23 @@ const Input = (function () {
     // Right: jump + actions + vim.
     var right = document.createElement('div');
     right.className = 'tc-cluster tc-right';
+    var rVim = document.createElement('div'); rVim.className = 'tc-row';
     var rTop = document.createElement('div'); rTop.className = 'tc-row';
     var rBot = document.createElement('div'); rBot.className = 'tc-row';
-    var bVim = tcBtn(':', 'tc-vim'), bJump = tcBtn('▲', 'tc-jump');
+    var vWq = tcBtn(':wq', 'tc-vim'), vDd = tcBtn('dd', 'tc-vim'), vSu = tcBtn('sudo', 'tc-vim');
+    var bJump = tcBtn('▲', 'tc-jump');
     var bThr = tcBtn('T', 'tc-thr'), bAtk = tcBtn('A', 'tc-atk'), bDash = tcBtn('»', 'tc-dash');
+    bindTap(vWq, function () { fireVim(':wq'); });
+    bindTap(vDd, function () { fireVim('dd'); });
+    bindTap(vSu, function () { fireVim('sudo'); });
     bindHold(bJump, function () { jumpEdge = true; }, null);
     bindHold(bAtk, function () { held.attack = true; }, function () { held.attack = false; });
     bindHold(bThr, function () { held.throw = true; }, function () { held.throw = false; });
     bindHold(bDash, function () { held.dash = true; }, function () { held.dash = false; });
-    bVim.addEventListener('touchstart', function (e) { e.preventDefault(); openVim(''); }, { passive: false });
-    bVim.addEventListener('mousedown', function (e) { e.preventDefault(); openVim(''); });
-    rTop.appendChild(bVim); rTop.appendChild(bJump);
+    rVim.appendChild(vWq); rVim.appendChild(vDd); rVim.appendChild(vSu);
+    rTop.appendChild(bJump);
     rBot.appendChild(bThr); rBot.appendChild(bAtk); rBot.appendChild(bDash);
-    right.appendChild(rTop); right.appendChild(rBot);
+    right.appendChild(rVim); right.appendChild(rTop); right.appendChild(rBot);
 
     wrap.appendChild(left); wrap.appendChild(right);
     var host = document.getElementById('screen-game') || document.body;
@@ -361,7 +376,7 @@ const Input = (function () {
       '.tc-btn:active{background:#7ff9e0;color:#11131f;transform:translate(3px,3px);box-shadow:0 0 0 #000;}',
       '.tc-jump{border-color:#ff9e2c;width:70px;height:70px;}',
       '.tc-atk{border-color:#ff5a3c;}',
-      '.tc-vim{border-color:#9cff5a;font-size:20px;}',
+      '.tc-vim{border-color:#9cff5a;font-size:9px;width:auto;min-width:46px;height:42px;padding:0 8px;}',
       '@media (max-width:520px){.tc-btn{width:50px;height:50px;font-size:13px;}.tc-jump{width:60px;height:60px;}}'
     ].join('');
     var st = document.createElement('style'); st.id = 'touch-style'; st.textContent = css;
@@ -431,6 +446,12 @@ const Input = (function () {
     return cmd;
   }
 
+  // fireVim queues a vim special WITHOUT opening the text line, so it never
+  // blocks movement (used by the 1/2/3 hotkeys + the touch command buttons).
+  function fireVim(cmd) {
+    if (cmd) pendingVimCommand = cmd;
+  }
+
   function isVimOpen() {
     return vimOpen;
   }
@@ -439,6 +460,7 @@ const Input = (function () {
     init: init,
     getState: getState,
     consumeVimCommand: consumeVimCommand,
+    fireVim: fireVim,
     isVimOpen: isVimOpen,
   };
 })();

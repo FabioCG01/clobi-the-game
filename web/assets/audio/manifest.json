@@ -1,0 +1,17 @@
+{
+  "_comment": "TUX SMASH ROYALE audio. Everything plays from a built-in WebAudio chiptune synth by default. To use YOUR OWN audio, drop a file in this folder (web/assets/audio/) and put its name in the matching \"file\" below (mp3/ogg/wav). Music entries (menuMusic/gameMusic) loop; the rest are one-shot SFX.",
+  "sounds": {
+    "menuMusic": { "file": "" },
+    "gameMusic": { "file": "" },
+    "click":     { "file": "" },
+    "jump":      { "file": "" },
+    "attack":    { "file": "" },
+    "throw":     { "file": "" },
+    "dash":      { "file": "" },
+    "hit":       { "file": "" },
+    "ko":        { "file": "" },
+    "pickup":    { "file": "" },
+    "win":       { "file": "" },
+    "lose":      { "file": "" }
+  }
+}

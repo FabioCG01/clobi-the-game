@@ -146,7 +146,10 @@ const Menu = (function () {
     sword: ['M14 4 L20 4 L20 10', 'M20 4 L11 13', 'M4 16 L8 20', 'M9 15 L6 18'],
     storm: ['M5 13 A6 6 0 1 1 17 11', 'M13 9 L9 15 H13 L9 21'],
     bot: ['M6 9 H18 V19 H6 Z', 'M12 4 V9', 'M10.5 3.5 A1.5 1.5 0 1 0 13.5 3.5 A1.5 1.5 0 1 0 10.5 3.5', 'M9 13 H11', 'M13 13 H15', 'M3 12 H6', 'M18 12 H21'],
-    code: ['M9 8 L5 12 L9 16', 'M15 8 L19 12 L15 16']
+    code: ['M9 8 L5 12 L9 16', 'M15 8 L19 12 L15 16'],
+    help: ['M9 9 A3 3 0 1 1 13 11 C12 12 12 13 12 14', 'M12 17 H12.01'],
+    volume: ['M4 9 H7 L11 5 V19 L7 15 H4 Z', 'M15 9 A4 4 0 0 1 15 15'],
+    mute: ['M4 9 H7 L11 5 V19 L7 15 H4 Z', 'M15 9 L20 15', 'M20 9 L15 15']
   };
 
   // ---- mode helpers ------------------------------------------------------
@@ -200,7 +203,19 @@ const Menu = (function () {
       onclick: openAccountModal
     }, [icon('user', 13), signLabel]);
 
-    const corner = el('div', { class: 'menu-corner' }, [langBtn, signBtn]);
+    const helpBtn = el('button', {
+      id: 'menu-help-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
+      title: t('nav.controls', 'Controls'),
+      onclick: function () { if (window.Sound) Sound.play('click'); showControls(); }
+    }, [icon('help', 13), el('span', { class: 'corner-lang-label', text: t('nav.controls', 'Controls') })]);
+
+    const muteBtn = el('button', {
+      id: 'menu-mute-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
+      title: t('nav.sound', 'Sound'),
+      onclick: function () { if (window.Sound) Sound.toggleMute(); updateMuteBtn(); }
+    }, [icon('volume', 13)]);
+
+    const corner = el('div', { class: 'menu-corner' }, [helpBtn, muteBtn, langBtn, signBtn]);
 
     // ---------- Title ----------
     const title = el('div', { class: 'menu-title' }, [
@@ -376,6 +391,8 @@ const Menu = (function () {
     }
 
     startRoomPolling();
+    if (window.Sound) { window.Sound.unlock(); window.Sound.music('menu'); }
+    updateMuteBtn();
   }
 
   function hide() {
@@ -839,6 +856,7 @@ const Menu = (function () {
 
   // ---- Play button -------------------------------------------------------
   function onClickPlay() {
+    if (window.Sound) Sound.play('click');
     const nick = getNickname().trim();
     if (!nick) {
       const input = byId('menu-nickname');
@@ -866,6 +884,7 @@ const Menu = (function () {
 
   // ---- Single Player / Practice vs bots ---------------------------------
   function onClickSinglePlayer() {
+    if (window.Sound) Sound.play('click');
     const smash = el('button', {
       class: 'pixbtn pixbtn-primary sp-mode', type: 'button',
       onclick: function () { startSolo(MODE_SMASH); }
@@ -904,6 +923,7 @@ const Menu = (function () {
   }
 
   function onClickEditCharacter() {
+    if (window.Sound) Sound.play('click');
     if (typeof Editor !== 'undefined' && Editor.open) {
       Editor.open();
     }
@@ -1331,6 +1351,51 @@ const Menu = (function () {
     return code.toUpperCase();
   }
 
+  function updateMuteBtn() {
+    var b = byId('menu-mute-btn');
+    if (!b) return;
+    var m = window.Sound && Sound.isMuted && Sound.isMuted();
+    clear(b);
+    b.appendChild(icon(m ? 'mute' : 'volume', 13));
+  }
+
+  // Controls + vim reference modal.
+  function showControls() {
+    function row(k, v) {
+      return el('div', { class: 'ctrl-row' }, [
+        el('span', { class: 'ctrl-k', text: k }),
+        el('span', { class: 'ctrl-v', text: v })
+      ]);
+    }
+    var kb = el('div', { class: 'ctrl-sec' }, [
+      el('h4', { class: 'ctrl-h', text: t('controls.keyboard', 'Keyboard') }),
+      row('A / D  </>', t('controls.move', 'Move')),
+      row('W / Space / Up', t('controls.jump', 'Jump (press twice = double jump)')),
+      row('J', t('controls.attack', 'Attack (belly-bash)')),
+      row('K', t('controls.throw', 'Throw a LibreOffice frisbee')),
+      row('Shift', t('controls.dash', 'Dash')),
+      row('S / Down', t('controls.fastfall', 'Fast-fall')),
+      row('1 / 2 / 3', t('controls.vimKeys', 'vim specials (instant, no typing)')),
+      row('/', t('controls.vimLine', 'vim command line (type a command)'))
+    ]);
+    var vim = el('div', { class: 'ctrl-sec' }, [
+      el('h4', { class: 'ctrl-h', text: t('controls.vimTitle', 'vim specials') }),
+      row(':wq  (1)', t('controls.wq', 'Blink-teleport a short hop to escape danger')),
+      row('dd  (2)', t('controls.dd', 'Delete nearby frisbees + a brief shield')),
+      row('sudo  (3)', t('controls.sudo', 'Screen-shaking AoE blast (needs the meter)'))
+    ]);
+    var goal = el('div', { class: 'ctrl-sec' }, [
+      el('h4', { class: 'ctrl-h', text: t('controls.goal', 'Goal') }),
+      el('p', { class: 'ctrl-note', text: t('controls.goalSmash', 'Tux Smash: pile on a rival’s damage % and knock them past the blast zone. Last with stocks wins.') }),
+      el('p', { class: 'ctrl-note', text: t('controls.goalRoyale', 'Distro Royale: survive the shrinking minty zone in a Luxembourg town, using buildings for cover. Last one standing wins.') })
+    ]);
+    var touch = el('div', { class: 'ctrl-sec' }, [
+      el('h4', { class: 'ctrl-h', text: t('controls.touch', 'Mobile') }),
+      el('p', { class: 'ctrl-note', text: t('controls.touchNote', 'On phones, on-screen buttons appear: a move pad + fast-fall, jump, attack / throw / dash, and :wq / dd / sudo.') })
+    ]);
+    openModal(modalShell(t('nav.controls', 'Controls & vim'), [kb, vim, goal, touch], { wide: true }));
+  }
+
   function showLanguagePopup() {
     const langs = (typeof I18n !== 'undefined' && I18n.LANGS) ? I18n.LANGS : [
       { code: 'en', name: 'English' }
@@ -1501,7 +1566,13 @@ const Menu = (function () {
       '.lobby-hint{flex-basis:100%;text-align:center;font-size:8px;color:#9aa3bf;line-height:1.6;}',
       '.lobby-back{align-self:flex-start;}',
       // top-right corner: language + sign-in (subtle)
-      '.menu-corner{position:absolute;top:12px;right:14px;z-index:30;display:flex;gap:8px;align-items:center;}',
+      '.menu-corner{position:absolute;top:12px;right:14px;z-index:30;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}',
+      '.ctrl-sec{margin-bottom:16px;}',
+      '.ctrl-h{font-size:11px;color:#ff9e2c;margin:0 0 8px;text-shadow:2px 2px 0 #000;}',
+      '.ctrl-row{display:flex;gap:10px;align-items:baseline;font-size:9px;margin:6px 0;}',
+      '.ctrl-k{flex:0 0 132px;color:#7ff9e0;}',
+      '.ctrl-v{flex:1 1 auto;color:#cfd4e8;line-height:1.5;}',
+      '.ctrl-note{font-size:9px;color:#9aa3bf;line-height:1.7;margin:4px 0;}',
       '.corner-btn{font-size:9px;padding:6px 10px;color:#9aa3bf;}',
       '.corner-lang-label,.signin-label{letter-spacing:1px;}',
       '.signin-btn.signed-in{color:#7ff9e0;border-color:#7ff9e0;}',
@@ -1582,6 +1653,7 @@ const Menu = (function () {
     show: show,
     hide: hide,
     showLanguagePopup: showLanguagePopup,
+    showControls: showControls,
     // helpers exposed for other modules / debugging
     refresh: requestRooms,
     leaveRoom: leaveRoom,

@@ -53,6 +53,10 @@ const Game = (function () {
   var townObstacles = null;
   var townW = 0, townH = 0;
 
+  // Audio edge-tracking (so SFX fire once per event).
+  var prevAtk = false, prevThr = false, prevDash = false;
+  var prevLocalDamage = 0, prevLocalStocks = 99, prevLocalAlive = true, lastPickupCount = -1;
+
   // Registered Net handlers, kept so we can detach them on stop().
   var netHandlers = []; // [{type, handler}]
 
@@ -249,6 +253,32 @@ const Game = (function () {
 
     resolveLocalPlayerId(payload);
     maybeTriggerGag(payload);
+    audioFromSnapshot(payload);
+  }
+
+  // Fire combat SFX from snapshot diffs on the local fighter.
+  function audioFromSnapshot(snap) {
+    if (!window.Sound || !snap || !Array.isArray(snap.players)) return;
+    var id = resolveLocalPlayerId(snap);
+    var me = null;
+    for (var i = 0; i < snap.players.length; i++) {
+      if (snap.players[i].id === id) { me = snap.players[i]; break; }
+    }
+    // Pickup blip (smash only, where there are few pickups — avoids royale spam).
+    var pc = (snap.pickups || []).length;
+    if (snap.mode === 'smash' && lastPickupCount >= 0 && pc < lastPickupCount) {
+      window.Sound.play('pickup');
+    }
+    lastPickupCount = pc;
+    if (me) {
+      if ((me.damage || 0) > prevLocalDamage + 0.5) window.Sound.play('hit');
+      if ((me.stocks == null ? 99 : me.stocks) < prevLocalStocks || (prevLocalAlive && !me.alive)) {
+        window.Sound.play('ko');
+      }
+      prevLocalDamage = me.damage || 0;
+      prevLocalStocks = (me.stocks == null ? 99 : me.stocks);
+      prevLocalAlive = me.alive;
+    }
   }
 
   function onGameOver(payload) {
@@ -256,6 +286,7 @@ const Game = (function () {
     var winnerId = payload ? payload.winnerId : null;
     var winnerNickname = (payload && payload.winnerNickname) || '';
     var youWon = winnerId != null && localPlayerId != null && winnerId === localPlayerId;
+    if (window.Sound) window.Sound.play(youWon ? 'win' : 'lose');
 
     // Stop the loops/handlers before handing control back to the menu.
     stop();
@@ -366,6 +397,14 @@ const Game = (function () {
       ? window.Input.consumeVimCommand()
       : null;
 
+    if (window.Sound) {
+      if (state.jump) window.Sound.play('jump');
+      if (state.attack && !prevAtk) window.Sound.play('attack');
+      if (state.throw && !prevThr) window.Sound.play('throw');
+      if (state.dash && !prevDash) window.Sound.play('dash');
+    }
+    prevAtk = !!state.attack; prevThr = !!state.throw; prevDash = !!state.dash;
+
     inputSeq += 1;
 
     // Flat InputMsg shape — matches Go protocol.InputMsg json tags exactly.
@@ -445,6 +484,9 @@ const Game = (function () {
     townObstacles = null;
     townW = 0;
     townH = 0;
+    prevAtk = prevThr = prevDash = false;
+    prevLocalDamage = 0; prevLocalStocks = 99; prevLocalAlive = true; lastPickupCount = -1;
+    if (window.Sound) window.Sound.music('game');
 
     // Resolve our id eagerly if App already knows it.
     resolveLocalPlayerId(null);
@@ -484,6 +526,9 @@ const Game = (function () {
     if (window.Gag && typeof window.Gag.deactivate === 'function') {
       window.Gag.deactivate();
     }
+
+    // Back to menu music.
+    if (window.Sound) window.Sound.music('menu');
 
     prevSnap = null;
     lastSnap = null;
