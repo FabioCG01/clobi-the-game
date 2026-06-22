@@ -33,6 +33,10 @@ var Render = (function () {
   ];
   var SMASH_BLAST = { l: 55, r: 945, t: 40, b: 965 };
 
+  // Royale follow-camera: world units visible across the smaller canvas axis.
+  var ROYALE_VIEW = 1300;
+  function clampv(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
   // 8-bit NES-like palette + theme accents from the style guide.
   var COL = {
     void: '#0c0d16',     // deep void around the smash platform
@@ -100,15 +104,21 @@ var Render = (function () {
   // camera: uniform fit of a world window into the view, centered. Smash frames
   // a tighter window around the stage so fighters read bigger; royale shows the
   // whole arena.
-  function camera(mode) {
-    var vs, ccx, ccy;
+  function camera(mode, state, local) {
     if (mode === 'smash') {
-      vs = 860; ccx = 500; ccy = 510;
-    } else {
-      vs = WORLD; ccx = WORLD / 2; ccy = WORLD / 2;
+      var ss = Math.min(viewW, viewH) / 860;
+      return { s: ss, ox: viewW / 2 - 500 * ss, oy: viewH / 2 - 510 * ss };
     }
-    var s = Math.min(viewW, viewH) / vs;
-    return { s: s, ox: viewW / 2 - ccx * s, oy: viewH / 2 - ccy * s };
+    // Royale: follow-cam centered on the local fighter, clamped to the world.
+    var W = (state && state.w) || WORLD;
+    var H = (state && state.h) || WORLD;
+    var s = Math.min(viewW, viewH) / ROYALE_VIEW;
+    var halfW = viewW / 2 / s, halfH = viewH / 2 / s;
+    var camX = local ? local.x : W / 2;
+    var camY = local ? local.y : H / 2;
+    camX = (W <= 2 * halfW) ? W / 2 : clampv(camX, halfW, W - halfW);
+    camY = (H <= 2 * halfH) ? H / 2 : clampv(camY, halfH, H - halfH);
+    return { s: s, ox: viewW / 2 - camX * s, oy: viewH / 2 - camY * s };
   }
 
   function wx(cam, x) { return cam.ox + x * cam.s; }
@@ -126,7 +136,6 @@ var Render = (function () {
     maybeResize();
     var t = nowMs();
     var mode = (state && state.mode) || 'smash';
-    var cam = camera(mode);
 
     // Clear to background.
     ctx.fillStyle = COL.bg;
@@ -135,10 +144,11 @@ var Render = (function () {
     if (!state) { return; }
     var players = state.players || [];
     var local = findById(players, localPlayerId);
+    var cam = camera(mode, state, local);
 
     if (mode === 'royale') {
-      drawRoyaleArena(cam, t);
-      drawStorm(cam, state.zone, t);
+      drawTownArena(cam, state, t);
+      drawStorm(cam, state, state.zone, t);
       drawZoneEdge(cam, state.zone, t);
     } else {
       drawSmashArena(cam, t);
@@ -190,7 +200,78 @@ var Render = (function () {
     }
   }
 
-  // ---- ROYALE arena: enclosed walls + floor --------------------------------
+  // ---- ROYALE: procedural Luxembourg town (follow-cam) ---------------------
+
+  function drawTownArena(cam, state, t) {
+    var W = (state && state.w) || WORLD, H = (state && state.h) || WORLD;
+    // Void outside the world.
+    ctx.fillStyle = COL.void;
+    ctx.fillRect(0, 0, viewW, viewH);
+    var X0 = wx(cam, 0), Y0 = wy(cam, 0), X1 = wx(cam, W), Y1 = wy(cam, H);
+    // Ground (grass / plaza).
+    ctx.fillStyle = '#33402e';
+    ctx.fillRect(Math.round(X0), Math.round(Y0), Math.round(X1 - X0), Math.round(Y1 - Y0));
+    // Asphalt street bands on the block grid (matches the server's town pitch).
+    ctx.fillStyle = '#2b2d36';
+    var pitch = 360, sw = 96;
+    for (var gx = 80; gx < W; gx += pitch) {
+      ctx.fillRect(Math.round(wx(cam, gx - sw)), Math.round(Y0),
+        Math.ceil(sw * cam.s), Math.round(Y1 - Y0));
+    }
+    for (var gy = 80; gy < H; gy += pitch) {
+      ctx.fillRect(Math.round(X0), Math.round(wy(cam, gy - sw)),
+        Math.round(X1 - X0), Math.ceil(sw * cam.s));
+    }
+    // World boundary wall.
+    strokeRectPx(X0, Y0, X1 - X0, Y1 - Y0, Math.max(3, 6 * cam.s), COL.platEdge);
+
+    // Obstacles (culled to the viewport).
+    var obs = (state && state.obstacles) || [];
+    for (var i = 0; i < obs.length; i++) {
+      var o = obs[i];
+      var ox = wx(cam, o.x), oy = wy(cam, o.y), ow = o.w * cam.s, oh = o.h * cam.s;
+      if (ox > viewW || oy > viewH || ox + ow < 0 || oy + oh < 0) { continue; }
+      drawObstacle(ox, oy, ow, oh, o.kind, cam, t);
+    }
+  }
+
+  function drawObstacle(x, y, w, h, kind, cam, t) {
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    if (kind === 'lake') {
+      ctx.fillStyle = '#1f5f8a';
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = withAlpha('#7fd6ff', 0.22);
+      for (var ry = y + 6; ry < y + h - 2; ry += 9) { ctx.fillRect(x + 4, ry, w - 8, 2); }
+      strokeRectPx(x, y, w, h, Math.max(2, 2 * cam.s), '#14405d');
+      return;
+    }
+    if (kind === 'construction') {
+      ctx.fillStyle = '#caa53c';
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#1a1c26';
+      for (var sx = x; sx < x + w; sx += Math.max(8, 10 * cam.s)) {
+        ctx.fillRect(sx, y, Math.max(3, 5 * cam.s), h);
+      }
+      strokeRectPx(x, y, w, h, Math.max(2, 2 * cam.s), '#1a1c26');
+      return;
+    }
+    // building: wall + roof band + window grid + hard border.
+    ctx.fillStyle = '#3a3f5c';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = '#262a40';
+    ctx.fillRect(x, y, w, Math.max(3, Math.round(h * 0.16)));
+    ctx.fillStyle = withAlpha('#7ff9e0', 0.85);
+    var step = Math.max(7, Math.min(w, h) / 4);
+    for (var wy2 = y + step * 0.7; wy2 < y + h - step * 0.4; wy2 += step) {
+      for (var wx2 = x + step * 0.4; wx2 < x + w - step * 0.4; wx2 += step) {
+        ctx.fillRect(Math.round(wx2), Math.round(wy2),
+          Math.max(2, Math.round(step * 0.3)), Math.max(2, Math.round(step * 0.3)));
+      }
+    }
+    strokeRectPx(x, y, w, h, Math.max(2, 3 * cam.s), '#11131c');
+  }
+
+  // ---- ROYALE arena: enclosed walls + floor (legacy, unused) ---------------
 
   function drawRoyaleArena(cam, t) {
     var x0 = wx(cam, ARENA_MARGIN), y0 = wy(cam, ARENA_MARGIN);
@@ -219,35 +300,29 @@ var Render = (function () {
 
   // ---- ROYALE storm (BSOD) outside the zone --------------------------------
 
-  function drawStorm(cam, zone, t) {
+  function drawStorm(cam, state, zone, t) {
     if (!zone || zone.r <= 0) { return; }
+    var W = (state && state.w) || WORLD, H = (state && state.h) || WORLD;
     var cx = wx(cam, zone.cx), cy = wy(cam, zone.cy), r = zone.r * cam.s;
 
-    // Clip to the arena interior so the storm doesn't bleed onto walls.
-    var ax0 = wx(cam, ARENA_MARGIN), ay0 = wy(cam, ARENA_MARGIN);
-    var aw = (WORLD - 2 * ARENA_MARGIN) * cam.s;
+    // Clip to the visible slice of the world.
+    var X0 = Math.max(0, wx(cam, 0)), Y0 = Math.max(0, wy(cam, 0));
+    var X1 = Math.min(viewW, wx(cam, W)), Y1 = Math.min(viewH, wy(cam, H));
+    if (X1 <= X0 || Y1 <= Y0) { return; }
     ctx.save();
     ctx.beginPath();
-    ctx.rect(ax0, ay0, aw, aw);
+    ctx.rect(X0, Y0, X1 - X0, Y1 - Y0);
     ctx.clip();
-
-    // Cut a hole where the safe zone is: paint storm everywhere, then re-cut.
-    // BSOD-blue wash outside the circle.
-    ctx.fillStyle = COL.winBlue;
+    // BSOD-blue wash outside the safe circle (even-odd punches the hole).
+    ctx.fillStyle = withAlpha(COL.winBlue, 0.9);
     ctx.beginPath();
-    ctx.rect(ax0, ay0, aw, aw);
-    // even-odd to punch the circle hole
+    ctx.rect(X0, Y0, X1 - X0, Y1 - Y0);
     ctx.arc(cx, cy, r, 0, Math.PI * 2, true);
     ctx.fill('evenodd');
-
-    // Scanline flicker + sprinkled BSOD glyphs (sad faces / 0s and 1s).
+    // Scanline flicker.
     var flick = 0.10 + 0.06 * (0.5 + 0.5 * Math.sin(t / 90));
     ctx.fillStyle = withAlpha('#000000', flick);
-    for (var sy = 0; sy < aw; sy += 6) {
-      ctx.fillRect(ax0, ay0 + sy, aw, 2);
-    }
-    drawBsodGlyphs(cam, zone, t, ax0, ay0, aw);
-
+    for (var sy = Y0; sy < Y1; sy += 6) { ctx.fillRect(X0, sy, X1 - X0, 2); }
     ctx.restore();
   }
 
@@ -624,8 +699,9 @@ var Render = (function () {
       setFont(9);
       ctx.fillStyle = COL.mint;
       ctx.textAlign = 'center';
-      var pct = clamp01(state.zone.r / 520) * 100;
-      var warn = state.zone.r < 160;
+      var zr0 = ((state.w || 1000) * 0.52) || 520;
+      var pct = clamp01(state.zone.r / zr0) * 100;
+      var warn = state.zone.r < zr0 * 0.3;
       ctx.fillStyle = warn ? blend(COL.mint, COL.danger, 0.5 + 0.5 * Math.sin(t / 150)) : COL.mint;
       ctx.fillText(tr('game.zone', 'ZONE') + ' ' + Math.round(pct) + '%',
         zx + zPanelW / 2, pad + 8);

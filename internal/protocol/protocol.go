@@ -181,13 +181,27 @@ type ZoneS struct {
 	R  float64 `json:"r"`
 }
 
+// ObstacleS is a static royale-town feature (building/lake/construction) with
+// AABB collision used for cover. Sent on the first snapshots + periodically; the
+// client caches it (it never changes during a match).
+type ObstacleS struct {
+	X    float64 `json:"x"`
+	Y    float64 `json:"y"`
+	W    float64 `json:"w"`
+	H    float64 `json:"h"`
+	Kind string  `json:"kind"`
+}
+
 // Snapshot is the authoritative world state broadcast each tick. T is the tick
 // number, Mode is "smash" or "royale", Winner is "" until the match ends.
 type Snapshot struct {
 	Players     []SnapshotPlayer `json:"players"`
 	Projectiles []ProjectileS    `json:"projectiles"`
 	Pickups     []PickupS        `json:"pickups"`
+	Obstacles   []ObstacleS      `json:"obstacles"` // royale town (cached client-side)
 	Zone        ZoneS            `json:"zone"`
+	W           float64          `json:"w"` // royale world width (scales with players)
+	H           float64          `json:"h"`
 	T           int64            `json:"t"`
 	Mode        string           `json:"mode"`
 	Alive       int              `json:"alive"`

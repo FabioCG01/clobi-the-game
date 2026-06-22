@@ -170,6 +170,13 @@ type pickup struct {
 	kind string
 }
 
+// obstacle is a static royale-town feature with AABB collision. Buildings and
+// construction also block projectiles (cover); lakes only block walking.
+type obstacle struct {
+	x, y, w, h float64
+	kind       string // "building", "lake", "construction"
+}
+
 // player is the full per-fighter simulation state.
 type player struct {
 	id        string
@@ -225,9 +232,18 @@ type Match struct {
 	pickupTimer float64
 	elapsed     float64
 
+	// world dimensions: royale scales with player count; smash uses the constants.
+	wW, wH float64
+
+	// royale procedural town
+	obstacles []*obstacle
+
 	// royale zone state
 	zoneCx, zoneCy float64
 	zoneR          float64
+	zoneStartR     float64
+	zoneEndR       float64
+	zoneShrinkSec  float64
 
 	rng *rand.Rand
 
@@ -292,16 +308,139 @@ func NewMatch(mode Mode, players []Participant) *Match {
 		m.byID[pl.id] = pl
 	}
 
-	m.spawnPositions()
-
+	// World + zone scale with the match. Smash uses the fixed floating stage;
+	// royale grows with the player count and gets a procedural Luxembourg town.
 	if mode == ModeRoyale {
-		// Random-ish zone center, biased toward the middle.
-		m.zoneCx = worldW/2 + (m.rng.Float64()-0.5)*160
-		m.zoneCy = worldH/2 + (m.rng.Float64()-0.5)*160
-		m.zoneR = zoneStartR
+		side := 1500.0 + float64(want)*100.0
+		m.wW, m.wH = side, side
+		m.zoneStartR = side * 0.52
+		m.zoneEndR = 140.0
+		m.zoneShrinkSec = 55.0 + float64(want)*4.0
+		m.generateTown()
+		m.zoneCx = m.wW/2 + (m.rng.Float64()-0.5)*side*0.18
+		m.zoneCy = m.wH/2 + (m.rng.Float64()-0.5)*side*0.18
+		m.zoneR = m.zoneStartR
+	} else {
+		m.wW, m.wH = worldW, worldH
 	}
 
+	m.spawnPositions()
 	return m
+}
+
+// generateTown builds the procedural Luxembourg-style town for royale: a loose
+// street grid whose blocks are randomly buildings, lakes, construction sites, or
+// open parks — so cover is varied and unpredictable, never a uniform grid.
+func (m *Match) generateTown() {
+	margin := 80.0
+	block := 360.0
+	street := 96.0
+	cellW := block - street
+	cellH := block - street
+	for bx := margin; bx < m.wW-margin-cellW*0.5; bx += block {
+		for by := margin; by < m.wH-margin-cellH*0.5; by += block {
+			roll := m.rng.Float64()
+			switch {
+			case roll < 0.52:
+				bw := cellW * (0.55 + m.rng.Float64()*0.4)
+				bh := cellH * (0.55 + m.rng.Float64()*0.4)
+				ox := bx + m.rng.Float64()*(cellW-bw)
+				oy := by + m.rng.Float64()*(cellH-bh)
+				m.obstacles = append(m.obstacles, &obstacle{ox, oy, bw, bh, "building"})
+			case roll < 0.68:
+				lw := cellW * (0.7 + m.rng.Float64()*0.25)
+				lh := cellH * (0.7 + m.rng.Float64()*0.25)
+				m.obstacles = append(m.obstacles, &obstacle{bx + (cellW-lw)/2, by + (cellH-lh)/2, lw, lh, "lake"})
+			case roll < 0.84:
+				cnt := 2 + m.rng.Intn(4)
+				for k := 0; k < cnt; k++ {
+					cw := 38 + m.rng.Float64()*46
+					ch := 38 + m.rng.Float64()*46
+					cx := bx + m.rng.Float64()*math.Max(1, cellW-cw)
+					cy := by + m.rng.Float64()*math.Max(1, cellH-ch)
+					m.obstacles = append(m.obstacles, &obstacle{cx, cy, cw, ch, "construction"})
+				}
+			default:
+				// open park / plaza — no obstacle
+			}
+		}
+	}
+}
+
+// inObstacle reports whether a circle (cx,cy,rad) intersects any solid obstacle.
+func (m *Match) inObstacle(cx, cy, rad float64) bool {
+	for _, o := range m.obstacles {
+		if cx > o.x-rad && cx < o.x+o.w+rad && cy > o.y-rad && cy < o.y+o.h+rad {
+			return true
+		}
+	}
+	return false
+}
+
+// spawnClear finds an open royale-town point clear of obstacles.
+func (m *Match) spawnClear() (float64, float64) {
+	for tries := 0; tries < 60; tries++ {
+		x := arenaMargin + 40 + m.rng.Float64()*(m.wW-2*arenaMargin-80)
+		y := arenaMargin + 40 + m.rng.Float64()*(m.wH-2*arenaMargin-80)
+		if !m.inObstacle(x, y, playerRadius+6) {
+			return x, y
+		}
+	}
+	return m.wW / 2, m.wH / 2
+}
+
+// resolveObstacles pushes a player out of any solid town obstacle (AABB).
+func (m *Match) resolveObstacles(pl *player) {
+	rad := playerRadius
+	for _, o := range m.obstacles {
+		left := o.x - rad
+		right := o.x + o.w + rad
+		top := o.y - rad
+		bottom := o.y + o.h + rad
+		if pl.x <= left || pl.x >= right || pl.y <= top || pl.y >= bottom {
+			continue
+		}
+		dl := pl.x - left
+		dr := right - pl.x
+		du := pl.y - top
+		dd := bottom - pl.y
+		mn := math.Min(math.Min(dl, dr), math.Min(du, dd))
+		switch mn {
+		case dl:
+			pl.x = left
+			if pl.vx > 0 {
+				pl.vx = 0
+			}
+		case dr:
+			pl.x = right
+			if pl.vx < 0 {
+				pl.vx = 0
+			}
+		case du:
+			pl.y = top
+			if pl.vy > 0 {
+				pl.vy = 0
+			}
+		default:
+			pl.y = bottom
+			if pl.vy < 0 {
+				pl.vy = 0
+			}
+		}
+	}
+}
+
+// projBlocked reports whether a point is inside solid cover (not a lake).
+func (m *Match) projBlocked(x, y float64) bool {
+	for _, o := range m.obstacles {
+		if o.kind == "lake" {
+			continue
+		}
+		if x >= o.x && x <= o.x+o.w && y >= o.y && y <= o.y+o.h {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Match) newPlayer(p Participant) *player {
@@ -349,12 +488,11 @@ func (m *Match) spawnPositions() {
 		}
 		return
 	}
-	cx, cy, r := worldW/2, worldH/2, zoneStartR*0.7
-	for i, pl := range m.players {
-		ang := (float64(i) / float64(n)) * 2 * math.Pi
-		pl.x = cx + math.Cos(ang)*r
-		pl.y = cy + math.Sin(ang)*r
-		if pl.x < cx {
+	// Royale: scatter fighters across the town, clear of buildings/water.
+	for _, pl := range m.players {
+		x, y := m.spawnClear()
+		pl.x, pl.y = x, y
+		if x < m.wW/2 {
 			pl.facing = 1
 		} else {
 			pl.facing = -1
@@ -402,11 +540,11 @@ func (m *Match) updateZone(dt float64) {
 		return
 	}
 	// Linear interpolation toward zoneEndR over zoneShrinkSec seconds.
-	frac := m.elapsed / zoneShrinkSec
+	frac := m.elapsed / m.zoneShrinkSec
 	if frac > 1 {
 		frac = 1
 	}
-	m.zoneR = zoneStartR + (zoneEndR-zoneStartR)*frac
+	m.zoneR = m.zoneStartR + (m.zoneEndR-m.zoneStartR)*frac
 }
 
 // applyMovementAndActions integrates per-player intent: shared actions (melee,
@@ -466,8 +604,8 @@ func (m *Match) applyMovementAndActions(dt float64) {
 			if !pl.alive {
 				continue
 			}
-			pl.x = clamp(pl.x, arenaMargin+playerRadius, worldW-arenaMargin-playerRadius)
-			pl.y = clamp(pl.y, arenaMargin+playerRadius, worldH-arenaMargin-playerRadius)
+			pl.x = clamp(pl.x, arenaMargin+playerRadius, m.wW-arenaMargin-playerRadius)
+			pl.y = clamp(pl.y, arenaMargin+playerRadius, m.wH-arenaMargin-playerRadius)
 		}
 	}
 }
@@ -506,6 +644,7 @@ func (m *Match) royaleMove(pl *player, in protocol.InputMsg, dt float64) {
 	if math.Hypot(pl.vx, pl.vy) < 4 {
 		pl.vx, pl.vy = 0, 0
 	}
+	m.resolveObstacles(pl)
 }
 
 // smashMove is the side-view platformer integration: horizontal control + air
@@ -753,7 +892,11 @@ func (m *Match) updateProjectiles(dt float64) {
 			continue
 		}
 		// Out of world bounds -> gone.
-		if pr.x < 0 || pr.x > worldW || pr.y < 0 || pr.y > worldH {
+		if pr.x < 0 || pr.x > m.wW || pr.y < 0 || pr.y > m.wH {
+			continue
+		}
+		// Blocked by solid town cover (buildings/construction, not lakes).
+		if m.mode == ModeRoyale && m.projBlocked(pr.x, pr.y) {
 			continue
 		}
 
@@ -821,11 +964,16 @@ func (m *Match) spawnPickup() {
 		x = pf.x0 + 20 + m.rng.Float64()*math.Max(1, pf.x1-pf.x0-40)
 		y = pf.y - playerRadius - 18
 	} else {
-		// Spawn inside the current zone so it is reachable.
-		ang := m.rng.Float64() * 2 * math.Pi
-		rad := m.rng.Float64() * math.Max(40, m.zoneR*0.8)
-		x = clamp(m.zoneCx+math.Cos(ang)*rad, arenaMargin+30, worldW-arenaMargin-30)
-		y = clamp(m.zoneCy+math.Sin(ang)*rad, arenaMargin+30, worldH-arenaMargin-30)
+		// Spawn inside the current zone, clear of buildings/water.
+		for tries := 0; tries < 30; tries++ {
+			ang := m.rng.Float64() * 2 * math.Pi
+			rad := m.rng.Float64() * math.Max(40, m.zoneR*0.85)
+			x = clamp(m.zoneCx+math.Cos(ang)*rad, arenaMargin+30, m.wW-arenaMargin-30)
+			y = clamp(m.zoneCy+math.Sin(ang)*rad, arenaMargin+30, m.wH-arenaMargin-30)
+			if !m.inObstacle(x, y, 18) {
+				break
+			}
+		}
 	}
 	m.pickups = append(m.pickups, &pickup{x: x, y: y, kind: kind})
 }
@@ -1149,8 +1297,19 @@ func (m *Match) snapshot() protocol.Snapshot {
 	}
 
 	zone := protocol.ZoneS{}
+	var obs []protocol.ObstacleS
 	if m.mode == ModeRoyale {
 		zone = protocol.ZoneS{Cx: round1(m.zoneCx), Cy: round1(m.zoneCy), R: round1(m.zoneR)}
+		// The static town is sent on the first ticks + periodically (resilience to
+		// dropped frames); the client caches it and ignores empty lists.
+		if m.tick <= 2 || m.tick%90 == 0 {
+			obs = make([]protocol.ObstacleS, 0, len(m.obstacles))
+			for _, o := range m.obstacles {
+				obs = append(obs, protocol.ObstacleS{
+					X: round1(o.x), Y: round1(o.y), W: round1(o.w), H: round1(o.h), Kind: o.kind,
+				})
+			}
+		}
 	}
 
 	return protocol.Snapshot{
@@ -1159,7 +1318,10 @@ func (m *Match) snapshot() protocol.Snapshot {
 		Players:     ps,
 		Projectiles: projs,
 		Pickups:     picks,
+		Obstacles:   obs,
 		Zone:        zone,
+		W:           round1(m.wW),
+		H:           round1(m.wH),
 		Alive:       m.aliveCount(),
 		Winner:      m.winnerID,
 	}

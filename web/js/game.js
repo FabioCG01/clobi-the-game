@@ -48,6 +48,11 @@ const Game = (function () {
   // Gag bookkeeping so we don't re-activate on every snapshot.
   var lastWindowsUntil = 0;
 
+  // Royale town cache: the server sends the static town on the first ticks +
+  // periodically; we keep the latest non-empty copy + the world dimensions.
+  var townObstacles = null;
+  var townW = 0, townH = 0;
+
   // Registered Net handlers, kept so we can detach them on stop().
   var netHandlers = []; // [{type, handler}]
 
@@ -114,9 +119,19 @@ const Game = (function () {
 
   // Build an interpolated render state from prevSnap/lastSnap at fraction t.
   // The output preserves the snapshot field names so Render reads them directly.
+  // Attach the cached royale town + world dims so Render can draw the town and
+  // size the follow-camera.
+  function withTown(s) {
+    if (!s) return s;
+    s.w = townW || s.w || 0;
+    s.h = townH || s.h || 0;
+    s.obstacles = townObstacles || s.obstacles || null;
+    return s;
+  }
+
   function buildInterpolatedState(t) {
     if (!lastSnap) return null;
-    if (!prevSnap) return lastSnap;
+    if (!prevSnap) return withTown(lastSnap);
 
     var a = prevSnap;
     var b = lastSnap;
@@ -170,7 +185,7 @@ const Game = (function () {
       };
     }
 
-    return {
+    return withTown({
       t: b.t,
       mode: b.mode,
       players: players,
@@ -179,7 +194,7 @@ const Game = (function () {
       zone: zone,
       alive: b.alive,
       winner: b.winner,
-    };
+    });
   }
 
   // ---- gag trigger ------------------------------------------------------
@@ -221,6 +236,10 @@ const Game = (function () {
     prevRecvAt = lastRecvAt;
     lastSnap = payload;
     lastRecvAt = now();
+
+    // Cache the royale town + world size (sent only on some ticks).
+    if (payload.obstacles && payload.obstacles.length) townObstacles = payload.obstacles;
+    if (payload.w) { townW = payload.w; townH = payload.h; }
 
     if (!prevSnap) {
       // Seed the previous slot so the first frames have something to lerp from.
@@ -423,6 +442,9 @@ const Game = (function () {
     lastRecvAt = 0;
     inputSeq = 0;
     lastWindowsUntil = 0;
+    townObstacles = null;
+    townW = 0;
+    townH = 0;
 
     // Resolve our id eagerly if App already knows it.
     resolveLocalPlayerId(null);
