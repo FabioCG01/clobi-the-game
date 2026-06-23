@@ -20,6 +20,8 @@ window.ClobiParts = {
     feet:  ['#ff9e2c', '#5a3a22', '#11131c', '#ff5a3c', '#7ff9e0', '#9cff5a', '#ffffff', '#b06a2c'],
     beard: ['#7a4a1f', '#b07a43', '#3a2a18', '#11131c', '#d9b15a', '#cfd4e0'],
     cape:  ['#ff5a3c', '#7ff9e0', '#7a52d0', '#ffcf3c', '#1b7a3a', '#e8e8f0', '#11131c', '#ff7fbf'],
+    iris:  ['#222a3a', '#3a6a9a', '#2a6a3a', '#6a4a2a', '#5a3a8a', '#7a2a2a', '#111111', '#8a6a3a'],
+    mouth: ['#a86a5a', '#9a5a4a', '#7a4a3a', '#b07a6a', '#7a3a3a', '#6a3a2a'],
   },
 
   // Default HUMANOID = Clobi himself: light-brown ponytail, small framed beard,

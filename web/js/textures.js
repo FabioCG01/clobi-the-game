@@ -20,6 +20,7 @@ var Textures = (function () {
   var tintCache = {};        // file|hex -> canvas
   var canonCache = {};       // sig -> canvas(GW,GH)
   var warpCache = {};        // sig|g|fat -> canvas(WW,GH)
+  var bboxCache = {}, idataCache = {};   // for editor hit-testing
 
   function onReady(cb) { if (ready) cb(); else readyCbs.push(cb); }
 
@@ -98,7 +99,7 @@ var Textures = (function () {
   // ---- per-object transforms (move / resize / rotate). Purely VISUAL — the
   // server hitbox is the fixed body skeleton and is never affected. Anchors are
   // given in 32x36 authoring space and scaled to the real grid.
-  var ANCHOR_A = { head: [16, 12], hair: [16, 4], beard: [16, 11], eyes: [16, 7], eyebrows: [16, 6], mouth: [16, 11], accessory: [16, 16] };
+  var ANCHOR_A = { head: [16, 12], hair: [16, 4], beard: [16, 11], eyes: [16, 7], eyebrows: [16, 6], mouth: [16, 11], accessory: [16, 16], hat: [16, 3] };
   function anchorFor(key) { var a = ANCHOR_A[key] || [16, 18]; return { x: a[0] * GW / 32, y: a[1] * GH / 36 }; }
 
   // Build the ordered list of {file, hex, key?} layers for a character.
@@ -120,9 +121,11 @@ var Textures = (function () {
       if (hf) L.push({ f: hf, c: hcol, key: 'hair' });
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
       if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard' });
-      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: darken(skin, 0.85), key: 'mouth' }); // slightly darker skin
-      var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' }); // a touch darker than hair so they read
-      L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });
+      var mcol = (typeof ch.mouthColor === 'string' && /^#/.test(ch.mouthColor)) ? ch.mouthColor : darken(skin, 0.85);
+      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth' });               // mouth colour (default = darker skin)
+      var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' });
+      L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });                                        // sclera (fixed)
+      var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes' }); // iris colour
     } else {
       L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c') });
       L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd') });
@@ -134,13 +137,13 @@ var Textures = (function () {
     var accF = (ch.accessory | 0) ? styleFile('accessory', ch.accessory) : null;
     if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: tux ? undefined : 'accessory' });
     var hatF = (ch.hat | 0) ? styleFile('hat', ch.hat) : null;
-    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 8 : 0 });
+    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 2 : 0, key: tux ? undefined : 'hat' });
     return L;
   }
 
   function sig(ch) {
     return [ch.bodyType, ch.body, ch.belly, ch.feet, ch.skin, ch.hairColor, ch.beardColor,
-      ch.pants, ch.capeColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.eyebrows, ch.mouth, ch.accessory, ch.cape,
+      ch.pants, ch.capeColor, ch.irisColor, ch.mouthColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.eyebrows, ch.mouth, ch.accessory, ch.cape,
       ch.shirtStyle, ch.pantsStyle, ch.shoeStyle, JSON.stringify(ch.tf || {})].join(',');
   }
 
@@ -242,11 +245,60 @@ var Textures = (function () {
     return '#' + h2(c[0]) + h2(c[1]) + h2(c[2]);
   }
 
+  // ---- editor hit-testing (direct manipulation) ---------------------------
+  function idataOf(file) { if (idataCache[file]) return idataCache[file]; var im = imgs[file]; if (!im) return null; idataCache[file] = im.canvas.getContext('2d').getImageData(0, 0, GW, GH); return idataCache[file]; }
+  function alphaAt(file, x, y) { x = Math.round(x); y = Math.round(y); if (x < 0 || y < 0 || x >= GW || y >= GH) return 0; var id = idataOf(file); return id ? id.data[(y * GW + x) * 4 + 3] : 0; }
+  function bboxOf(file) {
+    if (bboxCache[file]) return bboxCache[file];
+    var id = idataOf(file); if (!id) return null;
+    var d = id.data, x0 = GW, y0 = GH, x1 = -1, y1 = -1;
+    for (var y = 0; y < GH; y++) for (var x = 0; x < GW; x++) if (d[(y * GW + x) * 4 + 3] > 20) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    var bb = (x1 < 0) ? { empty: true } : { x0: x0, y0: y0, x1: x1, y1: y1 };
+    bboxCache[file] = bb; return bb;
+  }
+  function fileForKey(ch, key) { var L = layersFor(ch), f = null; for (var i = 0; i < L.length; i++) if (L[i].key === key && L[i].f) f = L[i].f; return f; }
+  function invXform(T, a, gx, gy) {
+    var px = gx, py = gy;
+    if (T && (T.x || T.y || (T.s && T.s !== 1) || T.r)) {
+      px -= (a.x + (T.x || 0)); py -= (a.y + (T.y || 0));
+      if (T.r) { var ang = -T.r * Math.PI / 180, c = Math.cos(ang), s = Math.sin(ang), nx = px * c - py * s, ny = px * s + py * c; px = nx; py = ny; }
+      var sc = T.s || 1; if (sc) { px /= sc; py /= sc; }
+      px += a.x; py += a.y;
+    }
+    return { x: px, y: py };
+  }
+  // all transformable parts under grid (gx,gy), front-to-back (deduped by key).
+  function partsAt(ch, gx, gy) {
+    if (!ready || ch.bodyType !== 'humanoid') return [];
+    var tf = ch.tf || {}, L = layersFor(ch), hits = [];
+    for (var i = L.length - 1; i >= 0; i--) {
+      var ly = L[i]; if (!ly.key || !ly.f || !imgs[ly.f] || hits.indexOf(ly.key) >= 0) continue;
+      var p = invXform(tf[ly.key], anchorFor(ly.key), gx, gy);
+      if (alphaAt(ly.f, p.x, p.y) > 20) hits.push(ly.key);
+    }
+    return hits;
+  }
+  // partAt: topmost part; pass `after` (a key) to cycle to the next part underneath.
+  function partAt(ch, gx, gy, after) {
+    var hits = partsAt(ch, gx, gy); if (!hits.length) return null;
+    if (after == null) return hits[0];
+    var i = hits.indexOf(after); return hits[(i + 1) % hits.length];
+  }
+  // partBox: selected part's grid-space box {cx,cy,hw,hh,r} for the editor gizmo.
+  function partBox(ch, key) {
+    var f = fileForKey(ch, key); if (!f) return null;
+    var bb = bboxOf(f); if (!bb || bb.empty) return null;
+    var T = (ch.tf || {})[key] || {}, a = anchorFor(key), sc = T.s || 1;
+    var cx0 = (bb.x0 + bb.x1 + 1) / 2, cy0 = (bb.y0 + bb.y1 + 1) / 2;
+    return { cx: a.x + (T.x || 0) + (cx0 - a.x) * sc, cy: a.y + (T.y || 0) + (cy0 - a.y) * sc, hw: Math.max((bb.x1 - bb.x0 + 1) / 2 * sc, 1.5), hh: Math.max((bb.y1 - bb.y0 + 1) / 2 * sc, 1.5), r: T.r || 0 };
+  }
+
   return {
     load: load, onReady: onReady, draw: draw,
     isReady: function () { return ready; },
     catalog: function (g) { return g ? cat(g) : (manifest && manifest.catalog); },
-    grid: function () { return { w: GW, h: GH }; }
+    grid: function () { return { w: GW, h: GH }; },
+    partAt: partAt, partBox: partBox
   };
 })();
 window.Textures = Textures;

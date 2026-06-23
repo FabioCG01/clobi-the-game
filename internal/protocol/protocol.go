@@ -57,6 +57,8 @@ type Character struct {
 	BeardColor string  `json:"beardColor"` // hex — humanoid beard
 	Pants      string  `json:"pants"`      // hex — humanoid pants
 	CapeColor  string  `json:"capeColor"`  // hex — cape tint
+	IrisColor  string  `json:"irisColor"`  // hex — eye iris colour
+	MouthColor string  `json:"mouthColor"` // hex — mouth colour ("" = auto: a darker skin shade)
 	Hair       int     `json:"hair"`       // hairstyle index (humanoid)
 	Beard      int     `json:"beard"`      // beard index (0 = none)
 	ShirtStyle int     `json:"shirtStyle"` // shirt style index (humanoid)

@@ -1422,6 +1422,7 @@ func randomBotCharacter(rng *rand.Rand) protocol.Character {
 		BeardColor: pick(hairCols),
 		Pants:      pick(pantsCols),
 		CapeColor:  pick(capeCols),
+		IrisColor:  pick([]string{"#222a3a", "#3a6a9a", "#2a6a3a", "#6a4a2a", "#5a3a8a"}),
 		Hair:       rng.Intn(9),
 		Beard:      rng.Intn(6),
 		ShirtStyle: rng.Intn(6),

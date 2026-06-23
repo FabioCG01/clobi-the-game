@@ -39,7 +39,7 @@ var Sprites = (function () {
       name: '', bodyType: 'humanoid', gender: CLOBI.gender || 'male', fat: 0,
       body: '#11131c', belly: CLOBI.belly || '#fdfdfd', feet: CLOBI.feet || '#5a3a22',
       skin: CLOBI.skin, hairColor: CLOBI.hairColor, beardColor: CLOBI.beardColor,
-      pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c',
+      pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c', irisColor: '#222a3a', mouthColor: '',
       hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 2),
       shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
       hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}
@@ -47,7 +47,7 @@ var Sprites = (function () {
   }
 
   // ---- per-object transform sanitiser (move/resize/rotate). Visual only. ----
-  var TF_KEYS = ['head', 'hair', 'beard', 'eyes', 'eyebrows', 'mouth', 'accessory'];
+  var TF_KEYS = ['head', 'hair', 'beard', 'eyes', 'eyebrows', 'mouth', 'accessory', 'hat'];
   function clampNum(v, def, lo, hi) { v = (typeof v === 'number' && isFinite(v)) ? v : def; return Math.max(lo, Math.min(hi, v)); }
   function sanitizeTf(tf) {
     if (!tf || typeof tf !== 'object') return {};
@@ -85,6 +85,7 @@ var Sprites = (function () {
       body: pick(PRESETS.body), belly: pick(PRESETS.shirt), feet: pick(PRESETS.feet),
       skin: pick(PRESETS.skin), hairColor: pick(PRESETS.hair), beardColor: pick(PRESETS.beard),
       pants: pick(PRESETS.pants), capeColor: pick(PRESETS.cape),
+      irisColor: pick(['#222a3a', '#3a6a9a', '#2a6a3a', '#6a4a2a', '#5a3a8a', '#111111']), mouthColor: '',
       hair: ri('hair', 8), beard: ri('beard', 6),
       shirtStyle: ri('shirt', 6), pantsStyle: ri('pants', 5), shoeStyle: ri('shoes', 4),
       hat: ri('hat', 7), eyes: ri('eyes', 6), eyebrows: ri('eyebrows', 7), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6), tf: {}
@@ -113,7 +114,8 @@ var Sprites = (function () {
       body: col(c.body, d.body), belly: col(c.belly, d.belly), feet: col(c.feet, d.feet),
       skin: col(c.skin, d.skin), hairColor: col(c.hairColor, d.hairColor),
       beardColor: col(c.beardColor, d.beardColor), pants: col(c.pants, d.pants),
-      capeColor: col(c.capeColor, d.capeColor),
+      capeColor: col(c.capeColor, d.capeColor), irisColor: col(c.irisColor, d.irisColor),
+      mouthColor: (typeof c.mouthColor === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c.mouthColor)) ? c.mouthColor : '',
       hair: idx(c.hair, 'hair', 0), beard: idx(c.beard, 'beard', 0),
       shirtStyle: idx(c.shirtStyle, 'shirt', 0), pantsStyle: idx(c.pantsStyle, 'pants', 0),
       shoeStyle: idx(c.shoeStyle, 'shoes', 0),

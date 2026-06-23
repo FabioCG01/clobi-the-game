@@ -170,19 +170,19 @@ function beardStyle(kind) {
 }
 
 // ---- EYES (fixed colour) — original positions L=13,R=17,y=8 ----
-// EYES = just the eyes (clean dark eye with a glint). Eyebrows are a SEPARATE
-// catalog now, so you choose eyes and brows independently.
+// EYES = a WHITE layer (sclera/glint/glasses, fixed) + an IRIS layer (grayscale,
+// tinted by the iris colour at runtime). Eyebrows are a separate catalog.
 function eyesStyle(kind) {
-  const b = new Buf();
-  const wr = 246, wg = 246, wb = 252, dr = 28, dg = 30, db = 44, cr = 127, cg = 249, cb = 224;
-  const eyeOpen = () => { b.rectC(13, 7, 2, 2, dr, dg, db); b.rectC(17, 7, 2, 2, dr, dg, db); b.setC(13, 7, wr, wg, wb); b.setC(17, 7, wr, wg, wb); };
-  if (kind === 'angry') { b.rectC(13, 7, 2, 1, dr, dg, db); b.rectC(17, 7, 2, 1, dr, dg, db); b.setC(13, 7, wr, wg, wb); b.setC(17, 7, wr, wg, wb); }        // narrowed
-  else if (kind === 'sleepy') { b.rectC(13, 8, 2, 1, dr, dg, db); b.rectC(17, 8, 2, 1, dr, dg, db); }                                                        // half-lidded
-  else if (kind === 'shades') { b.rectC(12, 7, 7, 2, 18, 20, 30); b.setC(13, 7, cr, cg, cb); }
-  else if (kind === 'sparkle') { eyeOpen(); b.setC(14, 8, 255, 255, 255); b.setC(18, 8, 255, 255, 255); }
-  else if (kind === 'wide') { b.rectC(13, 6, 2, 3, wr, wg, wb); b.rectC(17, 6, 2, 3, wr, wg, wb); b.setC(14, 7, dr, dg, db); b.setC(14, 8, dr, dg, db); b.setC(17, 7, dr, dg, db); b.setC(17, 8, dr, dg, db); }
-  else { eyeOpen(); }    // classic
-  return b;
+  const w = new Buf(), ir = new Buf();
+  const wr = 246, wg = 246, wb = 252, gl = 255, c1 = 127, c2 = 249, c3 = 224;
+  const open = () => { w.rectC(13, 7, 2, 2, wr, wg, wb); w.rectC(17, 7, 2, 2, wr, wg, wb); ir.rect(14, 7, 1, 2, 235); ir.rect(17, 7, 1, 2, 235); w.setC(13, 7, gl, gl, gl); w.setC(17, 7, gl, gl, gl); };
+  if (kind === 'angry') { w.rectC(13, 7, 2, 1, wr, wg, wb); w.rectC(17, 7, 2, 1, wr, wg, wb); ir.set(14, 7, 235); ir.set(17, 7, 235); }
+  else if (kind === 'sleepy') { ir.rect(13, 8, 2, 1, 235); ir.rect(17, 8, 2, 1, 235); }
+  else if (kind === 'shades') { w.rectC(12, 7, 7, 2, 18, 20, 30); w.setC(13, 7, c1, c2, c3); }
+  else if (kind === 'sparkle') { open(); w.setC(14, 8, 255, 255, 255); w.setC(18, 8, 255, 255, 255); }
+  else if (kind === 'wide') { w.rectC(13, 6, 2, 3, wr, wg, wb); w.rectC(17, 6, 2, 3, wr, wg, wb); ir.rect(14, 7, 1, 2, 235); ir.rect(17, 7, 1, 2, 235); }
+  else { open(); }   // classic
+  return { white: w, iris: ir };
 }
 
 // EYEBROWS = their own catalog, tinted by the HAIR colour. Grayscale = tintable.
@@ -296,7 +296,7 @@ manifest.catalog.shoes = [
 ];
 manifest.catalog.hair = ['bald', 'short', 'long', 'ponytail', 'spiky', 'bun', 'mohawk', 'afro', 'curly'].map(k => { const { front, back } = hairStyle(k); return { id: k, name: cap(k), front: save('hair/' + k + '_f.png', front), back: save('hair/' + k + '_b.png', back) }; });
 manifest.catalog.beard = ['none', 'stubble', 'clobi', 'goatee', 'full', 'moustache'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('beard/' + k + '.png', beardStyle(k)) }));
-manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle', 'wide'].map(k => ({ id: k, name: cap(k), file: save('eyes/' + k + '.png', eyesStyle(k)) }));
+manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle', 'wide'].map(k => { const e = eyesStyle(k); return { id: k, name: cap(k), file: save('eyes/' + k + '.png', e.white), iris: save('eyes/' + k + '_i.png', e.iris) }; });
 manifest.catalog.eyebrows = ['flat', 'angry', 'raised', 'worried', 'thick', 'unibrow', 'none'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('brow/' + k + '.png', eyebrowsStyle(k)) }));
 manifest.catalog.mouth = ['neutral', 'smile', 'grin', 'frown', 'open', 'serious'].map(k => ({ id: k, name: cap(k), file: save('mouth/' + k + '.png', mouthStyle(k)) }));
 manifest.catalog.hat = ['none', 'cap', 'wizard', 'beanie', 'tophat', 'crown', 'halo'].map(k => ({ id: k, name: k === 'cap' ? 'Vim Cap' : cap(k), file: k === 'none' ? null : save('hat/' + k + '.png', hatStyle(k)) }));

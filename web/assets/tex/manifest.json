@@ -185,32 +185,38 @@
    {
     "id": "classic",
     "name": "Classic",
-    "file": "eyes/classic.png"
+    "file": "eyes/classic.png",
+    "iris": "eyes/classic_i.png"
    },
    {
     "id": "angry",
     "name": "Angry",
-    "file": "eyes/angry.png"
+    "file": "eyes/angry.png",
+    "iris": "eyes/angry_i.png"
    },
    {
     "id": "sleepy",
     "name": "Sleepy",
-    "file": "eyes/sleepy.png"
+    "file": "eyes/sleepy.png",
+    "iris": "eyes/sleepy_i.png"
    },
    {
     "id": "shades",
     "name": "Shades",
-    "file": "eyes/shades.png"
+    "file": "eyes/shades.png",
+    "iris": "eyes/shades_i.png"
    },
    {
     "id": "sparkle",
     "name": "Sparkle",
-    "file": "eyes/sparkle.png"
+    "file": "eyes/sparkle.png",
+    "iris": "eyes/sparkle_i.png"
    },
    {
     "id": "wide",
     "name": "Wide",
-    "file": "eyes/wide.png"
+    "file": "eyes/wide.png",
+    "iris": "eyes/wide_i.png"
    }
   ],
   "eyebrows": [

@@ -136,6 +136,8 @@ func defaultCharacter(name string) protocol.Character {
 		BeardColor: "#7a4a1f",
 		Pants:      "#33405c",
 		CapeColor:  "#ff5a3c",
+		IrisColor:  "#222a3a",
+		MouthColor: "",
 		Fat:        0,
 		Hair:       3, // ponytail
 		Beard:      2, // clobi (around the mouth)
