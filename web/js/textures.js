@@ -28,6 +28,7 @@ var Textures = (function () {
     if (basePath) base = basePath;
     return fetch(base + 'manifest.json').then(function (r) { return r.json(); }).then(function (m) {
       manifest = m; GW = m.grid.w; GH = m.grid.h;
+      WW = Math.round(GW * 1.5); WC = Math.round(WW / 2);   // warp canvas (room for a fat belly)
       var files = [];
       Object.keys(m.base).forEach(function (k) { files.push(m.base[k]); });
       Object.keys(m.catalog).forEach(function (g) {
@@ -117,13 +118,13 @@ var Textures = (function () {
       L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd') });
       L.push({ f: manifest.base.tuxFeet, c: col(ch, 'feet', '#ff9e2c') });
       L.push({ f: manifest.base.tuxBeak, c: col(ch, 'feet', '#ff9e2c') });
-      L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 4 });
+      L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 8 });
     }
     var tux = (ch.bodyType !== 'humanoid');
     var accF = (ch.accessory | 0) ? styleFile('accessory', ch.accessory) : null;
-    if (accF) L.push({ f: accF, c: null, dy: tux ? 3 : 0 });
+    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0 });
     var hatF = (ch.hat | 0) ? styleFile('hat', ch.hat) : null;
-    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 4 : 0 });
+    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 8 : 0 });
     return L;
   }
 
@@ -146,17 +147,18 @@ var Textures = (function () {
   }
 
   // gender silhouette: a per-row UNIFORM horizontal scale (shoulders/waist/hips).
-  function genderScale(y, gender) {
-    if (y >= 13 && y <= 16) return gender === 'female' ? 0.96 : 1.06; // shoulders
-    if (y >= 17 && y <= 20) return gender === 'female' ? 0.99 : 1.03; // chest
-    if (y >= 21 && y <= 23) return gender === 'female' ? 0.90 : 1.0;  // waist
-    if (y >= 24 && y <= 28) return gender === 'female' ? 1.10 : 1.0;  // hips
+  // Bands are fractions of the sprite height so it works at any resolution.
+  function genderScale(yn, gender) {
+    if (yn >= 0.37 && yn <= 0.44) return gender === 'female' ? 0.95 : 1.07; // shoulders
+    if (yn >= 0.45 && yn <= 0.57) return gender === 'female' ? 0.99 : 1.03; // chest
+    if (yn >= 0.58 && yn <= 0.64) return gender === 'female' ? 0.89 : 1.0;  // waist
+    if (yn >= 0.65 && yn <= 0.74) return gender === 'female' ? 1.11 : 1.0;  // hips
     return 1;
   }
   // fat: a CENTRE-weighted belly push — peaks at the stomach and fades out before
   // the arms, so the gut sticks out without the arms splaying.
-  function fatBulge(y, fat) {
-    if (y >= 18 && y <= 25) { var d = 1 - Math.abs(21 - y) / 4; return Math.max(0, d) * fat * 1.2; }
+  function fatBulge(yn, fat) {
+    if (yn >= 0.44 && yn <= 0.66) { var d = 1 - Math.abs(0.55 - yn) / 0.12; return Math.max(0, d) * fat * 1.25; }
     return 0;
   }
 
@@ -170,11 +172,11 @@ var Textures = (function () {
     var out = newCanvas(WW, GH), o = out.getContext('2d');
     o.imageSmoothingEnabled = false;
     var humanoid = (ch.bodyType === 'humanoid');
-    var UMAX = 6.5;                              // belly half-width; arms sit beyond this
+    var CX = GW / 2, UMAX = GW * 0.20;          // belly half-width; arms sit beyond this
     for (var y = 0; y < GH; y++) {
       if (!humanoid) { o.drawImage(src, 0, y, GW, 1, WC - GW / 2, y, GW, 1); continue; }
-      var G = genderScale(y, g), B = fatBulge(y, fat);
-      var mapX = function (x) { var u = x - 16, w = Math.max(0, 1 - (u / UMAX) * (u / UMAX)); return WC + u * G * (1 + B * w); };
+      var yn = y / GH, G = genderScale(yn, g), B = fatBulge(yn, fat);
+      var mapX = function (x) { var u = x - CX, w = Math.max(0, 1 - (u / UMAX) * (u / UMAX)); return WC + u * G * (1 + B * w); };
       var prev = mapX(0);
       for (var x = 0; x < GW; x++) {            // forward-map each source column (no gaps)
         var nx = mapX(x + 1);

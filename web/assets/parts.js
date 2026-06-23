@@ -6,8 +6,8 @@
 // To add styles (shirts, hats, beards, capes...) edit tools/gen-textures.mjs and
 // re-run it; the new image + manifest entry shows up in the editor automatically.
 window.ClobiParts = {
-  GRID_W: 32,
-  GRID_H: 36,
+  GRID_W: 64,
+  GRID_H: 72,
 
   // Colour-picker preset swatches (the editor also offers a free colour picker).
   presets: {

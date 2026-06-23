@@ -1,7 +1,7 @@
 {
  "grid": {
-  "w": 32,
-  "h": 36
+  "w": 64,
+  "h": 72
  },
  "base": {
   "humanoidBody": "base/humanoidBody.png",

@@ -1,17 +1,12 @@
-// gen-textures.mjs — bakes the character art into PNG image files for
-// TUX SMASH ROYALE. Run: `node tools/gen-textures.mjs`.
+// gen-textures.mjs — bakes character art to PNG image files for TUX SMASH ROYALE.
+// Run: `node tools/gen-textures.mjs`.
 //
-// The art used to be procedural fillRect code; this generator is now the single
-// source of truth and emits real, referenced image files under web/assets/tex/
-// plus a manifest.json the runtime + editor read.
-//
-//   - TINTABLE parts are baked GRAYSCALE (value = shading; 255 = full colour).
-//     The runtime multiplies them by the fighter's chosen colour.
-//   - FIXED parts (eyes, hats, accessories) are baked in real colour.
-//
-// LAYOUT v2 (32x36 grid, cx=16):
-//   head y3..11 | neck y11..12 | torso/shirt y12..23 | hips y23..24 |
-//   legs y24..31 | shoes y31..33.  eyes y7, mouth y10 (beards frame it).
+// APPROACH: author the ORIGINAL 8-bit sprite shapes on a 32x36 grid (flat colours,
+// symmetric — no gradients, no outlines), then UPSCALE every layer 2x with Scale2x
+// (EPX) to a crisp 16-bit 64x72 image. Tintable parts are baked GRAYSCALE (white =
+// full colour) and multiplied by the fighter's colour at runtime; fixed parts
+// (eyes/hats/accessories) are baked in real colour. New styles (shirts/pants/shoes,
+// gender, fat) are layered on the original body shape.
 
 import zlib from 'node:zlib';
 import fs from 'node:fs';
@@ -21,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'web', 'assets', 'tex');
-const GW = 32, GH = 36;
+const GW = 32, GH = 36;           // authoring grid (output is 2x = 64x72)
 
 // ---------------------------------------------------------------- PNG encoder
 const CRCT = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
@@ -40,193 +35,204 @@ function encodePNG(w, h, rgba) {
 class Buf {
   constructor(w = GW, h = GH) { this.w = w; this.h = h; this.d = Buffer.alloc(w * h * 4); }
   setC(x, y, r, g, b, a = 255) {
-    x = x | 0; y = y | 0; if (x < 0 || y < 0 || x >= this.w || y >= this.h || a <= 0) return;
-    const i = (y * this.w + x) * 4, A = a / 255, ia = 1 - A;
+    x = x | 0; y = y | 0; if (x < 0 || y < 0 || x >= this.w || y >= this.h) return;
+    const i = (y * this.w + x) * 4;
+    if (a >= 255) { this.d[i] = r; this.d[i + 1] = g; this.d[i + 2] = b; this.d[i + 3] = 255; return; }
+    if (a <= 0) return;
+    const A = a / 255, ia = 1 - A;
     this.d[i] = Math.round(r * A + this.d[i] * ia); this.d[i + 1] = Math.round(g * A + this.d[i + 1] * ia);
     this.d[i + 2] = Math.round(b * A + this.d[i + 2] * ia); this.d[i + 3] = Math.min(255, Math.round(a + this.d[i + 3] * ia));
   }
   set(x, y, v, a = 255) { this.setC(x, y, v, v, v, a); }
-  clr(x, y) { const i = (y * this.w + x) * 4; if (x < 0 || y < 0 || x >= this.w || y >= this.h) return; this.d[i] = this.d[i + 1] = this.d[i + 2] = this.d[i + 3] = 0; }
+  clr(x, y) { x |= 0; y |= 0; if (x < 0 || y < 0 || x >= this.w || y >= this.h) return; const i = (y * this.w + x) * 4; this.d[i] = this.d[i + 1] = this.d[i + 2] = this.d[i + 3] = 0; }
   rect(x, y, w, h, v, a = 255) { for (let j = 0; j < h; j++) for (let k = 0; k < w; k++) this.set(x + k, y + j, v, a); }
   rectC(x, y, w, h, r, g, b, a = 255) { for (let j = 0; j < h; j++) for (let k = 0; k < w; k++) this.setC(x + k, y + j, r, g, b, a); }
   row(x0, x1, y, v, a = 255) { for (let x = x0; x <= x1; x++) this.set(x, y, v, a); }
   ell(cx, cy, rx, ry, v, a = 255) { for (let y = -Math.ceil(ry); y <= Math.ceil(ry); y++) for (let x = -Math.ceil(rx); x <= Math.ceil(rx); x++) if ((x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1) this.set(cx + x, cy + y, v, a); }
   ellC(cx, cy, rx, ry, r, g, b, a = 255) { for (let y = -Math.ceil(ry); y <= Math.ceil(ry); y++) for (let x = -Math.ceil(rx); x <= Math.ceil(rx); x++) if ((x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1) this.setC(cx + x, cy + y, r, g, b, a); }
-  // outlines intentionally disabled — keep the original flat 8-bit style (just
-  // cleaner shapes at the real resolution). Left as a no-op so callers are happy.
-  outline() { /* no-op */ }
+  // paint a list of [x,y,w,h] rects in grayscale value v
+  rects(list, v, a = 255) { for (const r of list) this.rect(r[0], r[1], r[2], r[3] === undefined ? 1 : r[3], v, a); }
 }
-// left-lit horizontal span (lighter left, slightly darker right)
-function vSpan(b, x0, x1, y, base, drop = 26, a = 255) { const n = Math.max(1, x1 - x0); for (let x = x0; x <= x1; x++) b.set(x, y, Math.max(0, base - Math.round(((x - x0) / n) * drop)), a); }
+
+// ---- nearest-neighbour 2x: doubles the resolution while looking IDENTICAL (true
+// 8-bit -> 16-bit upscale). Each source pixel becomes a 2x2 block; nothing is
+// smoothed or re-shaped, and the finer 64x72 grid is editable for adding detail.
+function nearest2x(src) {
+  const out = new Buf(src.w * 2, src.h * 2);
+  for (let y = 0; y < src.h; y++) for (let x = 0; x < src.w; x++) {
+    const i = (y * src.w + x) * 4, r = src.d[i], g = src.d[i + 1], b = src.d[i + 2], a = src.d[i + 3];
+    for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+      const j = ((y * 2 + dy) * out.w + (x * 2 + dx)) * 4;
+      out.d[j] = r; out.d[j + 1] = g; out.d[j + 2] = b; out.d[j + 3] = a;
+    }
+  }
+  return out;
+}
 
 // =============================================================================
-// HUMANOID  (canonical; gender/fat handled at runtime via warp)
+// HUMANOID  (original proportions, flat, symmetric)
+//   head x11..20 y4..12 | torso y14..22 | arms sides y15..21 | legs y24..30 | shoes y31..32
+//   eyes y8, mouth ~y10.5 (drawn faint). gender + fat handled at runtime (warp).
 // =============================================================================
-const SKIN = 232, SKIN_SH = 196;
-
 function humanoidBody() {
   const b = new Buf();
-  b.rect(12, 24, 3, 8, 206); b.rect(17, 24, 3, 8, 206);   // two legs (under pants), gap between so no skin shows in the crotch
-  b.rect(11, 13, 10, 11, 212);                            // torso (under shirt)
-  b.rect(8, 14, 2, 7, 210); b.rect(22, 14, 2, 7, 210);    // arms
-  b.rect(8, 21, 2, 2, 222); b.rect(22, 21, 2, 2, 222);    // hands
-  b.ell(16, 7, 4, 4, SKIN);                               // head x12..20 y3..11
-  for (let y = 4; y <= 10; y++) vSpan(b, 12, 20, y, SKIN, 22);
-  for (let y = 4; y <= 10; y++) { b.set(19, y, SKIN_SH); b.set(20, y, SKIN_SH - 14, 150); }
-  b.rect(11, 7, 1, 2, SKIN_SH); b.rect(20, 7, 1, 2, SKIN_SH);  // ears
-  b.rect(14, 11, 4, 1, SKIN_SH);                          // neck
-  b.set(16, 9, SKIN_SH - 18);                             // nose
-  b.set(15, 10, 150, 200); b.set(16, 10, 150, 200); b.set(17, 10, 150, 220); // mouth (open)
-  b.outline(70);
+  // torso + leg skin base (covered by clothes; two legs with a gap so no crotch skin)
+  b.rect(11, 14, 10, 9, 230);
+  b.rect(12, 24, 3, 8, 230); b.rect(17, 24, 3, 8, 230);
+  // arms (skin) at the sides + hands
+  b.rect(9, 15, 2, 6, 230); b.rect(21, 15, 2, 6, 230);
+  b.rect(9, 20, 2, 2, 230); b.rect(21, 20, 2, 2, 230);
+  // head (original shape)
+  b.row(13, 18, 4, 230); b.row(12, 19, 5, 230); b.rect(11, 6, 10, 5, 230);
+  b.row(12, 19, 11, 230); b.row(14, 17, 12, 230);
+  b.rect(10, 8, 1, 2, 230); b.rect(21, 8, 1, 2, 230);   // ears
+  b.rect(14, 13, 4, 1, 230);                            // neck
+  // faint mouth (kept open; beards frame it)
+  b.row(14, 17, 10, 150, 120);
   return b;
 }
 
-// ---- SHIRTS (tint: belly) ----
+// ---- SHIRTS (tint: belly) — built on the original torso block ----
 function shirtBase(b) {
-  for (let y = 12; y <= 23; y++) { const x0 = y <= 13 ? 10 : 11, x1 = y <= 13 ? 21 : 20; vSpan(b, x0, x1, y, 236, 24); }
-  b.rect(8, 13, 2, 5, 224); b.rect(22, 13, 2, 5, 224);    // sleeve caps
+  b.rect(10, 14, 12, 2, 255);            // shoulders
+  b.rect(11, 16, 10, 6, 255);            // chest..belly
+  b.rect(12, 22, 8, 1, 255);             // waist
+  b.rect(9, 15, 2, 5, 245); b.rect(21, 15, 2, 5, 245);  // sleeves
 }
-function shirtTee() { const b = new Buf(); shirtBase(b); b.row(13, 18, 12, 250); b.outline(70); return b; }
-function shirtVneck() { const b = new Buf(); shirtBase(b); for (let i = 0; i < 4; i++) for (let x = 14 + i; x <= 18 - i; x++) b.clr(x, 12 + i); b.outline(70); return b; }
-function shirtHoodie() { const b = new Buf(); shirtBase(b); b.row(11, 20, 12, 208); b.row(12, 19, 13, 220); b.rect(13, 18, 6, 3, 204); b.set(14, 14, 248); b.set(17, 14, 248); b.outline(70); return b; }
-function shirtTank() { const b = new Buf(); for (let y = 14; y <= 23; y++) vSpan(b, 12, 19, y, 236, 22); b.rect(12, 12, 2, 2, 236); b.rect(18, 12, 2, 2, 236); b.outline(70); return b; }
-function shirtStripe() { const b = new Buf(); shirtBase(b); for (let y = 14; y <= 22; y += 2) b.row(11, 20, y, 170); b.outline(70); return b; }
-function shirtSuit() { const b = new Buf(); shirtBase(b); b.rect(15, 12, 2, 11, 250); b.rect(15, 14, 2, 6, 150); b.set(15, 13, 110); b.set(16, 13, 110); b.outline(70); return b; }
+function shirtTee() { const b = new Buf(); shirtBase(b); return b; }
+function shirtVneck() { const b = new Buf(); shirtBase(b); for (let i = 0; i < 3; i++) for (let x = 14 + i; x <= 17 - i; x++) b.clr(x, 14 + i); return b; }
+function shirtHoodie() { const b = new Buf(); shirtBase(b); b.row(11, 20, 14, 220); b.row(12, 19, 15, 235); b.rect(13, 18, 6, 3, 210); b.set(14, 16, 255); b.set(17, 16, 255); return b; }
+function shirtTank() { const b = new Buf(); b.rect(12, 14, 2, 2, 255); b.rect(18, 14, 2, 2, 255); b.rect(11, 16, 10, 6, 255); b.rect(12, 22, 8, 1, 255); return b; }
+function shirtStripe() { const b = new Buf(); shirtBase(b); for (let y = 16; y <= 21; y += 2) b.row(10, 21, y, 175); return b; }
+function shirtSuit() { const b = new Buf(); shirtBase(b); b.rect(15, 14, 2, 8, 255); b.set(15, 14, 110); b.set(16, 14, 110); for (let y = 15; y <= 20; y++) { b.set(15, y, 150); b.set(16, y, 150); } return b; }
 
 // ---- PANTS (tint: pants) ----
-function pantsJeans() { const b = new Buf(); b.rect(11, 23, 10, 2, 220); b.rect(12, 25, 3, 7, 230); b.rect(17, 25, 3, 7, 230); b.set(16, 24, 200); b.set(13, 28, 250); b.set(18, 28, 250); b.outline(70); return b; }
-function pantsShorts() { const b = new Buf(); b.rect(11, 23, 10, 2, 220); b.rect(12, 25, 3, 4, 232); b.rect(17, 25, 3, 4, 232); b.outline(70); return b; }
-function pantsCargo() { const b = new Buf(); b.rect(11, 23, 10, 2, 218); b.rect(12, 25, 3, 7, 228); b.rect(17, 25, 3, 7, 228); b.rect(12, 27, 2, 2, 196); b.rect(18, 27, 2, 2, 196); b.outline(70); return b; }
-function pantsSkirt() { const b = new Buf(); b.rect(11, 23, 10, 2, 222); for (let y = 25; y <= 30; y++) { const w = y - 24; vSpan(b, 12 - w, 19 + w, y, 232, 22); } b.outline(70); return b; }
-function pantsTrouser() { const b = new Buf(); b.rect(11, 23, 10, 2, 222); b.rect(12, 25, 3, 7, 232); b.rect(17, 25, 3, 7, 232); for (let y = 25; y <= 31; y++) { b.set(13, y, 250); b.set(18, y, 250); } b.outline(70); return b; }
+function pantsJeans() { const b = new Buf(); b.rect(11, 23, 10, 1, 235); b.rect(12, 24, 3, 7, 255); b.rect(17, 24, 3, 7, 255); b.set(16, 24, 200); return b; }
+function pantsTrouser() { const b = new Buf(); b.rect(11, 23, 10, 1, 235); b.rect(12, 24, 3, 7, 255); b.rect(17, 24, 3, 7, 255); for (let y = 25; y <= 30; y++) { b.set(13, y, 210); b.set(18, y, 210); } return b; }
+function pantsCargo() { const b = new Buf(); b.rect(11, 23, 10, 1, 235); b.rect(12, 24, 3, 7, 255); b.rect(17, 24, 3, 7, 255); b.rect(12, 27, 2, 2, 200); b.rect(18, 27, 2, 2, 200); return b; }
+function pantsShorts() { const b = new Buf(); b.rect(11, 23, 10, 1, 235); b.rect(12, 24, 3, 4, 255); b.rect(17, 24, 3, 4, 255); return b; }
+function pantsSkirt() { const b = new Buf(); b.rect(11, 23, 10, 1, 240); for (let y = 24; y <= 30; y++) { const w = y - 23; b.row(12 - w, 19 + w, y, 255); } return b; }
 
 // ---- SHOES (tint: feet) ----
-function shoeSneaker() { const b = new Buf(); b.rect(11, 31, 5, 2, 235); b.rect(16, 31, 5, 2, 235); b.row(11, 15, 32, 255); b.row(16, 20, 32, 255); b.outline(70); return b; }
-function shoeBoot() { const b = new Buf(); b.rect(11, 30, 5, 3, 225); b.rect(16, 30, 5, 3, 225); b.outline(70); return b; }
-function shoeSandal() { const b = new Buf(); b.rect(11, 32, 5, 1, 235); b.rect(16, 32, 5, 1, 235); b.set(13, 31, 220); b.set(18, 31, 220); b.outline(70); return b; }
-function shoeDress() { const b = new Buf(); b.rect(11, 31, 5, 2, 226); b.rect(16, 31, 5, 2, 226); b.set(11, 32, 255); b.set(16, 32, 255); b.outline(70); return b; }
+function shoeSneaker() { const b = new Buf(); b.rect(11, 31, 5, 2, 255); b.rect(16, 31, 5, 2, 255); b.row(11, 15, 32, 210); b.row(16, 20, 32, 210); return b; }
+function shoeBoot() { const b = new Buf(); b.rect(11, 30, 5, 3, 255); b.rect(16, 30, 5, 3, 255); return b; }
+function shoeDress() { const b = new Buf(); b.rect(11, 31, 5, 2, 255); b.rect(16, 31, 5, 2, 255); b.set(11, 32, 200); b.set(16, 32, 200); return b; }
+function shoeSandal() { const b = new Buf(); b.rect(11, 32, 5, 1, 255); b.rect(16, 32, 5, 1, 255); return b; }
 
-// ---- HAIR (tint: hairColor): front (over head) + back (behind body) ----
+// ---- HAIR (tint: hairColor) — ORIGINAL shapes; x<11 pieces read as BEHIND ----
+const HAIR_DATA = {
+  bald: [],
+  short: [[12, 2, 8, 1], [11, 3, 10, 1], [11, 4, 1, 2], [20, 4, 1, 2]],
+  long: [[12, 2, 8, 1], [11, 3, 10, 1], [10, 4, 2, 8], [20, 4, 2, 8]],
+  ponytail: [[12, 2, 8, 1], [11, 3, 10, 1], [11, 4, 1, 2], [20, 4, 1, 2], [8, 5, 3, 1], [7, 6, 3, 5], [8, 11, 2, 1]],
+  spiky: [[11, 4, 10, 1], [12, 2, 1, 2], [14, 1, 1, 3], [16, 0, 1, 4], [18, 1, 1, 3], [20, 2, 1, 2]],
+  bun: [[12, 2, 8, 1], [11, 3, 10, 1], [14, 0, 4, 2]],
+  mohawk: [[15, 0, 2, 5], [14, 3, 4, 1]],
+  afro: [[10, 1, 12, 4], [9, 2, 2, 4], [21, 2, 2, 4]],
+  curly: [[12, 1, 8, 1], [11, 2, 10, 2], [10, 3, 1, 2], [21, 3, 1, 2], [12, 4, 1, 1], [16, 4, 1, 1], [19, 4, 1, 1]]
+};
 function hairStyle(kind) {
   const front = new Buf(), back = new Buf();
-  const v = 222, hi = 244, sh = 190;
-  if (kind === 'bald') return { front, back };
-  // skull-hugging cap: rounded top, frames the temples, hairline ~y5/6 (above eyes)
-  const cap = () => {
-    front.row(14, 17, 1, v); front.row(13, 18, 2, v);
-    front.row(12, 19, 3, v); front.row(11, 20, 4, v); front.row(11, 20, 5, v);
-    front.set(11, 6, v); front.set(20, 6, v);          // temples
-    front.row(15, 16, 1, hi); front.set(14, 2, hi); front.set(13, 3, hi); // top sheen
-  };
-  if (kind === 'short') { cap(); front.row(12, 19, 6, sh); }
-  else if (kind === 'long') { cap(); back.rect(10, 4, 2, 14, v); back.rect(20, 4, 2, 14, v); back.row(10, 21, 17, sh); back.row(11, 20, 18, sh); }
-  else if (kind === 'ponytail') { cap(); back.rect(9, 5, 2, 3, v); back.rect(8, 7, 2, 5, v); back.set(8, 12, sh); back.set(9, 12, sh); }
-  else if (kind === 'spiky') { cap(); front.set(12, 0, v); front.set(14, 0, v); front.set(16, 0, v); front.set(18, 0, v); front.set(20, 0, v); }
-  else if (kind === 'bun') { cap(); front.rect(15, 0, 3, 2, v); front.set(16, 0, hi); }
-  else if (kind === 'mohawk') { for (let y = 0; y <= 6; y++) { front.set(15, y, v); front.set(16, y, v); front.set(17, y, v); } front.set(16, 0, hi); }
-  else if (kind === 'afro') { front.ell(16, 4, 7, 4, v); front.ell(15, 3, 4, 2, hi); back.ell(16, 5, 7, 3, sh); }
-  else if (kind === 'curly') { cap(); for (let x = 11; x <= 20; x += 2) { front.set(x, 6, v); front.set(x + 1, 6, sh); } front.set(11, 5, v); front.set(20, 5, v); }
-  else { cap(); }
+  for (const r of (HAIR_DATA[kind] || [])) {
+    const tgt = (r[0] < 11) ? back : front;
+    tgt.rect(r[0], r[1], r[2], r[3] === undefined ? 1 : r[3], 230);
+  }
   return { front, back };
 }
 
-// ---- BEARDS (tint: beardColor) — ALWAYS leave the mouth (y10) open ----
+// ---- BEARDS (tint: beardColor) — original-ish, mouth (y10) kept open ----
 function beardStyle(kind) {
-  // mouth is at y10 and is ALWAYS left open; moustache sits at y9, jaw/chin y11-13
-  const b = new Buf(); const v = 214, sh = 184;
+  const b = new Buf();
   if (kind === 'none') return b;
-  if (kind === 'stubble') {
-    [[12, 9], [12, 10], [13, 11], [15, 12], [17, 12], [19, 11], [20, 10], [20, 9], [14, 12], [18, 12]].forEach(p => b.set(p[0], p[1], sh, 150));
-    b.row(13, 18, 12, v, 140);
-  } else if (kind === 'goatee') {
-    b.row(13, 18, 9, v); b.row(14, 17, 11, v); b.rect(15, 12, 2, 2, v);
-  } else if (kind === 'full') {
-    b.row(13, 18, 9, v); b.rect(11, 8, 2, 4, v); b.rect(19, 8, 2, 4, v);
-    b.row(12, 19, 11, v); b.row(12, 19, 12, v); b.row(13, 18, 13, v);
-  } else if (kind === 'moustache') {
-    b.row(13, 18, 9, v); b.set(12, 9, sh); b.set(19, 9, sh);
-  } else if (kind === 'clobi') {
-    b.row(13, 18, 9, v); b.set(12, 8, sh); b.set(19, 8, sh);
-    b.row(12, 19, 11, v); b.row(14, 17, 12, v);
-  }
+  if (kind === 'stubble') { [[12, 9], [12, 10], [13, 11], [15, 11], [17, 11], [19, 11], [19, 10], [19, 9], [14, 12], [17, 12]].forEach(p => b.set(p[0], p[1], 220, 140)); }
+  else if (kind === 'goatee') { b.row(13, 18, 9, 230); b.rect(15, 11, 2, 2, 230); }
+  else if (kind === 'full') { b.rect(11, 9, 2, 3, 230); b.rect(19, 9, 2, 3, 230); b.row(13, 18, 9, 230); b.row(12, 19, 11, 230); b.row(13, 18, 12, 230); }
+  else if (kind === 'moustache') { b.row(13, 18, 9, 230); }
+  else if (kind === 'clobi') { b.row(13, 18, 9, 230); b.set(12, 9, 230); b.set(19, 9, 230); b.row(12, 19, 11, 230); b.row(14, 17, 12, 230); }
   return b;
 }
 
-// ---- EYES (fixed colour) ----
+// ---- EYES (fixed colour) — original positions L=13,R=17,y=8 ----
 function eyesStyle(kind) {
   const b = new Buf(); const W = [245, 245, 250], D = [20, 22, 34], C = [127, 249, 224];
-  const L = 13, R = 18, y = 7;
+  const L = 13, R = 17, y = 8;
   const white = (x) => { b.setC(x, y, ...W); b.setC(x + 1, y, ...W); b.setC(x, y + 1, ...W); b.setC(x + 1, y + 1, ...W); };
   const pupil = (x, c = D) => { b.setC(x + 1, y, ...c); b.setC(x + 1, y + 1, ...c); };
-  if (kind === 'classic') { white(L); white(R); pupil(L); pupil(R); }
-  else if (kind === 'angry') { white(L); white(R); pupil(L); pupil(R); b.setC(L - 1, y - 1, ...D); b.setC(L, y - 1, ...D); b.setC(R + 1, y - 1, ...D); b.setC(R, y - 1, ...D); }
+  if (kind === 'angry') { white(L); white(R); pupil(L); pupil(R); b.setC(L - 1, y - 1, ...D); b.setC(L, y - 1, ...D); b.setC(R + 1, y - 1, ...D); b.setC(R, y - 1, ...D); }
   else if (kind === 'sleepy') { b.setC(L, y, ...D); b.setC(L + 1, y, ...D); b.setC(R, y, ...D); b.setC(R + 1, y, ...D); b.setC(L, y + 1, ...W); b.setC(R + 1, y + 1, ...W); }
-  else if (kind === 'shades') { b.rectC(L - 1, y - 1, 8, 3, 18, 20, 30); b.setC(L, y, ...C); b.setC(R + 1, y + 1, 120, 200, 180); }
-  else if (kind === 'sparkle') { white(L); white(R); pupil(L, C); pupil(R, C); b.setC(L, y, 255, 255, 255); b.setC(R, y, 255, 255, 255); }
+  else if (kind === 'shades') { b.rectC(L - 1, y - 1, 7, 3, 18, 20, 30); b.setC(L, y, ...C); }
+  else if (kind === 'sparkle') { white(L); white(R); pupil(L, C); pupil(R, C); }
   else { white(L); white(R); pupil(L); pupil(R); }
   return b;
 }
 
-// ---- HATS (fixed colour) — sit on the head top ----
+// ---- HATS (fixed colour) — fit within y0..5 ----
 function hatStyle(kind) {
-  // hats must fit within y0..5 (the 36px canvas has no room above the head),
-  // so tall hats are compact and the halo is a ring just above the hair.
   const b = new Buf();
   if (kind === 'cap') { b.rectC(11, 2, 11, 2, 27, 122, 58); b.rectC(12, 0, 9, 2, 31, 138, 66); b.rectC(10, 4, 14, 1, 18, 80, 40); b.rectC(15, 2, 2, 2, 207, 233, 255); }
   else if (kind === 'wizard') { b.setC(16, 0, 58, 29, 74); b.rectC(15, 1, 3, 1, 58, 29, 74); b.rectC(13, 2, 6, 1, 70, 40, 92); b.rectC(11, 3, 11, 1, 58, 29, 74); b.rectC(9, 4, 15, 1, 127, 249, 224); b.setC(16, 1, 255, 242, 127); }
   else if (kind === 'beanie') { b.rectC(11, 1, 10, 2, 255, 90, 60); b.rectC(11, 3, 10, 1, 253, 253, 253); b.setC(15, 0, 253, 253, 253); b.setC(16, 0, 253, 253, 253); }
-  else if (kind === 'tophat') { b.rectC(9, 4, 14, 1, 17, 19, 28); b.rectC(12, 0, 8, 4, 17, 19, 28); b.rectC(12, 3, 8, 1, 200, 70, 70); }
+  else if (kind === 'tophat') { b.rectC(9, 4, 14, 1, 22, 24, 34); b.rectC(12, 0, 8, 4, 22, 24, 34); b.rectC(12, 3, 8, 1, 200, 70, 70); }
   else if (kind === 'crown') { b.rectC(11, 3, 10, 1, 255, 207, 60); b.rectC(11, 1, 2, 2, 255, 207, 60); b.rectC(15, 1, 2, 2, 255, 207, 60); b.rectC(19, 1, 2, 2, 255, 207, 60); b.setC(13, 2, 255, 207, 60); b.setC(17, 2, 255, 207, 60); b.setC(16, 2, 255, 90, 60); }
   else if (kind === 'halo') { b.ellC(16, 1, 5, 1, 255, 242, 127); b.ellC(16, 1, 3, 1, 0, 0, 0, 0); b.setC(11, 1, 255, 242, 127); b.setC(21, 1, 255, 242, 127); }
   return b;
 }
 
-// ---- ACCESSORIES (fixed colour) — on the chest ----
+// ---- ACCESSORIES (fixed colour) ----
 function accStyle(kind) {
   const b = new Buf();
-  if (kind === 'bowtie') { b.rectC(15, 12, 2, 2, 255, 90, 60); b.rectC(13, 12, 2, 2, 255, 90, 60); b.rectC(17, 12, 2, 2, 255, 90, 60); }
-  else if (kind === 'scarf') { b.rectC(11, 11, 10, 2, 255, 158, 44); b.rectC(13, 13, 2, 3, 255, 158, 44); }
-  else if (kind === 'fish') { b.rectC(14, 15, 4, 3, 127, 249, 224); b.rectC(14, 15, 4, 1, 255, 255, 255); b.setC(15, 16, 17, 19, 28); }
-  else if (kind === 'badge') { b.rectC(12, 15, 2, 2, 156, 255, 90); b.setC(12, 15, 230, 255, 200); }
-  else if (kind === 'chain') { b.rectC(13, 13, 6, 1, 255, 207, 60); b.rectC(15, 14, 2, 2, 255, 207, 60); }
+  if (kind === 'bowtie') { b.rectC(15, 14, 2, 2, 255, 90, 60); b.rectC(13, 14, 2, 2, 255, 90, 60); b.rectC(17, 14, 2, 2, 255, 90, 60); }
+  else if (kind === 'scarf') { b.rectC(11, 13, 10, 2, 255, 158, 44); b.rectC(13, 15, 2, 3, 255, 158, 44); }
+  else if (kind === 'fish') { b.rectC(14, 16, 4, 3, 127, 249, 224); b.rectC(14, 16, 4, 1, 255, 255, 255); b.setC(15, 17, 17, 19, 28); }
+  else if (kind === 'badge') { b.rectC(12, 16, 2, 2, 156, 255, 90); b.setC(12, 16, 230, 255, 200); }
+  else if (kind === 'chain') { b.rectC(13, 14, 6, 1, 255, 207, 60); b.rectC(15, 15, 2, 2, 255, 207, 60); }
   return b;
 }
 
-// ---- CAPES (tint: capeColor) — flow behind the body; styles differ by SHAPE ----
+// ---- CAPES (tint: capeColor) — flowing, behind the body (revamped) ----
 function capeBody(spread, fn) {
-  const b = new Buf(); const v = 230, sh = 175, dk = 140;
-  b.rect(10, 12, 12, 2, v);
-  for (let y = 14; y <= 30; y++) {
-    const s = Math.round((y - 13) * spread), x0 = 11 - s, x1 = 20 + s;
-    for (let x = x0; x <= x1; x++) { const fold = ((x + (y & 1)) % 4 === 0); b.set(x, y, fold ? dk : (x < 16 ? v : sh)); }
+  const b = new Buf();
+  b.rect(10, 14, 12, 1, 235);
+  for (let y = 15; y <= 30; y++) {
+    const s = Math.round((y - 14) * spread), x0 = 11 - s, x1 = 20 + s;
+    b.row(x0, x1, y, 240);
   }
-  if (fn) fn(b, v, sh, dk);
-  b.outline(55); return b;
+  if (fn) fn(b);
+  return b;
 }
 function capeStyle(kind) {
   if (kind === 'classic') return capeBody(0.45);
-  if (kind === 'long') return capeBody(0.35, (b) => { for (let y = 31; y <= 33; y++) b.rect(13, y, 6, 1, 175); });
+  if (kind === 'long') return capeBody(0.35, (b) => { for (let y = 31; y <= 33; y++) b.rect(13, y, 6, 1, 230); });
   if (kind === 'round') return capeBody(0.6);
-  if (kind === 'royal') return capeBody(0.5, (b) => { b.rect(15, 14, 2, 16, 250); });
+  if (kind === 'royal') return capeBody(0.5, (b) => { b.rect(15, 15, 2, 15, 200); });
   if (kind === 'tattered') return capeBody(0.5, (b) => { for (let x = 7; x <= 25; x += 2) { b.clr(x, 30); b.clr(x, 29); } });
   return capeBody(0.45);
 }
 
 // =============================================================================
-// TUX  (the penguin) — looks good already; eyes/hat/acc shifted down at runtime
+// TUX  (original penguin shapes)
 // =============================================================================
-function tuxBody() { const b = new Buf(); b.ell(16, 18, 9, 12, 235); b.ell(7, 18, 2, 5, 220); b.ell(25, 18, 2, 5, 220); for (let y = 8; y <= 28; y++) b.set(23, y, 195, 150); b.outline(70); return b; }
-function tuxBelly() { const b = new Buf(); b.ell(16, 19, 6, 9, 245); for (let y = 12; y <= 27; y++) b.set(20, y, 215, 130); return b; }
-function tuxFeet() { const b = new Buf(); b.rect(10, 30, 5, 2, 240); b.rect(17, 30, 5, 2, 240); b.outline(70); return b; }
-function tuxBeak() { const b = new Buf(); b.rect(14, 11, 4, 2, 248); b.row(15, 17, 13, 220); b.outline(70); return b; }
+function tuxBody() {
+  const b = new Buf();
+  [[12, 4, 8], [10, 6, 12], [8, 8, 16], [8, 10, 16], [6, 12, 20], [6, 14, 20], [6, 16, 20], [6, 18, 20], [6, 20, 20], [8, 22, 16], [8, 24, 16], [10, 26, 12]].forEach(r => b.rect(r[0], r[1], r[2], 2, 235));
+  b.rect(4, 14, 2, 8, 235); b.rect(26, 14, 2, 8, 235);   // flippers
+  return b;
+}
+function tuxBelly() {
+  const b = new Buf();
+  [[12, 12, 8], [10, 14, 12], [10, 16, 12], [10, 18, 12], [10, 20, 12], [12, 22, 8], [12, 24, 8]].forEach(r => b.rect(r[0], r[1], r[2], 2, 250));
+  return b;
+}
+function tuxFeet() { const b = new Buf(); b.rect(8, 28, 6, 2, 250); b.rect(18, 28, 6, 2, 250); b.rect(8, 30, 8, 2, 250); b.rect(16, 30, 8, 2, 250); return b; }
+function tuxBeak() { const b = new Buf(); b.rect(14, 10, 4, 2, 250); b.rect(14, 12, 4, 1, 230); return b; }
 
 // =============================================================================
-// BUILD
+// BUILD — author at 32x36, Scale2x to 64x72, save PNG
 // =============================================================================
-function save(rel, buf) { const file = path.join(OUT, rel); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, encodePNG(buf.w, buf.h, buf.d)); return rel.replace(/\\/g, '/'); }
+function save(rel, buf) { const up = nearest2x(buf); const file = path.join(OUT, rel); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, encodePNG(up.w, up.h, up.d)); return rel.replace(/\\/g, '/'); }
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-const manifest = { grid: { w: GW, h: GH }, base: {}, catalog: {} };
+const manifest = { grid: { w: GW * 2, h: GH * 2 }, base: {}, catalog: {} };
 manifest.base.humanoidBody = save('base/humanoidBody.png', humanoidBody());
 manifest.base.tuxBody = save('base/tuxBody.png', tuxBody());
 manifest.base.tuxBelly = save('base/tuxBelly.png', tuxBelly());
@@ -263,4 +269,4 @@ manifest.catalog.cape = ['none', 'classic', 'long', 'round', 'royal', 'tattered'
 
 fs.writeFileSync(path.join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 1));
 let count = 0; (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) walk(path.join(d, e.name)); else if (e.name.endsWith('.png')) count++; } })(OUT);
-console.log('Baked ' + count + ' PNGs + manifest.json');
+console.log('Baked ' + count + ' PNGs at ' + (GW * 2) + 'x' + (GH * 2) + ' (nearest 2x) + manifest.json');
