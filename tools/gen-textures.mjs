@@ -94,7 +94,7 @@ function humanoidBody() {
 // through any (editable) beard. The "mouth gap" is this texture, not hardcoded logic.
 function mouthStyle(kind) {
   const b = new Buf();
-  const lr = 120, lg = 78, lb = 72, dr = 70, dg = 44, db = 40, wr = 240, wg = 240, wb = 245;
+  const lr = 116, lg = 68, lb = 56, dr = 64, dg = 38, db = 36, wr = 240, wg = 240, wb = 245;
   if (kind === 'smile') { b.rectC(14, 11, 4, 1, lr, lg, lb); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); }
   else if (kind === 'grin') { b.rectC(14, 10, 4, 1, dr, dg, db); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); b.rectC(14, 11, 4, 1, wr, wg, wb); }
   else if (kind === 'frown') { b.rectC(14, 10, 4, 1, lr, lg, lb); b.setC(13, 11, lr, lg, lb); b.setC(18, 11, lr, lg, lb); }
@@ -133,19 +133,21 @@ function shoeSandal() { const b = new Buf(); b.rect(11, 32, 5, 1, 255); b.rect(1
 
 // ---- HAIR (tint: hairColor) — ORIGINAL shapes; x<11 pieces read as BEHIND ----
 function hairStyle(kind) {
-  const front = new Buf(), back = new Buf(), V = 230;
+  const front = new Buf(), back = new Buf();
+  const V = 230, HI = 252, SH = 196;          // base / highlight / shadow (all tinted by hairColor)
   if (kind === 'bald') return { front, back };
-  // solid cap that fully covers the head crown (head: y4..6 wide) down to a clean
-  // hairline at y5/6, so no skin shows on top. x<11 pieces read as BEHIND the body.
-  const cap = () => { front.row(13, 18, 2, V); front.row(12, 19, 3, V); front.rect(11, 4, 10, 2, V); front.set(11, 6, V); front.set(20, 6, V); };
-  if (kind === 'mohawk') { front.rect(15, 0, 2, 6, V); front.rect(14, 4, 4, 2, V); return { front, back }; }
-  if (kind === 'afro') { front.rect(10, 1, 12, 5, V); front.rect(9, 2, 1, 5, V); front.rect(22, 2, 1, 5, V); back.rect(10, 6, 12, 1, V); return { front, back }; }
+  // subtle strand texture so the hair isn't a flat slab
+  const tex = () => { front.set(13, 2, HI); front.set(15, 2, HI); front.set(14, 3, HI); front.set(12, 5, SH); front.set(18, 4, SH); front.set(19, 5, SH); front.set(16, 5, SH); };
+  // solid cap fully covering the head crown down to a clean hairline (~y5/6)
+  const cap = () => { front.row(13, 18, 2, V); front.row(12, 19, 3, V); front.rect(11, 4, 10, 2, V); front.set(11, 6, V); front.set(20, 6, V); tex(); };
+  if (kind === 'mohawk') { front.rect(14, 3, 4, 3, V); front.rect(15, 0, 2, 3, V); front.set(15, 0, HI); front.set(14, 4, SH); return { front, back }; }
+  if (kind === 'afro') { front.ell(16, 4, 7, 4, V); back.ell(16, 5, 8, 3, SH); front.set(12, 2, HI); front.set(14, 1, HI); front.set(20, 5, SH); front.set(11, 5, SH); return { front, back }; }
   cap();
-  if (kind === 'long') { front.rect(11, 6, 1, 6, V); front.rect(20, 6, 1, 6, V); back.rect(10, 5, 1, 9, V); back.rect(21, 5, 1, 9, V); }
-  else if (kind === 'ponytail') { back.rect(8, 5, 2, 6, V); back.rect(7, 6, 1, 4, V); }
-  else if (kind === 'spiky') { front.set(12, 1, V); front.set(14, 0, V); front.set(16, 1, V); front.set(18, 0, V); front.set(20, 1, V); }
-  else if (kind === 'bun') { front.rect(14, 0, 4, 2, V); }
-  else if (kind === 'curly') { front.set(11, 6, V); front.set(13, 6, V); front.set(16, 6, V); front.set(19, 6, V); }
+  if (kind === 'long') { front.rect(11, 6, 1, 6, V); front.rect(20, 6, 1, 6, V); back.rect(10, 5, 2, 9, V); back.rect(20, 5, 2, 9, V); back.set(11, 13, SH); back.set(20, 13, SH); }
+  else if (kind === 'ponytail') { back.rect(19, 4, 2, 2, V); back.rect(20, 6, 2, 5, V); back.set(21, 11, SH); }     // tail joined to the cap, down the back-right
+  else if (kind === 'spiky') { front.set(13, 1, V); front.set(14, 1, V); front.set(15, 0, V); front.set(16, 0, V); front.set(17, 1, V); front.set(18, 1, V); front.set(15, 0, HI); } // spikes rising from the cap top
+  else if (kind === 'bun') { front.rect(14, 0, 4, 2, V); front.set(16, 0, HI); }
+  else if (kind === 'curly') { front.set(11, 5, V); front.set(20, 5, V); front.set(12, 6, V); front.set(15, 6, V); front.set(18, 6, V); front.set(13, 2, HI); front.set(17, 2, HI); }
   return { front, back };
 }
 
