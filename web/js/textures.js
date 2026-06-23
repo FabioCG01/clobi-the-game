@@ -37,6 +37,7 @@ var Textures = (function () {
           if (it.file) files.push(it.file);
           if (it.front) files.push(it.front);
           if (it.back) files.push(it.back);
+          if (it.iris) files.push(it.iris);
         });
       });
       return Promise.all(files.filter(uniq).map(loadImg));

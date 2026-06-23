@@ -30,7 +30,7 @@ window.ClobiParts = {
     gender: 'male',
     skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f',
     belly: '#fdfdfd', feet: '#5a3a22', pants: '#33405c',
-    hair: 3 /* Ponytail */, beard: 2 /* Clobi */,
-    shirtStyle: 0, pantsStyle: 0, shoeStyle: 0
+    hair: 1 /* Short */, beard: 3 /* Full */,
+    shirtStyle: 5 /* Suit */, pantsStyle: 0, shoeStyle: 0
   }
 };

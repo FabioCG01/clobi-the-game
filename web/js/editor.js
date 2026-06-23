@@ -27,9 +27,10 @@
 
   var root, built = false, canvas, ctx, box, nameInput, tabbarEl, panelEl, hintEl, bodyToggleEl, zoomSlider, adjBody, presetSel;
   var character = null, facing = 1, zoom = 1.0, animFrame = 0, rafId = null;
-  var activeTab = 'body', tfSel = null, dragging = false, dragStart = null, lastClick = null;
+  var activeTab = 'body', tfSel = null, dragMode = null, dragStart = null, lastClick = null, selHandles = null;
   var mapCx = 0, mapCy = 0, mapS = 1;
   var styleEls = {};
+  var isShown = false, history = [], histIdx = -1, commitTimer = null;
 
   function GWg() { var T = TX(); return (T && T.grid && T.grid().w) || 64; }
   function GHg() { var T = TX(); return (T && T.grid && T.grid().h) || 72; }
@@ -74,6 +75,9 @@
     root.appendChild(wrap);
     if (canvas.getContext) ctx = canvas.getContext('2d');
     wireCanvas();
+    window.addEventListener('keydown', onKey);
+    panelEl.addEventListener('change', commitNow);   // sliders / pickers / selects
+    panelEl.addEventListener('click', commitSoon);    // arrows / swatches / segments
     if (window.addEventListener) window.addEventListener('resize', resizeCanvas);
     if (TX() && TX().onReady) TX().onReady(function () { if (built && character) buildTabs(); });
     built = true;
@@ -84,7 +88,7 @@
     bodyToggleEl = el('div', 'ed2-seg');
     ['tux', 'humanoid'].forEach(function (bt) {
       var b = el('button', 'ed2-segbtn', t('editor.' + bt, bt === 'tux' ? 'Tux' : 'Humanoid')); b.type = 'button'; b.dataset.bt = bt;
-      b.addEventListener('click', function () { if (character.bodyType !== bt) { character.bodyType = bt; tfSel = null; ensureTab(); buildTabs(); } });
+      b.addEventListener('click', function () { if (character.bodyType !== bt) { character.bodyType = bt; tfSel = null; ensureTab(); buildTabs(); commitNow(); } });
       bodyToggleEl.appendChild(b);
     });
     return bodyToggleEl;
@@ -256,7 +260,7 @@
   function mini(label, fn) { var b = el('button', 'ed2-mini', label); b.type = 'button'; b.addEventListener('click', fn); return b; }
   function refreshPresets() { if (!presetSel) return; presetSel.innerHTML = ''; var list = readPresets(); if (!list.length) { var o = el('option', null, t('editor.noPresets', '— none —')); o.value = ''; presetSel.appendChild(o); return; } list.forEach(function (p, i) { var o = el('option', null, p.name || ('#' + i)); o.value = String(i); presetSel.appendChild(o); }); }
   function onSavePreset() { var nm = window.prompt(t('editor.presetName', 'Preset name:'), character.name || 'Preset'); if (nm == null) return; var list = readPresets(); list.push({ name: String(nm).trim() || 'Preset', ch: sanitize(character) }); writePresets(list); refreshPresets(); setStatus('editor.presetSaved', 'Preset saved.'); }
-  function onLoadPreset() { var i = presetSel && presetSel.value; if (i === '' || i == null) return; var p = readPresets()[+i]; if (!p) return; var keep = character.name; character = sanitize(p.ch); if (!character.name) character.name = keep; buildTabs(); setStatus('editor.presetLoaded', 'Preset loaded.'); }
+  function onLoadPreset() { var i = presetSel && presetSel.value; if (i === '' || i == null) return; var p = readPresets()[+i]; if (!p) return; var keep = character.name; character = sanitize(p.ch); if (!character.name) character.name = keep; buildTabs(); commitNow(); setStatus('editor.presetLoaded', 'Preset loaded.'); }
   function onDelPreset() { var i = presetSel && presetSel.value; if (i === '' || i == null) return; var list = readPresets(); list.splice(+i, 1); writePresets(list); refreshPresets(); setStatus('editor.presetDeleted', 'Preset deleted.'); }
 
   // ---- preview + direct manipulation -------------------------------------
@@ -273,48 +277,83 @@
     drawSelBox();
   }
   function drawSelBox() {
+    selHandles = null;
     if (!tfSel || !TX() || !TX().partBox || !character || character.bodyType !== 'humanoid') return;
     var pb = TX().partBox(character, tfSel); if (!pb) return;
     var sx = mapCx + facing * (pb.cx - GWg() / 2) * mapS, sy = mapCy + (pb.cy - GHg() / 2) * mapS;
-    var hw = pb.hw * mapS + 3, hh = pb.hh * mapS + 3;
-    ctx.save(); ctx.translate(sx, sy); ctx.rotate(facing * (pb.r || 0) * Math.PI / 180);
-    ctx.strokeStyle = '#7ff9e0'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
-    ctx.setLineDash([]); ctx.fillStyle = '#7ff9e0';[[-hw, -hh], [hw, -hh], [-hw, hh], [hw, hh]].forEach(function (c) { ctx.fillRect(c[0] - 2, c[1] - 2, 4, 4); });
+    var hw = pb.hw * mapS + 4, hh = pb.hh * mapS + 4;
+    var ang = facing * (pb.r || 0) * Math.PI / 180, co = Math.cos(ang), si = Math.sin(ang);
+    function loc(lx, ly) { return { x: sx + lx * co - ly * si, y: sy + lx * si + ly * co }; }
+    var canRot = tfSel !== 'head';
+    selHandles = { center: { x: sx, y: sy }, corners: [loc(-hw, -hh), loc(hw, -hh), loc(hw, hh), loc(-hw, hh)], edges: [loc(0, -hh), loc(hw, 0), loc(0, hh), loc(-hw, 0)], canRot: canRot };
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(ang);
+    ctx.strokeStyle = '#7ff9e0'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]); ctx.strokeRect(-hw, -hh, hw * 2, hh * 2); ctx.setLineDash([]);
     ctx.restore();
+    ctx.fillStyle = '#7ff9e0'; selHandles.corners.forEach(function (c) { ctx.fillRect(c.x - 3, c.y - 3, 6, 6); });   // resize
+    if (canRot) selHandles.edges.forEach(function (p) {   // rotate
+      ctx.fillStyle = '#ffcf3c'; ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#ffcf3c'; ctx.lineWidth = 1.3; ctx.beginPath(); ctx.arc(p.x, p.y, 6.5, -1.1, 1.5); ctx.stroke();
+    });
   }
-  function evtGrid(e) { var r = canvas.getBoundingClientRect(); var px = (e.clientX - r.left) * (canvas.width / r.width), py = (e.clientY - r.top) * (canvas.height / r.height); return { gx: GWg() / 2 + facing * (px - mapCx) / mapS, gy: GHg() / 2 + (py - mapCy) / mapS }; }
+  function evtGrid(e) { var r = canvas.getBoundingClientRect(); var px = (e.clientX - r.left) * (canvas.width / r.width), py = (e.clientY - r.top) * (canvas.height / r.height); return { px: px, py: py, gx: GWg() / 2 + facing * (px - mapCx) / mapS, gy: GHg() / 2 + (py - mapCy) / mapS }; }
+  function near(a, x, y, rad) { var dx = a.x - x, dy = a.y - y; return dx * dx + dy * dy <= rad * rad; }
   function wireCanvas() {
     canvas.addEventListener('mousedown', onDown);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+    canvas.addEventListener('dblclick', onDbl);
     box.addEventListener('wheel', onWheel, { passive: false });
   }
-  function onDown(e) {
+  function onDbl(e) {
     if (!character || character.bodyType !== 'humanoid' || !TX() || !TX().partAt) return;
-    var g = evtGrid(e);
+    var g = evtGrid(e), key = TX().partAt(character, g.gx, g.gy, null);
+    if (key && character.tf && character.tf[key]) { delete character.tf[key]; if (activeTab === 'adjust') renderAdj(); commitNow(); }
+  }
+  function onDown(e) {
+    if (!character || character.bodyType !== 'humanoid') return;
+    var g = evtGrid(e), i;
+    if (tfSel && selHandles) {   // gizmo handles take priority
+      for (i = 0; i < selHandles.corners.length; i++) if (near(selHandles.corners[i], g.px, g.py, 9)) { dragMode = 'resize'; dragStart = { dist: Math.max(2, Math.hypot(g.px - selHandles.center.x, g.py - selHandles.center.y)), s: getTf(tfSel).s, cx: selHandles.center.x, cy: selHandles.center.y }; if (e.preventDefault) e.preventDefault(); return; }
+      if (selHandles.canRot) for (i = 0; i < selHandles.edges.length; i++) if (near(selHandles.edges[i], g.px, g.py, 9)) { dragMode = 'rotate'; dragStart = { ang: Math.atan2(g.py - selHandles.center.y, g.px - selHandles.center.x), r: getTf(tfSel).r, cx: selHandles.center.x, cy: selHandles.center.y }; if (e.preventDefault) e.preventDefault(); return; }
+    }
+    if (!TX() || !TX().partAt) return;
     var same = lastClick && Math.abs(lastClick.gx - g.gx) < 2.5 && Math.abs(lastClick.gy - g.gy) < 2.5;
     var key = TX().partAt(character, g.gx, g.gy, same ? tfSel : null);
-    if (key) { tfSel = key; lastClick = { gx: g.gx, gy: g.gy }; dragging = true; var tv = getTf(key); dragStart = { gx: g.gx, gy: g.gy, x: tv.x, y: tv.y }; updateHint(); if (activeTab === 'adjust') renderAdj(); if (e.preventDefault) e.preventDefault(); }
+    if (key) { tfSel = key; lastClick = { gx: g.gx, gy: g.gy }; dragMode = 'move'; var tv = getTf(key); dragStart = { gx: g.gx, gy: g.gy, x: tv.x, y: tv.y }; updateHint(); if (activeTab === 'adjust') renderAdj(); if (e.preventDefault) e.preventDefault(); }
     else { tfSel = null; lastClick = null; updateHint(); }
   }
   function onMove(e) {
-    if (!dragging) return; var g = evtGrid(e);
-    if (tfSel !== 'head') { setTf(tfSel, 'x', clampN(dragStart.x + (g.gx - dragStart.gx), -24, 24)); setTf(tfSel, 'y', clampN(dragStart.y + (g.gy - dragStart.gy), -24, 24)); lastClick = null; }
+    if (!dragMode) return; var g = evtGrid(e);
+    if (dragMode === 'move') { if (tfSel !== 'head') { setTf(tfSel, 'x', clampN(dragStart.x + (g.gx - dragStart.gx), -24, 24)); setTf(tfSel, 'y', clampN(dragStart.y + (g.gy - dragStart.gy), -24, 24)); lastClick = null; } }
+    else if (dragMode === 'resize') { var d = Math.hypot(g.px - dragStart.cx, g.py - dragStart.cy); setTf(tfSel, 's', clampN(dragStart.s * d / dragStart.dist, 0.4, 2.5)); }
+    else if (dragMode === 'rotate') { var a = Math.atan2(g.py - dragStart.cy, g.px - dragStart.cx), dd = (a - dragStart.ang) * 180 / Math.PI * facing; setTf(tfSel, 'r', clampN(Math.round(dragStart.r + dd), -180, 180)); }
+    refreshAdjSliders();
   }
-  function onUp() { if (dragging) { dragging = false; refreshAdjSliders(); } }
+  function onUp() { if (dragMode) { dragMode = null; refreshAdjSliders(); commitNow(); } }
   function onWheel(e) {
-    if (tfSel) {
-      e.preventDefault(); var tv = getTf(tfSel);
-      if (e.shiftKey && tfSel !== 'head') setTf(tfSel, 'r', clampN((tv.r || 0) + (e.deltaY < 0 ? 6 : -6), -180, 180));
-      else setTf(tfSel, 's', clampN((tv.s || 1) * (e.deltaY < 0 ? 1.08 : 0.926), 0.4, 2.5));
-      refreshAdjSliders();
-    } else { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15)); }
+    if (tfSel) { e.preventDefault(); var tv = getTf(tfSel); if (e.shiftKey && tfSel !== 'head') setTf(tfSel, 'r', clampN((tv.r || 0) + (e.deltaY < 0 ? 6 : -6), -180, 180)); else setTf(tfSel, 's', clampN((tv.s || 1) * (e.deltaY < 0 ? 1.08 : 0.926), 0.4, 2.5)); refreshAdjSliders(); commitSoon(); }
+    else { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15)); }
   }
   function updateHint() {
     if (!hintEl) return;
     if (character && character.bodyType !== 'humanoid') { hintEl.textContent = t('editor.tuxHint', 'Wheel = zoom'); return; }
-    if (tfSel) hintEl.textContent = (t('editor.selected', 'Selected') + ': ' + ((TF_OBJ[tfSel] && TF_OBJ[tfSel][0]) || tfSel) + ' — ' + t('editor.dragHint', 'drag · wheel · shift+wheel'));
-    else hintEl.textContent = t('editor.clickHint', 'Click a part to move/resize · wheel = zoom');
+    if (tfSel) hintEl.textContent = (t('editor.selected', 'Selected') + ': ' + ((TF_OBJ[tfSel] && TF_OBJ[tfSel][0]) || tfSel) + ' — ' + t('editor.gizmoHint', 'drag=move · corners=resize · arrows=rotate · dbl-click=reset'));
+    else hintEl.textContent = t('editor.clickHint', 'Click a part · drag/resize/rotate · Ctrl+Z undo');
+  }
+
+  // ---- undo / redo --------------------------------------------------------
+  function snapshot() { try { return JSON.stringify(character); } catch (e) { return ''; } }
+  function commitNow() { if (!character) return; var s = snapshot(); if (histIdx >= 0 && history[histIdx] === s) return; history = history.slice(0, histIdx + 1); history.push(s); histIdx = history.length - 1; if (history.length > 80) { history.shift(); histIdx--; } }
+  function commitSoon() { if (commitTimer) clearTimeout(commitTimer); commitTimer = setTimeout(function () { commitTimer = null; commitNow(); }, 220); }
+  function resetHistory() { history = []; histIdx = -1; commitNow(); }
+  function undo() { if (commitTimer) { clearTimeout(commitTimer); commitTimer = null; commitNow(); } if (histIdx > 0) { histIdx--; character = JSON.parse(history[histIdx]); afterHistory(); setStatus('editor.undone', 'Undo'); } }
+  function redo() { if (histIdx < history.length - 1) { histIdx++; character = JSON.parse(history[histIdx]); afterHistory(); setStatus('editor.redone', 'Redo'); } }
+  function afterHistory() { if (nameInput) nameInput.value = character.name || ''; buildTabs(); }
+  function onKey(e) {
+    if (!isShown || !(e.ctrlKey || e.metaKey)) return;
+    var z = (e.key === 'z' || e.key === 'Z'), y = (e.key === 'y' || e.key === 'Y');
+    if (z && !e.shiftKey) { e.preventDefault(); undo(); }
+    else if (y || (z && e.shiftKey)) { e.preventDefault(); redo(); }
   }
 
   function loop() { animFrame++; drawPreview(); rafId = window.requestAnimationFrame(loop); }
@@ -322,8 +361,8 @@
   function stopLoop() { if (rafId != null) { window.cancelAnimationFrame(rafId); rafId = null; } }
 
   // ---- actions ----
-  function onRandom() { var s = S(); var keep = character ? character.name : ''; character = sanitize(s && s.randomCharacter ? s.randomCharacter() : {}); if (!character.name) character.name = keep; tfSel = null; buildTabs(); setStatus('editor.randomized', 'Randomized.'); }
-  function onReset() { var keep = character ? character.name : ''; character = sanitize(defaultCharacter()); if (keep) character.name = keep; tfSel = null; buildTabs(); setStatus('editor.resetDone', 'Reset to default.'); }
+  function onRandom() { var s = S(); var keep = character ? character.name : ''; character = sanitize(s && s.randomCharacter ? s.randomCharacter() : {}); if (!character.name) character.name = keep; tfSel = null; buildTabs(); commitNow(); setStatus('editor.randomized', 'Randomized.'); }
+  function onReset() { var keep = character ? character.name : ''; character = sanitize(defaultCharacter()); if (keep) character.name = keep; tfSel = null; buildTabs(); commitNow(); setStatus('editor.resetDone', 'Reset to default.'); }
   function onSave() {
     var nm = (nameInput && nameInput.value != null) ? nameInput.value.trim() : (character.name || ''); character.name = nm;
     var saved = sanitize(character); saved.name = nm; character = clone(saved); var payload = clone(saved);
@@ -335,7 +374,7 @@
     showMenu();
   }
   function onBack() { showMenu(); }
-  function showMenu() { stopLoop(); if (window.App && App.showScreen) App.showScreen('menu'); else if (window.Menu && Menu.show) Menu.show(); }
+  function showMenu() { isShown = false; stopLoop(); if (window.App && App.showScreen) App.showScreen('menu'); else if (window.Menu && Menu.show) Menu.show(); }
   function setStatus(k, en) { var s = document.getElementById('ed-status'); if (s) s.textContent = k ? t(k, en) : ''; }
 
   // ---- public -------------------------------------------------------------
@@ -344,12 +383,12 @@
     var src = (window.App && App.character) ? App.character : null;
     character = sanitize(src || defaultCharacter());
     if (!character.name && window.App && App.nickname) character.name = String(App.nickname).slice(0, 16);
-    facing = 1; tfSel = null; ensureTab(); buildTabs();
+    facing = 1; tfSel = null; ensureTab(); buildTabs(); resetHistory(); isShown = true;
     if (window.App && App.showScreen) App.showScreen('editor'); else if (root) root.classList.add('active');
     resizeCanvas(); updateHint(); drawPreview(); startLoop();
     if (window.requestAnimationFrame) window.requestAnimationFrame(resizeCanvas);
   }
-  function hide() { stopLoop(); if (root && !(window.App && App.showScreen)) root.classList.remove('active'); }
+  function hide() { isShown = false; stopLoop(); if (root && !(window.App && App.showScreen)) root.classList.remove('active'); }
 
   function injectStyle() {
     if (document.getElementById('editor-style')) return;

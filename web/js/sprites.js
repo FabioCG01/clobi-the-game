@@ -26,7 +26,7 @@ var Sprites = (function () {
     skin: ['#f3c69a'], hair: ['#b07a43'], body: ['#11131c'], belly: ['#fdfdfd'],
     shirt: ['#fdfdfd'], pants: ['#33405c'], feet: ['#ff9e2c'], beard: ['#7a4a1f'], cape: ['#ff5a3c']
   };
-  var CLOBI = P.clobi || { gender: 'male', skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f', belly: '#fdfdfd', feet: '#5a3a22', pants: '#33405c', hair: 3, beard: 2, shirtStyle: 0, pantsStyle: 0, shoeStyle: 0 };
+  var CLOBI = P.clobi || { gender: 'male', skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f', belly: '#fdfdfd', feet: '#5a3a22', pants: '#33405c', hair: 1, beard: 3, shirtStyle: 5, pantsStyle: 0, shoeStyle: 0 };
 
   // catalog length for a group (from the loaded texture manifest; 0 until ready)
   function catLen(g) { var T = window.Textures; var a = T && T.catalog && T.catalog(g); return (a && a.length) || 0; }
@@ -40,7 +40,7 @@ var Sprites = (function () {
       body: '#11131c', belly: CLOBI.belly || '#fdfdfd', feet: CLOBI.feet || '#5a3a22',
       skin: CLOBI.skin, hairColor: CLOBI.hairColor, beardColor: CLOBI.beardColor,
       pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c', irisColor: '#222a3a', mouthColor: '',
-      hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 2),
+      hair: (CLOBI.hair != null ? CLOBI.hair : 1), beard: (CLOBI.beard != null ? CLOBI.beard : 3),
       shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
       hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}
     };
@@ -86,9 +86,9 @@ var Sprites = (function () {
       skin: pick(PRESETS.skin), hairColor: pick(PRESETS.hair), beardColor: pick(PRESETS.beard),
       pants: pick(PRESETS.pants), capeColor: pick(PRESETS.cape),
       irisColor: pick(['#222a3a', '#3a6a9a', '#2a6a3a', '#6a4a2a', '#5a3a8a', '#111111']), mouthColor: '',
-      hair: ri('hair', 8), beard: ri('beard', 6),
+      hair: ri('hair', 8), beard: ri('beard', 5),
       shirtStyle: ri('shirt', 6), pantsStyle: ri('pants', 5), shoeStyle: ri('shoes', 4),
-      hat: ri('hat', 7), eyes: ri('eyes', 6), eyebrows: ri('eyebrows', 7), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6), tf: {}
+      hat: ri('hat', 7), eyes: ri('eyes', 5), eyebrows: ri('eyebrows', 7), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6), tf: {}
     };
   }
 

@@ -139,9 +139,9 @@ func defaultCharacter(name string) protocol.Character {
 		IrisColor:  "#222a3a",
 		MouthColor: "",
 		Fat:        0,
-		Hair:       3, // ponytail
-		Beard:      2, // clobi (around the mouth)
-		ShirtStyle: 0,
+		Hair:       1, // short
+		Beard:      3, // full
+		ShirtStyle: 5, // suit (shirt + tie)
 		PantsStyle: 0,
 		ShoeStyle:  0,
 		Hat:        0,

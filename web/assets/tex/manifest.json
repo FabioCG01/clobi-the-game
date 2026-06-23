@@ -161,11 +161,6 @@
     "file": "beard/stubble.png"
    },
    {
-    "id": "clobi",
-    "name": "Clobi",
-    "file": "beard/clobi.png"
-   },
-   {
     "id": "goatee",
     "name": "Goatee",
     "file": "beard/goatee.png"
@@ -199,12 +194,6 @@
     "name": "Sleepy",
     "file": "eyes/sleepy.png",
     "iris": "eyes/sleepy_i.png"
-   },
-   {
-    "id": "shades",
-    "name": "Shades",
-    "file": "eyes/shades.png",
-    "iris": "eyes/shades_i.png"
    },
    {
     "id": "sparkle",

@@ -165,7 +165,6 @@ function beardStyle(kind) {
   else if (kind === 'goatee') { b.row(13, 18, 9, 230); b.rect(15, 11, 2, 2, 230); }
   else if (kind === 'full') { b.rect(11, 9, 2, 3, 230); b.rect(19, 9, 2, 3, 230); b.row(13, 18, 9, 230); b.row(12, 19, 11, 230); b.row(13, 18, 12, 230); }
   else if (kind === 'moustache') { b.row(13, 18, 9, 230); }
-  else if (kind === 'clobi') { b.row(13, 18, 9, 230); b.set(12, 9, 230); b.set(19, 9, 230); b.row(12, 19, 11, 230); b.row(14, 17, 12, 230); }
   return b;
 }
 
@@ -174,11 +173,10 @@ function beardStyle(kind) {
 // tinted by the iris colour at runtime). Eyebrows are a separate catalog.
 function eyesStyle(kind) {
   const w = new Buf(), ir = new Buf();
-  const wr = 246, wg = 246, wb = 252, gl = 255, c1 = 127, c2 = 249, c3 = 224;
+  const wr = 246, wg = 246, wb = 252, gl = 255;
   const open = () => { w.rectC(13, 7, 2, 2, wr, wg, wb); w.rectC(17, 7, 2, 2, wr, wg, wb); ir.rect(14, 7, 1, 2, 235); ir.rect(17, 7, 1, 2, 235); w.setC(13, 7, gl, gl, gl); w.setC(17, 7, gl, gl, gl); };
   if (kind === 'angry') { w.rectC(13, 7, 2, 1, wr, wg, wb); w.rectC(17, 7, 2, 1, wr, wg, wb); ir.set(14, 7, 235); ir.set(17, 7, 235); }
-  else if (kind === 'sleepy') { ir.rect(13, 8, 2, 1, 235); ir.rect(17, 8, 2, 1, 235); }
-  else if (kind === 'shades') { w.rectC(12, 7, 7, 2, 18, 20, 30); w.setC(13, 7, c1, c2, c3); }
+  else if (kind === 'sleepy') { ir.rect(12, 8, 3, 1, 235); ir.rect(17, 8, 3, 1, 235); ir.set(13, 7, 200); ir.set(18, 7, 200); } // closed lids (in the iris layer so it tints)
   else if (kind === 'sparkle') { open(); w.setC(14, 8, 255, 255, 255); w.setC(18, 8, 255, 255, 255); }
   else if (kind === 'wide') { w.rectC(13, 6, 2, 3, wr, wg, wb); w.rectC(17, 6, 2, 3, wr, wg, wb); ir.rect(14, 7, 1, 2, 235); ir.rect(17, 7, 1, 2, 235); }
   else { open(); }   // classic
@@ -295,8 +293,8 @@ manifest.catalog.shoes = [
   { id: 'sandal', name: 'Sandals', file: save('shoes/sandal.png', shoeSandal()) },
 ];
 manifest.catalog.hair = ['bald', 'short', 'long', 'ponytail', 'spiky', 'bun', 'mohawk', 'afro', 'curly'].map(k => { const { front, back } = hairStyle(k); return { id: k, name: cap(k), front: save('hair/' + k + '_f.png', front), back: save('hair/' + k + '_b.png', back) }; });
-manifest.catalog.beard = ['none', 'stubble', 'clobi', 'goatee', 'full', 'moustache'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('beard/' + k + '.png', beardStyle(k)) }));
-manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle', 'wide'].map(k => { const e = eyesStyle(k); return { id: k, name: cap(k), file: save('eyes/' + k + '.png', e.white), iris: save('eyes/' + k + '_i.png', e.iris) }; });
+manifest.catalog.beard = ['none', 'stubble', 'goatee', 'full', 'moustache'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('beard/' + k + '.png', beardStyle(k)) }));
+manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'sparkle', 'wide'].map(k => { const e = eyesStyle(k); return { id: k, name: cap(k), file: save('eyes/' + k + '.png', e.white), iris: save('eyes/' + k + '_i.png', e.iris) }; });
 manifest.catalog.eyebrows = ['flat', 'angry', 'raised', 'worried', 'thick', 'unibrow', 'none'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('brow/' + k + '.png', eyebrowsStyle(k)) }));
 manifest.catalog.mouth = ['neutral', 'smile', 'grin', 'frown', 'open', 'serious'].map(k => ({ id: k, name: cap(k), file: save('mouth/' + k + '.png', mouthStyle(k)) }));
 manifest.catalog.hat = ['none', 'cap', 'wizard', 'beanie', 'tophat', 'crown', 'halo'].map(k => ({ id: k, name: k === 'cap' ? 'Vim Cap' : cap(k), file: k === 'none' ? null : save('hat/' + k + '.png', hatStyle(k)) }));
