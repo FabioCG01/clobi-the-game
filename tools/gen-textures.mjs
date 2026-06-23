@@ -66,7 +66,7 @@ const SKIN = 232, SKIN_SH = 196;
 
 function humanoidBody() {
   const b = new Buf();
-  b.rect(13, 24, 3, 7, 206); b.rect(16, 24, 3, 7, 206);   // legs (under pants)
+  b.rect(12, 24, 3, 8, 206); b.rect(17, 24, 3, 8, 206);   // two legs (under pants), gap between so no skin shows in the crotch
   b.rect(11, 13, 10, 11, 212);                            // torso (under shirt)
   b.rect(8, 14, 2, 7, 210); b.rect(22, 14, 2, 7, 210);    // arms
   b.rect(8, 21, 2, 2, 222); b.rect(22, 21, 2, 2, 222);    // hands
@@ -108,30 +108,48 @@ function shoeDress() { const b = new Buf(); b.rect(11, 31, 5, 2, 226); b.rect(16
 
 // ---- HAIR (tint: hairColor): front (over head) + back (behind body) ----
 function hairStyle(kind) {
-  const front = new Buf(), back = new Buf(); const v = 230, sh = 196;
+  const front = new Buf(), back = new Buf();
+  const v = 222, hi = 244, sh = 190;
   if (kind === 'bald') return { front, back };
-  if (kind !== 'mohawk') { front.ell(16, 4, 5, 3, v); front.rect(11, 3, 10, 2, v); }   // cap y1..7
-  if (kind === 'short') front.row(11, 20, 6, sh);
-  if (kind === 'spiky') { for (let x = 12; x <= 20; x += 2) { front.set(x, 0, v); front.set(x, 1, v); front.set(x, 2, v); } front.row(11, 20, 3, v); }
-  if (kind === 'mohawk') { for (let y = -1; y <= 6; y++) { front.set(15, y, v); front.set(16, y, v); front.set(17, y, v); } }
-  if (kind === 'long') { back.rect(10, 4, 2, 13, v); back.rect(20, 4, 2, 13, v); back.rect(10, 16, 12, 2, sh); }
-  if (kind === 'ponytail') { back.rect(8, 5, 2, 7, v); back.set(7, 7, sh); back.set(7, 8, sh); }
-  if (kind === 'bun') front.ell(16, 1, 2, 2, v);
-  if (kind === 'afro') { front.ell(16, 3, 7, 4, v); back.ell(16, 4, 8, 4, sh); }
-  if (kind === 'curly') { front.ell(16, 4, 6, 3, v); for (let x = 11; x <= 21; x += 2) front.set(x, 7, v); }
-  front.outline(60); back.outline(60); return { front, back };
+  // skull-hugging cap: rounded top, frames the temples, hairline ~y5/6 (above eyes)
+  const cap = () => {
+    front.row(14, 17, 1, v); front.row(13, 18, 2, v);
+    front.row(12, 19, 3, v); front.row(11, 20, 4, v); front.row(11, 20, 5, v);
+    front.set(11, 6, v); front.set(20, 6, v);          // temples
+    front.row(15, 16, 1, hi); front.set(14, 2, hi); front.set(13, 3, hi); // top sheen
+  };
+  if (kind === 'short') { cap(); front.row(12, 19, 6, sh); }
+  else if (kind === 'long') { cap(); back.rect(10, 4, 2, 14, v); back.rect(20, 4, 2, 14, v); back.row(10, 21, 17, sh); back.row(11, 20, 18, sh); }
+  else if (kind === 'ponytail') { cap(); back.rect(9, 5, 2, 3, v); back.rect(8, 7, 2, 5, v); back.set(8, 12, sh); back.set(9, 12, sh); }
+  else if (kind === 'spiky') { cap(); front.set(12, 0, v); front.set(14, 0, v); front.set(16, 0, v); front.set(18, 0, v); front.set(20, 0, v); }
+  else if (kind === 'bun') { cap(); front.rect(15, 0, 3, 2, v); front.set(16, 0, hi); }
+  else if (kind === 'mohawk') { for (let y = 0; y <= 6; y++) { front.set(15, y, v); front.set(16, y, v); front.set(17, y, v); } front.set(16, 0, hi); }
+  else if (kind === 'afro') { front.ell(16, 4, 7, 4, v); front.ell(15, 3, 4, 2, hi); back.ell(16, 5, 7, 3, sh); }
+  else if (kind === 'curly') { cap(); for (let x = 11; x <= 20; x += 2) { front.set(x, 6, v); front.set(x + 1, 6, sh); } front.set(11, 5, v); front.set(20, 5, v); }
+  else { cap(); }
+  return { front, back };
 }
 
 // ---- BEARDS (tint: beardColor) — ALWAYS leave the mouth (y10) open ----
 function beardStyle(kind) {
-  const b = new Buf(); const v = 220, sh = 185;
+  // mouth is at y10 and is ALWAYS left open; moustache sits at y9, jaw/chin y11-13
+  const b = new Buf(); const v = 214, sh = 184;
   if (kind === 'none') return b;
-  if (kind === 'stubble') { [[12, 9], [13, 11], [15, 11], [17, 11], [19, 11], [19, 9], [14, 12], [17, 12]].forEach(p => b.set(p[0], p[1], sh, 160)); b.row(13, 18, 12, v, 150); }
-  else if (kind === 'goatee') { b.row(14, 17, 11, v); b.rect(15, 12, 2, 2, v); b.set(13, 9, sh, 200); b.set(18, 9, sh, 200); }
-  else if (kind === 'full') { b.rect(11, 7, 2, 5, v); b.rect(19, 7, 2, 5, v); b.row(13, 18, 9, v); b.row(12, 19, 11, v); b.row(13, 18, 12, v); b.row(14, 17, 13, v); }
-  else if (kind === 'moustache') { b.row(13, 18, 9, v); b.set(13, 10, sh, 150); b.set(18, 10, sh, 150); }
-  else if (kind === 'clobi') { b.row(13, 18, 9, v); b.set(12, 8, sh); b.set(19, 8, sh); b.rect(12, 11, 8, 1, v); b.row(14, 17, 12, v); }
-  b.outline(60); return b;
+  if (kind === 'stubble') {
+    [[12, 9], [12, 10], [13, 11], [15, 12], [17, 12], [19, 11], [20, 10], [20, 9], [14, 12], [18, 12]].forEach(p => b.set(p[0], p[1], sh, 150));
+    b.row(13, 18, 12, v, 140);
+  } else if (kind === 'goatee') {
+    b.row(13, 18, 9, v); b.row(14, 17, 11, v); b.rect(15, 12, 2, 2, v);
+  } else if (kind === 'full') {
+    b.row(13, 18, 9, v); b.rect(11, 8, 2, 4, v); b.rect(19, 8, 2, 4, v);
+    b.row(12, 19, 11, v); b.row(12, 19, 12, v); b.row(13, 18, 13, v);
+  } else if (kind === 'moustache') {
+    b.row(13, 18, 9, v); b.set(12, 9, sh); b.set(19, 9, sh);
+  } else if (kind === 'clobi') {
+    b.row(13, 18, 9, v); b.set(12, 8, sh); b.set(19, 8, sh);
+    b.row(12, 19, 11, v); b.row(14, 17, 12, v);
+  }
+  return b;
 }
 
 // ---- EYES (fixed colour) ----
@@ -151,13 +169,15 @@ function eyesStyle(kind) {
 
 // ---- HATS (fixed colour) — sit on the head top ----
 function hatStyle(kind) {
+  // hats must fit within y0..5 (the 36px canvas has no room above the head),
+  // so tall hats are compact and the halo is a ring just above the hair.
   const b = new Buf();
   if (kind === 'cap') { b.rectC(11, 2, 11, 2, 27, 122, 58); b.rectC(12, 0, 9, 2, 31, 138, 66); b.rectC(10, 4, 14, 1, 18, 80, 40); b.rectC(15, 2, 2, 2, 207, 233, 255); }
-  else if (kind === 'wizard') { b.rectC(15, -4, 2, 3, 58, 29, 74); b.rectC(14, -1, 4, 2, 58, 29, 74); b.rectC(13, 1, 6, 2, 70, 40, 92); b.rectC(10, 3, 12, 1, 127, 249, 224); b.setC(16, -2, 255, 242, 127); }
-  else if (kind === 'beanie') { b.rectC(11, 1, 10, 3, 255, 90, 60); b.rectC(11, 4, 10, 1, 253, 253, 253); b.rectC(15, -1, 2, 2, 253, 253, 253); }
-  else if (kind === 'tophat') { b.rectC(10, 4, 12, 1, 17, 19, 28); b.rectC(12, -4, 8, 8, 17, 19, 28); b.rectC(12, 1, 8, 1, 127, 249, 224); }
-  else if (kind === 'crown') { b.rectC(11, 2, 10, 2, 255, 207, 60); b.setC(11, 0, 255, 207, 60); b.setC(11, 1, 255, 207, 60); b.setC(16, 0, 255, 207, 60); b.setC(16, 1, 255, 207, 60); b.setC(20, 0, 255, 207, 60); b.setC(20, 1, 255, 207, 60); b.setC(15, 2, 255, 90, 60); }
-  else if (kind === 'halo') { b.ellC(16, -1, 4, 1, 255, 242, 127); b.ellC(16, -1, 3, 1, 0, 0, 0, 0); }
+  else if (kind === 'wizard') { b.setC(16, 0, 58, 29, 74); b.rectC(15, 1, 3, 1, 58, 29, 74); b.rectC(13, 2, 6, 1, 70, 40, 92); b.rectC(11, 3, 11, 1, 58, 29, 74); b.rectC(9, 4, 15, 1, 127, 249, 224); b.setC(16, 1, 255, 242, 127); }
+  else if (kind === 'beanie') { b.rectC(11, 1, 10, 2, 255, 90, 60); b.rectC(11, 3, 10, 1, 253, 253, 253); b.setC(15, 0, 253, 253, 253); b.setC(16, 0, 253, 253, 253); }
+  else if (kind === 'tophat') { b.rectC(9, 4, 14, 1, 17, 19, 28); b.rectC(12, 0, 8, 4, 17, 19, 28); b.rectC(12, 3, 8, 1, 200, 70, 70); }
+  else if (kind === 'crown') { b.rectC(11, 3, 10, 1, 255, 207, 60); b.rectC(11, 1, 2, 2, 255, 207, 60); b.rectC(15, 1, 2, 2, 255, 207, 60); b.rectC(19, 1, 2, 2, 255, 207, 60); b.setC(13, 2, 255, 207, 60); b.setC(17, 2, 255, 207, 60); b.setC(16, 2, 255, 90, 60); }
+  else if (kind === 'halo') { b.ellC(16, 1, 5, 1, 255, 242, 127); b.ellC(16, 1, 3, 1, 0, 0, 0, 0); b.setC(11, 1, 255, 242, 127); b.setC(21, 1, 255, 242, 127); }
   return b;
 }
 
