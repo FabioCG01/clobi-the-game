@@ -1399,25 +1399,37 @@ func randomBotCharacter(rng *rand.Rand) protocol.Character {
 	feetCols := []string{"#ff9e2c", "#ffcf3c", "#ff5a3c", "#ff7fd0", "#7ff9e0", "#9cff5a"}
 	skinCols := []string{"#ffd9b3", "#f3c69a", "#e0a878", "#c68642", "#8d5524"}
 	hairCols := []string{"#b07a43", "#7a4a1f", "#2b2b2b", "#11131c", "#d9b15a", "#a0522d"}
+	pantsCols := []string{"#33405c", "#222634", "#5a3a22", "#11131c", "#3a1d4a", "#1b3a2a"}
+	capeCols := []string{"#ff5a3c", "#7ff9e0", "#7a52d0", "#ffcf3c", "#1b7a3a", "#e8e8f0", "#ff7fbf"}
 	gender := "male"
 	if rng.Intn(2) == 0 {
 		gender = "female"
+	}
+	fat := 0.0
+	if rng.Intn(3) == 0 {
+		fat = rng.Float64() * 0.9
 	}
 	return protocol.Character{
 		Name:       "",
 		BodyType:   bodyType,
 		Gender:     gender,
+		Fat:        fat,
 		Body:       pick(bodyCols),
 		Belly:      pick(bellyCols),
 		Feet:       pick(feetCols),
 		Skin:       pick(skinCols),
 		HairColor:  pick(hairCols),
 		BeardColor: pick(hairCols),
-		Hair:       rng.Intn(6),
-		Beard:      rng.Intn(4),
-		Hat:        rng.Intn(4),
-		Eyes:       rng.Intn(3),
-		Accessory:  rng.Intn(3),
-		Cape:       rng.Intn(3),
+		Pants:      pick(pantsCols),
+		CapeColor:  pick(capeCols),
+		Hair:       rng.Intn(9),
+		Beard:      rng.Intn(6),
+		ShirtStyle: rng.Intn(6),
+		PantsStyle: rng.Intn(5),
+		ShoeStyle:  rng.Intn(4),
+		Hat:        rng.Intn(7),
+		Eyes:       rng.Intn(5),
+		Accessory:  rng.Intn(6),
+		Cape:       rng.Intn(6),
 	}
 }

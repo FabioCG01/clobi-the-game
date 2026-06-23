@@ -1,0 +1,312 @@
+{
+ "grid": {
+  "w": 32,
+  "h": 36
+ },
+ "base": {
+  "humanoidBody": "base/humanoidBody.png",
+  "tuxBody": "base/tuxBody.png",
+  "tuxBelly": "base/tuxBelly.png",
+  "tuxFeet": "base/tuxFeet.png",
+  "tuxBeak": "base/tuxBeak.png"
+ },
+ "catalog": {
+  "shirt": [
+   {
+    "id": "tee",
+    "name": "Tee",
+    "file": "shirt/tee.png"
+   },
+   {
+    "id": "vneck",
+    "name": "V-Neck",
+    "file": "shirt/vneck.png"
+   },
+   {
+    "id": "hoodie",
+    "name": "Hoodie",
+    "file": "shirt/hoodie.png"
+   },
+   {
+    "id": "tank",
+    "name": "Tank",
+    "file": "shirt/tank.png"
+   },
+   {
+    "id": "stripe",
+    "name": "Striped",
+    "file": "shirt/stripe.png"
+   },
+   {
+    "id": "suit",
+    "name": "Suit",
+    "file": "shirt/suit.png"
+   }
+  ],
+  "pants": [
+   {
+    "id": "jeans",
+    "name": "Jeans",
+    "file": "pants/jeans.png"
+   },
+   {
+    "id": "trouser",
+    "name": "Trousers",
+    "file": "pants/trouser.png"
+   },
+   {
+    "id": "cargo",
+    "name": "Cargo",
+    "file": "pants/cargo.png"
+   },
+   {
+    "id": "shorts",
+    "name": "Shorts",
+    "file": "pants/shorts.png"
+   },
+   {
+    "id": "skirt",
+    "name": "Skirt",
+    "file": "pants/skirt.png"
+   }
+  ],
+  "shoes": [
+   {
+    "id": "sneaker",
+    "name": "Sneakers",
+    "file": "shoes/sneaker.png"
+   },
+   {
+    "id": "boot",
+    "name": "Boots",
+    "file": "shoes/boot.png"
+   },
+   {
+    "id": "dress",
+    "name": "Dress",
+    "file": "shoes/dress.png"
+   },
+   {
+    "id": "sandal",
+    "name": "Sandals",
+    "file": "shoes/sandal.png"
+   }
+  ],
+  "hair": [
+   {
+    "id": "bald",
+    "name": "Bald",
+    "front": "hair/bald_f.png",
+    "back": "hair/bald_b.png"
+   },
+   {
+    "id": "short",
+    "name": "Short",
+    "front": "hair/short_f.png",
+    "back": "hair/short_b.png"
+   },
+   {
+    "id": "long",
+    "name": "Long",
+    "front": "hair/long_f.png",
+    "back": "hair/long_b.png"
+   },
+   {
+    "id": "ponytail",
+    "name": "Ponytail",
+    "front": "hair/ponytail_f.png",
+    "back": "hair/ponytail_b.png"
+   },
+   {
+    "id": "spiky",
+    "name": "Spiky",
+    "front": "hair/spiky_f.png",
+    "back": "hair/spiky_b.png"
+   },
+   {
+    "id": "bun",
+    "name": "Bun",
+    "front": "hair/bun_f.png",
+    "back": "hair/bun_b.png"
+   },
+   {
+    "id": "mohawk",
+    "name": "Mohawk",
+    "front": "hair/mohawk_f.png",
+    "back": "hair/mohawk_b.png"
+   },
+   {
+    "id": "afro",
+    "name": "Afro",
+    "front": "hair/afro_f.png",
+    "back": "hair/afro_b.png"
+   },
+   {
+    "id": "curly",
+    "name": "Curly",
+    "front": "hair/curly_f.png",
+    "back": "hair/curly_b.png"
+   }
+  ],
+  "beard": [
+   {
+    "id": "none",
+    "name": "None",
+    "file": null
+   },
+   {
+    "id": "stubble",
+    "name": "Stubble",
+    "file": "beard/stubble.png"
+   },
+   {
+    "id": "clobi",
+    "name": "Clobi",
+    "file": "beard/clobi.png"
+   },
+   {
+    "id": "goatee",
+    "name": "Goatee",
+    "file": "beard/goatee.png"
+   },
+   {
+    "id": "full",
+    "name": "Full",
+    "file": "beard/full.png"
+   },
+   {
+    "id": "moustache",
+    "name": "Moustache",
+    "file": "beard/moustache.png"
+   }
+  ],
+  "eyes": [
+   {
+    "id": "classic",
+    "name": "Classic",
+    "file": "eyes/classic.png"
+   },
+   {
+    "id": "angry",
+    "name": "Angry",
+    "file": "eyes/angry.png"
+   },
+   {
+    "id": "sleepy",
+    "name": "Sleepy",
+    "file": "eyes/sleepy.png"
+   },
+   {
+    "id": "shades",
+    "name": "Shades",
+    "file": "eyes/shades.png"
+   },
+   {
+    "id": "sparkle",
+    "name": "Sparkle",
+    "file": "eyes/sparkle.png"
+   }
+  ],
+  "hat": [
+   {
+    "id": "none",
+    "name": "None",
+    "file": null
+   },
+   {
+    "id": "cap",
+    "name": "Vim Cap",
+    "file": "hat/cap.png"
+   },
+   {
+    "id": "wizard",
+    "name": "Wizard",
+    "file": "hat/wizard.png"
+   },
+   {
+    "id": "beanie",
+    "name": "Beanie",
+    "file": "hat/beanie.png"
+   },
+   {
+    "id": "tophat",
+    "name": "Tophat",
+    "file": "hat/tophat.png"
+   },
+   {
+    "id": "crown",
+    "name": "Crown",
+    "file": "hat/crown.png"
+   },
+   {
+    "id": "halo",
+    "name": "Halo",
+    "file": "hat/halo.png"
+   }
+  ],
+  "accessory": [
+   {
+    "id": "none",
+    "name": "None",
+    "file": null
+   },
+   {
+    "id": "bowtie",
+    "name": "Bowtie",
+    "file": "acc/bowtie.png"
+   },
+   {
+    "id": "scarf",
+    "name": "Scarf",
+    "file": "acc/scarf.png"
+   },
+   {
+    "id": "fish",
+    "name": "Fisherman's",
+    "file": "acc/fish.png"
+   },
+   {
+    "id": "badge",
+    "name": "Badge",
+    "file": "acc/badge.png"
+   },
+   {
+    "id": "chain",
+    "name": "Chain",
+    "file": "acc/chain.png"
+   }
+  ],
+  "cape": [
+   {
+    "id": "none",
+    "name": "None",
+    "file": null
+   },
+   {
+    "id": "classic",
+    "name": "Classic",
+    "file": "cape/classic.png"
+   },
+   {
+    "id": "long",
+    "name": "Long",
+    "file": "cape/long.png"
+   },
+   {
+    "id": "round",
+    "name": "Round",
+    "file": "cape/round.png"
+   },
+   {
+    "id": "royal",
+    "name": "Royal",
+    "file": "cape/royal.png"
+   },
+   {
+    "id": "tattered",
+    "name": "Tattered",
+    "file": "cape/tattered.png"
+   }
+  ]
+ }
+}

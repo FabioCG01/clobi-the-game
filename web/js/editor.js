@@ -1,266 +1,257 @@
-// editor.js -- the ONE UNIVERSAL character editor for "Tux Smash Royale".
+// editor.js — the ONE UNIVERSAL character editor for "Tux Smash Royale".
 // Global: Editor. Renders into #screen-editor.
 //
-// v2: body-type-aware controls. TUX shows Body/Belly/Feet colours; HUMANOID
-// shows Skin / Hair / Beard / Shirt / Shoes colours, a Gender toggle, and
-// Hairstyle + Beard pickers. The default humanoid is CLOBI (ponytail, small
-// beard, white shirt). Every colour offers preset swatches AND a free colour
-// picker. Catalogs come from the editable web/assets/parts.js via Sprites.PARTS.
+// v3 UX: a BIG live preview on the left (with zoom + flip), all options on the
+// right. Body-type toggle (Tux / Humanoid); for Humanoid: gender, a thin<->fat
+// slider, hair/beard + shirt/pants/shoe STYLES, and skin/hair/beard/shirt/pants/
+// shoe/cape colours. Every colour row has preset swatches AND an obvious rainbow
+// "Custom" picker. Save / load / delete named PRESETS. Catalogs come from the
+// baked texture manifest (Sprites.PARTS.catalog), so new art appears automatically.
 (function () {
   'use strict';
 
-  // Control layouts per body type. preset = key in Sprites.PARTS.presets;
-  // cat = key in Sprites.PARTS for list rows.
+  // character field -> texture catalog group (for style pickers)
+  var CAT = { hair: 'hair', beard: 'beard', shirtStyle: 'shirt', pantsStyle: 'pants', shoeStyle: 'shoes', hat: 'hat', eyes: 'eyes', accessory: 'accessory', cape: 'cape' };
+
   var LAYOUT = {
     tux: {
-      colors: [
-        { field: 'body', key: 'editor.body', en: 'Body', preset: 'body' },
-        { field: 'belly', key: 'editor.belly', en: 'Belly', preset: 'belly' },
-        { field: 'feet', key: 'editor.feet', en: 'Feet', preset: 'feet' }
-      ],
-      lists: [
-        { field: 'hat', key: 'editor.hat', en: 'Hat', cat: 'HATS' },
-        { field: 'eyes', key: 'editor.eyes', en: 'Eyes', cat: 'EYES' },
-        { field: 'accessory', key: 'editor.accessory', en: 'Accessory', cat: 'ACCESSORIES' },
-        { field: 'cape', key: 'editor.cape', en: 'Cape', cat: 'CAPES' }
-      ]
+      colors: [['body', 'editor.body', 'Body', 'body'], ['belly', 'editor.belly', 'Belly', 'belly'], ['feet', 'editor.feet', 'Feet', 'feet']],
+      lists: [['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
     },
     humanoid: {
-      colors: [
-        { field: 'skin', key: 'editor.skin', en: 'Skin', preset: 'skin' },
-        { field: 'hairColor', key: 'editor.hairColor', en: 'Hair colour', preset: 'hair' },
-        { field: 'beardColor', key: 'editor.beardColor', en: 'Beard colour', preset: 'beard' },
-        { field: 'belly', key: 'editor.shirt', en: 'Shirt', preset: 'shirt' },
-        { field: 'feet', key: 'editor.shoes', en: 'Shoes', preset: 'feet' }
-      ],
-      lists: [
-        { field: 'hair', key: 'editor.hairstyle', en: 'Hairstyle', cat: 'HAIRS' },
-        { field: 'beard', key: 'editor.beard', en: 'Beard', cat: 'BEARDS' },
-        { field: 'hat', key: 'editor.hat', en: 'Hat', cat: 'HATS' },
-        { field: 'eyes', key: 'editor.eyes', en: 'Eyes', cat: 'EYES' },
-        { field: 'accessory', key: 'editor.accessory', en: 'Accessory', cat: 'ACCESSORIES' },
-        { field: 'cape', key: 'editor.cape', en: 'Cape', cat: 'CAPES' }
-      ]
+      colors: [['skin', 'editor.skin', 'Skin', 'skin'], ['hairColor', 'editor.hairColor', 'Hair', 'hair'], ['beardColor', 'editor.beardColor', 'Beard', 'beard'], ['belly', 'editor.shirt', 'Shirt', 'shirt'], ['pants', 'editor.pants', 'Pants', 'pants'], ['feet', 'editor.shoes', 'Shoes', 'feet']],
+      lists: [['hair', 'editor.hairstyle', 'Hairstyle'], ['beard', 'editor.beard', 'Beard'], ['shirtStyle', 'editor.shirtStyle', 'Shirt'], ['pantsStyle', 'editor.pantsStyle', 'Pants'], ['shoeStyle', 'editor.shoeStyle', 'Shoes'], ['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
     }
   };
+  var PRESETS_KEY = 'clobi.presets';
 
   var root = null, built = false, canvas = null, ctx = null;
-  var nameInput = null, controlsEl = null, genderRow = null;
-  var bodyTabs = {}, genderTabs = {};
-  var listValueEls = {};
-  var character = null, facing = 1, animFrame = 0, rafId = null, statusKey = null;
+  var nameInput = null, optionsEl = null, presetSel = null;
+  var bodyTabs = {}, genderTabs = {}, listValueEls = {};
+  var character = null, facing = 1, zoom = 1.2, animFrame = 0, rafId = null, statusKey = null;
 
   function S() { return window.Sprites || null; }
-  function parts() { var s = S(); return (s && s.PARTS) || {}; }
-  function presetsFor(name) {
-    var p = parts().presets || {};
-    return Array.isArray(p[name]) ? p[name] : ['#888888'];
-  }
-  function catalog(name) {
-    var p = parts();
-    return Array.isArray(p[name]) ? p[name] : [];
-  }
-  function t(key, en) {
-    if (window.I18n && typeof I18n.t === 'function') return I18n.t(key, en);
-    return en;
-  }
-  function sanitize(c) {
-    var s = S();
-    if (s && typeof s.sanitize === 'function') return s.sanitize(c);
-    return c || {};
-  }
-  function defaultCharacter() {
-    var s = S();
-    if (s && typeof s.defaultCharacter === 'function') return s.defaultCharacter();
-    return { bodyType: 'tux' };
-  }
-  function clone(c) {
-    var out = {};
-    for (var k in c) { if (Object.prototype.hasOwnProperty.call(c, k)) out[k] = c[k]; }
-    return out;
-  }
-
-  function el(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text != null) e.textContent = text;
-    return e;
-  }
-
-  function partName(cat, idx) {
-    var a = catalog(cat), item = a[idx];
-    if (item && typeof item.name === 'string') return item.name;
-    return idx === 0 ? t('editor.none', 'None') : ('#' + idx);
-  }
+  function t(key, en) { return (window.I18n && I18n.t) ? I18n.t(key, en) : en; }
+  function catalog(group) { var s = S(); return (s && s.PARTS && s.PARTS.catalog) ? (s.PARTS.catalog(group) || []) : []; }
+  function presetsFor(name) { var s = S(); var p = (s && s.PARTS && s.PARTS.presets) || {}; return Array.isArray(p[name]) ? p[name] : ['#888888']; }
+  function sanitize(c) { var s = S(); return (s && s.sanitize) ? s.sanitize(c) : (c || {}); }
+  function defaultCharacter() { var s = S(); return (s && s.defaultCharacter) ? s.defaultCharacter() : { bodyType: 'tux' }; }
+  function clone(c) { var o = {}; for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) o[k] = c[k]; return o; }
+  function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
+  function partName(group, idx) { var a = catalog(group), it = a[idx]; return (it && it.name) ? it.name : (idx === 0 ? t('editor.none', 'None') : ('#' + idx)); }
 
   // ---- DOM ----------------------------------------------------------------
   function build() {
     root = document.getElementById('screen-editor');
     if (!root) { root = el('section'); root.id = 'screen-editor'; root.className = 'screen'; document.body.appendChild(root); }
-    root.innerHTML = '';
-    injectStyle();
+    root.innerHTML = ''; injectStyle();
 
     var wrap = el('div', 'ed-wrap');
-    wrap.appendChild(el('div', 'ed-title', t('editor.title', 'Character Editor')));
-    wrap.appendChild(buildBodyTypeToggle());
+    var head = el('div', 'ed-head');
+    head.appendChild(el('div', 'ed-title', t('editor.title', 'Character Editor')));
+    head.appendChild(buildBodyTypeToggle());
+    wrap.appendChild(head);
 
-    var cols = el('div', 'ed-cols');
+    var stage = el('div', 'ed-stage');
 
-    var previewCol = el('div', 'ed-preview-col');
+    // LEFT: big preview
+    var left = el('div', 'ed-left');
     var box = el('div', 'ed-preview-box');
-    canvas = el('canvas', 'ed-canvas'); canvas.width = 256; canvas.height = 256;
-    box.appendChild(canvas); previewCol.appendChild(box);
-    var flipBtn = el('button', 'ed-btn ed-flip', t('editor.flip', 'Flip <>')); flipBtn.type = 'button';
-    flipBtn.addEventListener('click', flip); previewCol.appendChild(flipBtn);
-    canvas.addEventListener('click', flip);
-    cols.appendChild(previewCol);
+    canvas = el('canvas', 'ed-canvas');
+    box.appendChild(canvas);
+    left.appendChild(box);
+    var zr = el('div', 'ed-zoomrow');
+    var zo = el('button', 'ed-zbtn', '−'); zo.type = 'button'; zo.addEventListener('click', function () { setZoom(zoom - 0.2); });
+    var zoom_ = el('input', 'ed-zoom'); zoom_.type = 'range'; zoom_.min = '0.6'; zoom_.max = '3'; zoom_.step = '0.05'; zoom_.value = String(zoom);
+    zoom_.addEventListener('input', function () { setZoom(+zoom_.value, true); });
+    zoomSlider = zoom_;
+    var zi = el('button', 'ed-zbtn', '+'); zi.type = 'button'; zi.addEventListener('click', function () { setZoom(zoom + 0.2); });
+    var flip = el('button', 'ed-zbtn ed-flip', '⇄'); flip.type = 'button'; flip.title = t('editor.flip', 'Flip'); flip.addEventListener('click', doFlip);
+    zr.appendChild(el('span', 'ed-zlabel', t('editor.zoom', 'Zoom'))); zr.appendChild(zo); zr.appendChild(zoom_); zr.appendChild(zi); zr.appendChild(flip);
+    left.appendChild(zr);
+    box.addEventListener('click', doFlip);
+    box.addEventListener('wheel', function (e) { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15)); }, { passive: false });
+    stage.appendChild(left);
 
-    controlsEl = el('div', 'ed-controls');
-    // Name row.
-    var nameRow = el('div', 'ed-row');
-    nameRow.appendChild(el('div', 'ed-rowlabel', t('editor.name', 'Name')));
-    nameInput = el('input', 'ed-name'); nameInput.type = 'text'; nameInput.maxLength = 16;
-    nameInput.spellcheck = false; nameInput.placeholder = t('editor.namePh', 'TUX');
-    nameInput.addEventListener('input', function () { if (character) character.name = nameInput.value; });
-    nameRow.appendChild(nameInput);
-    controlsEl.appendChild(nameRow);
-    // Dynamic part controls get appended by renderControls().
-    cols.appendChild(controlsEl);
-    wrap.appendChild(cols);
+    // RIGHT: scrollable options
+    optionsEl = el('div', 'ed-right');
+    stage.appendChild(optionsEl);
+    wrap.appendChild(stage);
 
+    // actions
     var actions = el('div', 'ed-actions');
     actions.appendChild(actionBtn('editor.random', 'Randomize', onRandomize));
     actions.appendChild(actionBtn('editor.reset', 'Reset', onReset));
     actions.appendChild(actionBtn('common.back', 'Back', onBack));
-    var save = actionBtn('editor.save', 'Save', onSave); save.className = 'ed-btn ed-btn-primary';
+    var save = actionBtn('editor.save', 'Save', onSave); save.classList.add('ed-btn-primary');
     actions.appendChild(save);
     wrap.appendChild(actions);
 
     var status = el('div', 'ed-status'); status.id = 'ed-status'; wrap.appendChild(status);
     root.appendChild(wrap);
     if (canvas.getContext) ctx = canvas.getContext('2d');
+    if (window.addEventListener) window.addEventListener('resize', resizeCanvas);
+    if (window.Textures && Textures.onReady) Textures.onReady(function () { if (built && character) { renderControls(); } });
     built = true;
   }
+  var zoomSlider = null;
 
-  function actionBtn(key, en, fn) {
-    var b = el('button', 'ed-btn', t(key, en)); b.type = 'button';
-    b.addEventListener('click', fn); return b;
-  }
+  function actionBtn(key, en, fn) { var b = el('button', 'ed-btn', t(key, en)); b.type = 'button'; b.addEventListener('click', fn); return b; }
 
   function buildBodyTypeToggle() {
-    var rowEl = el('div', 'ed-bodytype');
-    rowEl.appendChild(el('div', 'ed-bt-label', t('editor.bodyType', 'Body Type')));
+    var row = el('div', 'ed-bodytype');
+    row.appendChild(el('div', 'ed-bt-label', t('editor.bodyType', 'Body Type')));
     var tabs = el('div', 'ed-bt-tabs'); bodyTabs = {};
     ['tux', 'humanoid'].forEach(function (bt) {
-      var b = el('button', 'ed-bt-tab', t('editor.' + bt, bt === 'tux' ? 'Tux' : 'Humanoid'));
-      b.type = 'button';
+      var b = el('button', 'ed-bt-tab', t('editor.' + bt, bt === 'tux' ? 'Tux' : 'Humanoid')); b.type = 'button';
       b.addEventListener('click', function () { setBodyType(bt); });
       bodyTabs[bt] = b; tabs.appendChild(b);
     });
-    rowEl.appendChild(tabs);
-    return rowEl;
+    row.appendChild(tabs); return row;
   }
 
-  // Rebuild the part controls for the current body type.
+  // Rebuild the right-hand options for the current body type.
   function renderControls() {
-    // Remove everything after the name row (the first child).
-    while (controlsEl.children.length > 1) controlsEl.removeChild(controlsEl.lastChild);
-    listValueEls = {};
+    optionsEl.innerHTML = ''; listValueEls = {};
     var bt = (character.bodyType === 'humanoid') ? 'humanoid' : 'tux';
     var lay = LAYOUT[bt];
 
-    if (bt === 'humanoid') controlsEl.appendChild(buildGenderRow());
-    lay.colors.forEach(function (cfg) { controlsEl.appendChild(buildColorRow(cfg)); });
-    lay.lists.forEach(function (cfg) { controlsEl.appendChild(buildListRow(cfg)); });
+    // name
+    var nameRow = el('div', 'ed-row');
+    nameRow.appendChild(el('div', 'ed-rowlabel', t('editor.name', 'Name')));
+    nameInput = el('input', 'ed-name'); nameInput.type = 'text'; nameInput.maxLength = 16; nameInput.spellcheck = false;
+    nameInput.placeholder = t('editor.namePh', 'TUX'); nameInput.value = character.name || '';
+    nameInput.addEventListener('input', function () { if (character) character.name = nameInput.value; });
+    nameRow.appendChild(nameInput); optionsEl.appendChild(nameRow);
 
+    if (bt === 'humanoid') { optionsEl.appendChild(buildGenderRow()); optionsEl.appendChild(buildFatRow()); }
+
+    optionsEl.appendChild(sectionLabel(t('editor.colors', 'Colours')));
+    lay.colors.forEach(function (c) { optionsEl.appendChild(buildColorRow({ field: c[0], key: c[1], en: c[2], preset: c[3] })); });
+    if ((character.cape | 0) > 0) optionsEl.appendChild(buildColorRow({ field: 'capeColor', key: 'editor.capeColor', en: 'Cape', preset: 'cape' }));
+
+    optionsEl.appendChild(sectionLabel(t('editor.styles', 'Styles')));
+    lay.lists.forEach(function (c) { optionsEl.appendChild(buildListRow({ field: c[0], key: c[1], en: c[2], cat: CAT[c[0]] })); });
+
+    optionsEl.appendChild(buildPresetsRow());
     syncTabs();
   }
 
+  function sectionLabel(text) { return el('div', 'ed-section', text); }
+
   function buildGenderRow() {
-    var rowEl = el('div', 'ed-row');
-    rowEl.appendChild(el('div', 'ed-rowlabel', t('editor.gender', 'Gender')));
-    var tabs = el('div', 'ed-gender'); genderTabs = {};
+    var row = el('div', 'ed-row');
+    row.appendChild(el('div', 'ed-rowlabel', t('editor.gender', 'Gender')));
+    var tabs = el('div', 'ed-seg'); genderTabs = {};
     [['male', 'Male'], ['female', 'Female']].forEach(function (g) {
-      var b = el('button', 'ed-gtab', t('editor.' + g[0], g[1])); b.type = 'button';
-      b.addEventListener('click', function () {
-        character.gender = g[0]; syncTabs(); drawPreview();
-      });
-      genderTabs[g[0]] = b; tabs.appendChild(b);
+      var b = el('button', 'ed-segbtn', t('editor.' + g[0], g[1])); b.type = 'button';
+      b.addEventListener('click', function () { character.gender = g[0]; syncTabs(); }); genderTabs[g[0]] = b; tabs.appendChild(b);
     });
-    rowEl.appendChild(tabs);
-    return rowEl;
+    row.appendChild(tabs); return row;
+  }
+
+  function buildFatRow() {
+    var row = el('div', 'ed-row');
+    row.appendChild(el('div', 'ed-rowlabel', t('editor.build', 'Build')));
+    var ctrl = el('div', 'ed-rowctrl');
+    ctrl.appendChild(el('span', 'ed-slmin', t('editor.thin', 'Thin')));
+    var sl = el('input', 'ed-slider'); sl.type = 'range'; sl.min = '0'; sl.max = '1'; sl.step = '0.05'; sl.value = String(character.fat || 0);
+    sl.addEventListener('input', function () { character.fat = +sl.value; });
+    ctrl.appendChild(sl); ctrl.appendChild(el('span', 'ed-slmax', t('editor.fat', 'Fat')));
+    row.appendChild(ctrl); return row;
   }
 
   function buildColorRow(cfg) {
-    var rowEl = el('div', 'ed-row');
-    rowEl.appendChild(el('div', 'ed-rowlabel', t(cfg.key, cfg.en)));
+    var row = el('div', 'ed-row');
+    row.appendChild(el('div', 'ed-rowlabel', t(cfg.key, cfg.en)));
     var ctrl = el('div', 'ed-rowctrl');
+
+    // current colour chip
+    var cur = el('span', 'ed-current'); cur.style.background = toHex6(character[cfg.field]);
+    ctrl.appendChild(cur);
 
     var grid = el('div', 'ed-swatches');
     presetsFor(cfg.preset).forEach(function (hex) {
-      var sw = el('button', 'ed-swatch'); sw.type = 'button';
-      sw.style.background = hex; sw.title = hex;
-      sw.addEventListener('click', function () { setColor(cfg.field, hex, picker); });
+      var sw = el('button', 'ed-swatch'); sw.type = 'button'; sw.style.background = hex; sw.title = hex;
+      sw.addEventListener('click', function () { setColor(cfg.field, hex); cur.style.background = hex; if (picker) picker.value = toHex6(hex); });
       grid.appendChild(sw);
     });
-
-    var picker = el('input', 'ed-picker'); picker.type = 'color';
-    picker.value = toHex6(character[cfg.field]);
-    picker.title = t('editor.pickColor', 'Pick any colour');
-    picker.addEventListener('input', function () { setColor(cfg.field, picker.value, null); });
-
     ctrl.appendChild(grid);
-    ctrl.appendChild(picker);
-    rowEl.appendChild(ctrl);
-    return rowEl;
+
+    // obvious custom picker: rainbow button with label + hidden native input
+    var custom = el('label', 'ed-custom'); custom.title = t('editor.pickColor', 'Pick any colour');
+    custom.appendChild(el('span', 'ed-custom-ico', '🎨'));
+    custom.appendChild(el('span', 'ed-custom-txt', t('editor.custom', 'CUSTOM')));
+    var picker = el('input', 'ed-picker'); picker.type = 'color'; picker.value = toHex6(character[cfg.field]);
+    picker.addEventListener('input', function () { setColor(cfg.field, picker.value); cur.style.background = picker.value; });
+    custom.appendChild(picker);
+    ctrl.appendChild(custom);
+
+    row.appendChild(ctrl); return row;
   }
 
   function buildListRow(cfg) {
-    var rowEl = el('div', 'ed-row');
-    rowEl.appendChild(el('div', 'ed-rowlabel', t(cfg.key, cfg.en)));
+    var row = el('div', 'ed-row');
+    row.appendChild(el('div', 'ed-rowlabel', t(cfg.key, cfg.en)));
     var ctrl = el('div', 'ed-rowctrl');
-    var prev = el('button', 'ed-arrow', '<'); prev.type = 'button';
-    prev.addEventListener('click', function () { cycle(cfg.field, cfg.cat, -1); });
-    var val = el('div', 'ed-listval'); var span = el('span', 'ed-listval-text', '');
-    val.appendChild(span); listValueEls[cfg.field] = { span: span, cat: cfg.cat };
-    var next = el('button', 'ed-arrow', '>'); next.type = 'button';
-    next.addEventListener('click', function () { cycle(cfg.field, cfg.cat, 1); });
+    var prev = el('button', 'ed-arrow', '‹'); prev.type = 'button'; prev.addEventListener('click', function () { cycle(cfg.field, cfg.cat, -1); });
+    var val = el('div', 'ed-listval'); var span = el('span', 'ed-listval-text', ''); val.appendChild(span);
+    listValueEls[cfg.field] = { span: span, cat: cfg.cat };
+    var next = el('button', 'ed-arrow', '›'); next.type = 'button'; next.addEventListener('click', function () { cycle(cfg.field, cfg.cat, 1); });
     ctrl.appendChild(prev); ctrl.appendChild(val); ctrl.appendChild(next);
-    rowEl.appendChild(ctrl);
-    updateListVal(cfg.field);
-    return rowEl;
+    row.appendChild(ctrl); updateListVal(cfg.field); return row;
+  }
+
+  function buildPresetsRow() {
+    var box = el('div', 'ed-presets');
+    box.appendChild(sectionLabel(t('editor.presets', 'Presets')));
+    var row = el('div', 'ed-row');
+    presetSel = el('select', 'ed-select'); refreshPresetOptions();
+    var load = el('button', 'ed-mini', t('editor.load', 'Load')); load.type = 'button'; load.addEventListener('click', onLoadPreset);
+    var savep = el('button', 'ed-mini', t('editor.savePreset', 'Save')); savep.type = 'button'; savep.addEventListener('click', onSavePreset);
+    var del = el('button', 'ed-mini', t('editor.delete', 'Del')); del.type = 'button'; del.addEventListener('click', onDeletePreset);
+    var ctrl = el('div', 'ed-rowctrl'); ctrl.appendChild(presetSel); ctrl.appendChild(load); ctrl.appendChild(savep); ctrl.appendChild(del);
+    row.appendChild(ctrl); box.appendChild(row); return box;
+  }
+
+  // ---- presets storage ----
+  function readPresets() { try { return JSON.parse(window.localStorage.getItem(PRESETS_KEY)) || []; } catch (e) { return []; } }
+  function writePresets(a) { try { window.localStorage.setItem(PRESETS_KEY, JSON.stringify(a)); } catch (e) { } }
+  function refreshPresetOptions() {
+    if (!presetSel) return; presetSel.innerHTML = '';
+    var list = readPresets();
+    if (!list.length) { var o = el('option', null, t('editor.noPresets', '— none —')); o.value = ''; presetSel.appendChild(o); return; }
+    list.forEach(function (p, i) { var o = el('option', null, p.name || ('#' + i)); o.value = String(i); presetSel.appendChild(o); });
+  }
+  function onSavePreset() {
+    var nm = window.prompt(t('editor.presetName', 'Preset name:'), character.name || 'Preset');
+    if (nm == null) return; nm = String(nm).trim() || 'Preset';
+    var list = readPresets(); list.push({ name: nm, ch: sanitize(character) });
+    writePresets(list); refreshPresetOptions(); setStatus('editor.presetSaved', 'Preset saved.');
+  }
+  function onLoadPreset() {
+    var i = presetSel && presetSel.value; if (i === '' || i == null) return;
+    var list = readPresets(), p = list[+i]; if (!p) return;
+    var keep = character.name; character = sanitize(p.ch); if (!character.name) character.name = keep;
+    renderControls(); setStatus('editor.presetLoaded', 'Preset loaded.');
+  }
+  function onDeletePreset() {
+    var i = presetSel && presetSel.value; if (i === '' || i == null) return;
+    var list = readPresets(); list.splice(+i, 1); writePresets(list); refreshPresetOptions(); setStatus('editor.presetDeleted', 'Preset deleted.');
   }
 
   // ---- actions ------------------------------------------------------------
-  function flip() { facing = -facing; drawPreview(); }
-
-  function setBodyType(bt) {
-    if (bt !== 'tux' && bt !== 'humanoid') return;
-    character.bodyType = bt;
-    renderControls();
-    drawPreview();
-  }
-
-  function setColor(field, hex, picker) {
-    character[field] = hex;
-    if (picker) picker.value = toHex6(hex);
-    drawPreview();
-  }
-
+  function doFlip() { facing = -facing; }
+  function setZoom(z, fromSlider) { zoom = Math.max(0.6, Math.min(3, z)); if (zoomSlider && !fromSlider) zoomSlider.value = String(zoom); }
+  function setBodyType(bt) { if (bt !== 'tux' && bt !== 'humanoid') return; character.bodyType = bt; renderControls(); }
+  function setColor(field, hex) { character[field] = hex; }
   function cycle(field, cat, dir) {
     var len = catalog(cat).length; if (!len) return;
-    var v = (character[field] | 0) + dir;
-    v = ((v % len) + len) % len;
-    character[field] = v;
+    var v = (character[field] | 0) + dir; v = ((v % len) + len) % len; character[field] = v;
     updateListVal(field);
-    drawPreview();
+    if (field === 'cape') renderControls();   // toggling cape on/off shows/hides cape-colour row
   }
-
-  function updateListVal(field) {
-    var rec = listValueEls[field]; if (!rec) return;
-    rec.span.textContent = String(partName(rec.cat, character[field] | 0)).toUpperCase();
-  }
-
+  function updateListVal(field) { var rec = listValueEls[field]; if (!rec) return; rec.span.textContent = String(partName(rec.cat, character[field] | 0)).toUpperCase(); }
   function syncTabs() {
     var bt = (character.bodyType === 'humanoid') ? 'humanoid' : 'tux';
     if (bodyTabs.tux) bodyTabs.tux.classList.toggle('active', bt === 'tux');
@@ -270,77 +261,48 @@
     if (genderTabs.female) genderTabs.female.classList.toggle('active', g === 'female');
   }
 
-  function onRandomize() {
-    var s = S(); var keep = character ? character.name : '';
-    character = sanitize(s && s.randomCharacter ? s.randomCharacter() : {});
-    if (!character.name) character.name = keep;
-    renderControls(); drawPreview(); setStatus('editor.randomized', 'Randomized.');
-  }
-
-  function onReset() {
-    var keep = character ? character.name : '';
-    character = sanitize(defaultCharacter());
-    if (keep) character.name = keep;
-    if (nameInput) nameInput.value = character.name || '';
-    renderControls(); drawPreview(); setStatus('editor.resetDone', 'Reset to classic Tux.');
-  }
-
+  function onRandomize() { var s = S(); var keep = character ? character.name : ''; character = sanitize(s && s.randomCharacter ? s.randomCharacter() : {}); if (!character.name) character.name = keep; renderControls(); setStatus('editor.randomized', 'Randomized.'); }
+  function onReset() { var keep = character ? character.name : ''; character = sanitize(defaultCharacter()); if (keep) character.name = keep; renderControls(); setStatus('editor.resetDone', 'Reset to classic Tux.'); }
   function onSave() {
     var nm = (nameInput && nameInput.value != null) ? nameInput.value.trim() : (character.name || '');
-    character.name = nm;
-    var saved = sanitize(character);
-    saved.name = nm;
-    character = clone(saved);
+    character.name = nm; var saved = sanitize(character); saved.name = nm; character = clone(saved);
     var payload = clone(saved);
-
-    if (window.App && typeof App.updateCharacter === 'function') App.updateCharacter(payload);
-    else if (window.App) App.character = payload;
-    if (window.Store && typeof Store.setCharacter === 'function') Store.setCharacter(payload);
-
+    if (window.App && App.updateCharacter) App.updateCharacter(payload); else if (window.App) App.character = payload;
+    if (window.Store && Store.setCharacter) Store.setCharacter(payload);
     var synced = false;
     if (window.Store && Store.isLoggedIn && Store.isLoggedIn() && Store.saveCharacterRemote) {
       synced = true;
-      try {
-        var p = Store.saveCharacterRemote(payload);
-        if (p && p.then) {
-          p.then(function () { setStatus('editor.savedSynced', 'Saved and synced to your account.'); })
-            .catch(function () { setStatus('editor.savedLocal', 'Saved locally (sync failed).'); });
-        }
-      } catch (e) { synced = false; }
+      try { var p = Store.saveCharacterRemote(payload); if (p && p.then) { p.then(function () { setStatus('editor.savedSynced', 'Saved and synced to your account.'); }).catch(function () { setStatus('editor.savedLocal', 'Saved locally (sync failed).'); }); } }
+      catch (e) { synced = false; }
     }
     if (!synced) setStatus('editor.saved', 'Saved!');
     showMenu();
   }
-
   function onBack() { showMenu(); }
-  function showMenu() {
-    stopLoop();
-    if (window.App && App.showScreen) App.showScreen('menu');
-    else if (window.Menu && Menu.show) Menu.show();
-  }
-
-  function setStatus(key, en) {
-    statusKey = key ? { key: key, en: en } : null;
-    var s = document.getElementById('ed-status');
-    if (s) s.textContent = statusKey ? t(statusKey.key, statusKey.en) : '';
-  }
+  function showMenu() { stopLoop(); if (window.App && App.showScreen) App.showScreen('menu'); else if (window.Menu && Menu.show) Menu.show(); }
+  function setStatus(key, en) { statusKey = key ? { key: key, en: en } : null; var s = document.getElementById('ed-status'); if (s) s.textContent = statusKey ? t(statusKey.key, statusKey.en) : ''; }
 
   // ---- preview ------------------------------------------------------------
+  function resizeCanvas() {
+    if (!canvas) return; var box = canvas.parentElement; if (!box) return;
+    var w = Math.max(120, box.clientWidth), h = Math.max(120, box.clientHeight);
+    canvas.width = w; canvas.height = h;
+  }
   function drawPreview() {
-    if (!ctx) return;
-    var w = canvas.width, h = canvas.height;
+    if (!ctx) return; var w = canvas.width, h = canvas.height;
     ctx.imageSmoothingEnabled = false;
-    ctx.fillStyle = '#1a1d2e'; ctx.fillRect(0, 0, w, h);
-    var tile = 16;
-    for (var gy = 0; gy < h; gy += tile) for (var gx = 0; gx < w; gx += tile) {
-      if ((((gx / tile) + (gy / tile)) & 1) === 0) { ctx.fillStyle = '#222640'; ctx.fillRect(gx, gy, tile, tile); }
-    }
-    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(w * 0.5 - 44, h * 0.5 + 60, 88, 12);
+    ctx.fillStyle = '#171a2b'; ctx.fillRect(0, 0, w, h);
+    var tile = 24;
+    for (var gy = 0; gy < h; gy += tile) for (var gx = 0; gx < w; gx += tile) if ((((gx / tile) + (gy / tile)) & 1) === 0) { ctx.fillStyle = '#1d2138'; ctx.fillRect(gx, gy, tile, tile); }
+    // base scale fits the 36-tall sprite to ~62% of the panel height, * zoom
+    var baseScale = (h * 0.62) / 18;
+    var scale = baseScale * zoom;
+    var cyFeet = h * 0.5;
+    var bob = Math.sin(animFrame / 22) * 1.5;
+    // soft shadow under the feet
+    ctx.fillStyle = 'rgba(0,0,0,0.30)'; var sw = scale * 9; ctx.beginPath(); ctx.ellipse(w / 2, cyFeet + 9 * scale, sw, sw * 0.28, 0, 0, 7); ctx.fill();
     var s = S();
-    if (s && s.drawCharacter && character) {
-      var bob = Math.round(Math.sin(animFrame / 18) * 2);
-      s.drawCharacter(ctx, character, Math.round(w / 2), Math.round(h / 2 + bob), 6, facing);
-    }
+    if (s && s.drawCharacter && character) s.drawCharacter(ctx, character, Math.round(w / 2), Math.round(cyFeet + bob), scale, facing);
   }
   function loop() { animFrame++; drawPreview(); rafId = window.requestAnimationFrame(loop); }
   function startLoop() { if (rafId == null) rafId = window.requestAnimationFrame(loop); }
@@ -353,59 +315,70 @@
     character = sanitize(src || defaultCharacter());
     if (!character.name && window.App && App.nickname) character.name = String(App.nickname).slice(0, 16);
     facing = 1; statusKey = null;
-    if (nameInput) nameInput.value = character.name || '';
     renderControls(); setStatus(null);
-    if (window.App && App.showScreen) App.showScreen('editor');
-    else if (root) { root.classList.add('active'); root.style.display = ''; }
-    drawPreview(); startLoop();
+    if (window.App && App.showScreen) App.showScreen('editor'); else if (root) { root.classList.add('active'); root.style.display = ''; }
+    resizeCanvas(); drawPreview(); startLoop();
+    // a second resize after layout settles (fonts/flex)
+    if (window.requestAnimationFrame) window.requestAnimationFrame(function () { resizeCanvas(); });
   }
   function hide() { stopLoop(); if (root && !(window.App && App.showScreen)) root.classList.remove('active'); }
 
-  function toHex6(h) {
-    if (typeof h !== 'string' || h[0] !== '#') return '#000000';
-    var x = h.slice(1);
-    if (x.length === 3) x = x[0] + x[0] + x[1] + x[1] + x[2] + x[2];
-    return '#' + x.slice(0, 6);
-  }
+  function toHex6(h) { if (typeof h !== 'string' || h[0] !== '#') return '#000000'; var x = h.slice(1); if (x.length === 3) x = x[0] + x[0] + x[1] + x[1] + x[2] + x[2]; return '#' + x.slice(0, 6); }
 
   function injectStyle() {
     if (document.getElementById('editor-style')) return;
     var css = [
-      '#screen-editor{font-family:"Press Start 2P",monospace;color:#e8ecff;image-rendering:pixelated;padding:16px;box-sizing:border-box;overflow:auto;}',
+      '#screen-editor{position:absolute;inset:0;font-family:"Press Start 2P",monospace;color:#e8ecff;}',
       '#screen-editor *{box-sizing:border-box;}',
-      '.ed-wrap{max-width:940px;margin:0 auto;}',
-      '.ed-title{font-size:20px;color:#7ff9e0;text-align:center;margin:8px 0 16px;text-shadow:3px 3px 0 #000;}',
-      '.ed-bodytype{display:flex;align-items:center;justify-content:center;gap:12px;margin:0 0 18px;flex-wrap:wrap;}',
+      '.ed-wrap{height:100%;display:flex;flex-direction:column;padding:10px 14px;gap:8px;}',
+      '.ed-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}',
+      '.ed-title{font-size:16px;color:#7ff9e0;text-shadow:2px 2px 0 #000;}',
+      '.ed-bodytype{display:flex;align-items:center;gap:10px;}',
       '.ed-bt-label{font-size:9px;color:#ff9e2c;text-shadow:2px 2px 0 #000;}',
-      '.ed-bt-tabs,.ed-gender{display:flex;border:4px solid #000;box-shadow:4px 4px 0 #000;}',
-      '.ed-bt-tab,.ed-gtab{font-family:inherit;font-size:11px;color:#e8ecff;background:#11131f;border:0;border-right:4px solid #000;padding:10px 16px;cursor:pointer;}',
-      '.ed-bt-tab:last-child,.ed-gtab:last-child{border-right:0;}',
-      '.ed-bt-tab.active,.ed-gtab.active{background:#7ff9e0;color:#1a1d2e;}',
-      '.ed-gender{box-shadow:3px 3px 0 #000;border-width:3px;}',
-      '.ed-gtab{font-size:9px;padding:8px 12px;border-right-width:3px;}',
-      '.ed-cols{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;justify-content:center;}',
-      '.ed-preview-col{display:flex;flex-direction:column;align-items:center;gap:12px;}',
-      '.ed-preview-box{background:#1a1d2e;border:4px solid #7ff9e0;box-shadow:6px 6px 0 #000;padding:6px;}',
-      '.ed-canvas{display:block;width:256px;height:256px;image-rendering:pixelated;cursor:pointer;}',
-      '.ed-controls{flex:1 1 380px;min-width:300px;display:flex;flex-direction:column;gap:9px;}',
-      '.ed-row{display:flex;align-items:center;gap:10px;}',
-      '.ed-rowlabel{flex:0 0 92px;font-size:9px;color:#ff9e2c;text-shadow:2px 2px 0 #000;}',
-      '.ed-rowctrl{flex:1 1 auto;display:flex;align-items:center;gap:8px;}',
-      '.ed-name{flex:1 1 auto;font-family:inherit;font-size:11px;color:#1a1d2e;background:#e8ecff;border:3px solid #000;box-shadow:3px 3px 0 #000;padding:8px;text-transform:uppercase;}',
-      '.ed-arrow{font-family:inherit;font-size:12px;color:#1a1d2e;background:#7ff9e0;border:3px solid #000;box-shadow:2px 2px 0 #000;width:30px;height:30px;cursor:pointer;padding:0;flex:0 0 auto;}',
-      '.ed-arrow:hover{background:#1a1d2e;color:#7ff9e0;}',
-      '.ed-swatches{flex:1 1 auto;display:flex;flex-wrap:wrap;gap:5px;background:#11131f;border:3px solid #000;box-shadow:3px 3px 0 #000;padding:5px;}',
-      '.ed-swatch{width:22px;height:22px;border:3px solid #000;padding:0;cursor:pointer;image-rendering:pixelated;}',
+      '.ed-bt-tabs,.ed-seg{display:flex;border:3px solid #000;box-shadow:3px 3px 0 #000;}',
+      '.ed-bt-tab,.ed-segbtn{font-family:inherit;font-size:10px;color:#e8ecff;background:#11131f;border:0;border-right:3px solid #000;padding:9px 14px;cursor:pointer;}',
+      '.ed-bt-tab:last-child,.ed-segbtn:last-child{border-right:0;}',
+      '.ed-bt-tab.active,.ed-segbtn.active{background:#7ff9e0;color:#10131f;}',
+      '.ed-segbtn{font-size:9px;padding:7px 10px;}',
+      '.ed-stage{flex:1 1 auto;display:flex;gap:14px;min-height:0;}',
+      '.ed-left{flex:1 1 58%;display:flex;flex-direction:column;gap:8px;min-width:240px;}',
+      '.ed-preview-box{flex:1 1 auto;background:#171a2b;border:4px solid #7ff9e0;box-shadow:6px 6px 0 #000;min-height:200px;overflow:hidden;cursor:pointer;position:relative;}',
+      '.ed-canvas{display:block;width:100%;height:100%;image-rendering:pixelated;}',
+      '.ed-zoomrow{display:flex;align-items:center;gap:8px;}',
+      '.ed-zlabel{font-size:9px;color:#ff9e2c;text-shadow:2px 2px 0 #000;}',
+      '.ed-zoom{flex:1 1 auto;accent-color:#7ff9e0;}',
+      '.ed-zbtn{font-family:inherit;font-size:12px;color:#10131f;background:#7ff9e0;border:3px solid #000;box-shadow:2px 2px 0 #000;width:34px;height:30px;cursor:pointer;padding:0;}',
+      '.ed-zbtn:hover{background:#10131f;color:#7ff9e0;}',
+      '.ed-right{flex:0 0 360px;max-width:42%;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:8px;padding-right:6px;}',
+      '.ed-section{font-size:9px;color:#ff9e2c;text-shadow:2px 2px 0 #000;margin:6px 0 0;border-bottom:2px solid #2a2f4a;padding-bottom:4px;}',
+      '.ed-row{display:flex;align-items:center;gap:8px;}',
+      '.ed-rowlabel{flex:0 0 74px;font-size:8px;color:#cfd4e8;text-shadow:1px 1px 0 #000;}',
+      '.ed-rowctrl{flex:1 1 auto;display:flex;align-items:center;gap:6px;min-width:0;}',
+      '.ed-name{flex:1 1 auto;font-family:inherit;font-size:11px;color:#10131f;background:#e8ecff;border:3px solid #000;box-shadow:2px 2px 0 #000;padding:8px;text-transform:uppercase;width:100%;}',
+      '.ed-current{flex:0 0 auto;width:20px;height:20px;border:2px solid #000;box-shadow:1px 1px 0 #000;}',
+      '.ed-swatches{flex:1 1 auto;display:flex;flex-wrap:wrap;gap:4px;background:#11131f;border:2px solid #000;padding:4px;min-width:0;}',
+      '.ed-swatch{width:18px;height:18px;border:2px solid #000;padding:0;cursor:pointer;}',
       '.ed-swatch:hover{outline:2px solid #fff;outline-offset:-1px;}',
-      '.ed-picker{flex:0 0 auto;width:38px;height:30px;padding:0;border:3px solid #000;box-shadow:2px 2px 0 #000;background:#11131f;cursor:pointer;}',
-      '.ed-listval{flex:1 1 auto;font-size:10px;background:#11131f;border:3px solid #000;box-shadow:3px 3px 0 #000;padding:9px 8px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+      '.ed-custom{flex:0 0 auto;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;width:46px;height:34px;border:3px solid #fff;box-shadow:2px 2px 0 #000;cursor:pointer;background:conic-gradient(from 0deg,#ff5a3c,#ffcf3c,#9cff5a,#7ff9e0,#2b5fff,#7a52d0,#ff5aa0,#ff5a3c);}',
+      '.ed-custom-ico{font-size:11px;line-height:1;filter:drop-shadow(0 1px 0 #000);}',
+      '.ed-custom-txt{font-size:5px;color:#fff;text-shadow:1px 1px 0 #000;margin-top:1px;letter-spacing:1px;}',
+      '.ed-picker{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer;border:0;padding:0;}',
+      '.ed-arrow{font-family:inherit;font-size:13px;color:#10131f;background:#7ff9e0;border:3px solid #000;box-shadow:2px 2px 0 #000;width:28px;height:28px;cursor:pointer;padding:0;flex:0 0 auto;}',
+      '.ed-arrow:hover{background:#10131f;color:#7ff9e0;}',
+      '.ed-listval{flex:1 1 auto;font-size:9px;background:#11131f;border:2px solid #000;box-shadow:2px 2px 0 #000;padding:8px 6px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}',
       '.ed-listval-text{color:#7ff9e0;}',
-      '.ed-actions{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;margin-top:24px;}',
-      '.ed-btn{font-family:inherit;font-size:11px;color:#1a1d2e;background:#e8ecff;border:4px solid #000;box-shadow:4px 4px 0 #000;padding:12px 16px;cursor:pointer;}',
-      '.ed-btn:hover{background:#1a1d2e;color:#e8ecff;}',
-      '.ed-btn-primary{background:#ff9e2c;color:#1a1d2e;}',
-      '.ed-flip{font-size:9px;padding:8px 12px;}',
-      '.ed-status{text-align:center;font-size:9px;color:#7ff9e0;margin-top:14px;min-height:12px;text-shadow:2px 2px 0 #000;}'
+      '.ed-slider{flex:1 1 auto;accent-color:#ff9e2c;}',
+      '.ed-slmin,.ed-slmax{font-size:7px;color:#cfd4e8;}',
+      '.ed-presets{display:flex;flex-direction:column;gap:6px;}',
+      '.ed-select{flex:1 1 auto;font-family:inherit;font-size:9px;color:#10131f;background:#e8ecff;border:2px solid #000;padding:6px;min-width:0;}',
+      '.ed-mini{font-family:inherit;font-size:8px;color:#10131f;background:#ff9e2c;border:2px solid #000;box-shadow:2px 2px 0 #000;padding:6px 7px;cursor:pointer;flex:0 0 auto;}',
+      '.ed-mini:hover{background:#10131f;color:#ff9e2c;}',
+      '.ed-actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;}',
+      '.ed-btn{font-family:inherit;font-size:10px;color:#10131f;background:#e8ecff;border:3px solid #000;box-shadow:3px 3px 0 #000;padding:11px 15px;cursor:pointer;}',
+      '.ed-btn:hover{background:#10131f;color:#e8ecff;}',
+      '.ed-btn-primary{background:#ff9e2c;}',
+      '.ed-status{text-align:center;font-size:8px;color:#7ff9e0;min-height:10px;text-shadow:1px 1px 0 #000;}',
+      '@media(max-width:720px){.ed-stage{flex-direction:column;}.ed-right{flex:1 1 auto;max-width:none;}.ed-left{min-height:240px;}}'
     ].join('');
     var st = el('style'); st.id = 'editor-style'; st.textContent = css; document.head.appendChild(st);
   }

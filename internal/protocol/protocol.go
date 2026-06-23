@@ -45,21 +45,27 @@ type Envelope struct {
 // 8-bit renderer ("tux" penguin or "humanoid" person); the remaining indices
 // reference entries in the client's Sprites.PARTS tables.
 type Character struct {
-	Name       string `json:"name"`
-	BodyType   string `json:"bodyType"` // "tux" or "humanoid"
-	Gender     string `json:"gender"`   // "male" or "female" (humanoid)
-	Body       string `json:"body"`     // hex — tux body color
-	Belly      string `json:"belly"`    // hex — tux belly / humanoid shirt
-	Feet       string `json:"feet"`     // hex — feet / shoes color
-	Skin       string `json:"skin"`     // hex — humanoid skin
-	HairColor  string `json:"hairColor"`  // hex — humanoid hair
-	BeardColor string `json:"beardColor"` // hex — humanoid beard
-	Hair       int    `json:"hair"`     // hairstyle index (humanoid)
-	Beard      int    `json:"beard"`    // beard index (0 = none)
-	Hat        int    `json:"hat"`
-	Eyes       int    `json:"eyes"`
-	Accessory  int    `json:"accessory"`
-	Cape       int    `json:"cape"`
+	Name       string  `json:"name"`
+	BodyType   string  `json:"bodyType"`   // "tux" or "humanoid"
+	Gender     string  `json:"gender"`     // "male" or "female" (humanoid)
+	Fat        float64 `json:"fat"`        // 0..1 build (thin -> fat); visual only, no hitbox change
+	Body       string  `json:"body"`       // hex — tux body color
+	Belly      string  `json:"belly"`      // hex — tux belly / humanoid shirt
+	Feet       string  `json:"feet"`       // hex — feet / shoes color
+	Skin       string  `json:"skin"`       // hex — humanoid skin
+	HairColor  string  `json:"hairColor"`  // hex — humanoid hair
+	BeardColor string  `json:"beardColor"` // hex — humanoid beard
+	Pants      string  `json:"pants"`      // hex — humanoid pants
+	CapeColor  string  `json:"capeColor"`  // hex — cape tint
+	Hair       int     `json:"hair"`       // hairstyle index (humanoid)
+	Beard      int     `json:"beard"`      // beard index (0 = none)
+	ShirtStyle int     `json:"shirtStyle"` // shirt style index (humanoid)
+	PantsStyle int     `json:"pantsStyle"` // pants style index (humanoid)
+	ShoeStyle  int     `json:"shoeStyle"`  // shoe style index (humanoid)
+	Hat        int     `json:"hat"`
+	Eyes       int     `json:"eyes"`
+	Accessory  int     `json:"accessory"`
+	Cape       int     `json:"cape"`
 }
 
 // ---- Client -> Server payloads ----

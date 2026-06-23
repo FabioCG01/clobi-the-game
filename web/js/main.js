@@ -133,6 +133,13 @@ var App = (function () {
       try { Input.init(); } catch (e) { /* non-fatal */ }
     }
 
+    // Preload the image-based character textures. Non-blocking: renderers fall
+    // back to a placeholder until ready, then we refresh the visible screen.
+    if (typeof Textures !== 'undefined' && Textures.load) {
+      try { Textures.load('assets/tex/').then(function () { refreshUI(); }).catch(function () {}); }
+      catch (e) { /* ignore */ }
+    }
+
     // 2) Restore nickname + character from local storage (defaults otherwise).
     if (hasStore()) {
       try { _nickname = Store.getNickname ? (Store.getNickname() || '') : ''; }
