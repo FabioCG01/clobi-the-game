@@ -52,14 +52,9 @@ class Buf {
   row(x0, x1, y, v, a = 255) { for (let x = x0; x <= x1; x++) this.set(x, y, v, a); }
   ell(cx, cy, rx, ry, v, a = 255) { for (let y = -Math.ceil(ry); y <= Math.ceil(ry); y++) for (let x = -Math.ceil(rx); x <= Math.ceil(rx); x++) if ((x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1) this.set(cx + x, cy + y, v, a); }
   ellC(cx, cy, rx, ry, r, g, b, a = 255) { for (let y = -Math.ceil(ry); y <= Math.ceil(ry); y++) for (let x = -Math.ceil(rx); x <= Math.ceil(rx); x++) if ((x * x) / (rx * rx) + (y * y) / (ry * ry) <= 1) this.setC(cx + x, cy + y, r, g, b, a); }
-  outline(v = 70, a = 255) {
-    const src = Buffer.from(this.d);
-    const at = (x, y) => (x < 0 || y < 0 || x >= this.w || y >= this.h) ? 0 : src[(y * this.w + x) * 4 + 3];
-    for (let y = 0; y < this.h; y++) for (let x = 0; x < this.w; x++) {
-      if (at(x, y) > 0) continue;
-      if (at(x - 1, y) > 60 || at(x + 1, y) > 60 || at(x, y - 1) > 60 || at(x, y + 1) > 60) this.set(x, y, v, a);
-    }
-  }
+  // outlines intentionally disabled — keep the original flat 8-bit style (just
+  // cleaner shapes at the real resolution). Left as a no-op so callers are happy.
+  outline() { /* no-op */ }
 }
 // left-lit horizontal span (lighter left, slightly darker right)
 function vSpan(b, x0, x1, y, base, drop = 26, a = 255) { const n = Math.max(1, x1 - x0); for (let x = x0; x <= x1; x++) b.set(x, y, Math.max(0, base - Math.round(((x - x0) / n) * drop)), a); }

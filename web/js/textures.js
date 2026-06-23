@@ -145,19 +145,19 @@ var Textures = (function () {
     canonCache[k] = c; return c;
   }
 
-  // gender/fat horizontal profile: returns scale-x for a given row y.
-  function profile(y, gender, fat) {
-    var s = 1;
-    if (y >= 13 && y <= 16) s = gender === 'female' ? 0.96 : 1.07;       // shoulders
-    else if (y >= 17 && y <= 20) s = gender === 'female' ? 0.99 : 1.03;  // chest
-    else if (y >= 21 && y <= 23) s = gender === 'female' ? 0.86 : 1.0;   // waist
-    else if (y >= 24 && y <= 28) s = gender === 'female' ? 1.13 : 1.0;   // hips
-    // fat: bulge the lower belly/hips only (below the arms, so arms don't splay)
-    if (y >= 19 && y <= 30) {
-      var d = 1 - Math.abs(24 - y) / 6;          // peak at the belly (y=24)
-      s += Math.max(0, d) * fat * 0.9;
-    }
-    return s;
+  // gender silhouette: a per-row UNIFORM horizontal scale (shoulders/waist/hips).
+  function genderScale(y, gender) {
+    if (y >= 13 && y <= 16) return gender === 'female' ? 0.96 : 1.06; // shoulders
+    if (y >= 17 && y <= 20) return gender === 'female' ? 0.99 : 1.03; // chest
+    if (y >= 21 && y <= 23) return gender === 'female' ? 0.90 : 1.0;  // waist
+    if (y >= 24 && y <= 28) return gender === 'female' ? 1.10 : 1.0;  // hips
+    return 1;
+  }
+  // fat: a CENTRE-weighted belly push — peaks at the stomach and fades out before
+  // the arms, so the gut sticks out without the arms splaying.
+  function fatBulge(y, fat) {
+    if (y >= 18 && y <= 25) { var d = 1 - Math.abs(21 - y) / 4; return Math.max(0, d) * fat * 1.2; }
+    return 0;
   }
 
   function warped(ch) {
@@ -169,11 +169,18 @@ var Textures = (function () {
     var src = canon(ch);
     var out = newCanvas(WW, GH), o = out.getContext('2d');
     o.imageSmoothingEnabled = false;
-    var warp = (ch.bodyType === 'humanoid');
+    var humanoid = (ch.bodyType === 'humanoid');
+    var UMAX = 6.5;                              // belly half-width; arms sit beyond this
     for (var y = 0; y < GH; y++) {
-      var sx = warp ? profile(y, g, fat) : 1;
-      var w = GW * sx;
-      o.drawImage(src, 0, y, GW, 1, WC - (GW / 2) * sx, y, w, 1);
+      if (!humanoid) { o.drawImage(src, 0, y, GW, 1, WC - GW / 2, y, GW, 1); continue; }
+      var G = genderScale(y, g), B = fatBulge(y, fat);
+      var mapX = function (x) { var u = x - 16, w = Math.max(0, 1 - (u / UMAX) * (u / UMAX)); return WC + u * G * (1 + B * w); };
+      var prev = mapX(0);
+      for (var x = 0; x < GW; x++) {            // forward-map each source column (no gaps)
+        var nx = mapX(x + 1);
+        o.drawImage(src, x, y, 1, 1, prev, y, Math.max(0.6, nx - prev) + 0.5, 1);
+        prev = nx;
+      }
     }
     warpCache[k] = out; return out;
   }
