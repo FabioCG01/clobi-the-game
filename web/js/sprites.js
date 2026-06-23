@@ -55,7 +55,7 @@ var Sprites = (function () {
     for (var i = 0; i < TF_KEYS.length; i++) {
       var k = TF_KEYS[i], t = tf[k];
       if (t && typeof t === 'object') {
-        var o = { x: clampNum(t.x, 0, -24, 24), y: clampNum(t.y, 0, -24, 24), s: clampNum(t.s, 1, 0.3, 2.5), r: clampNum(t.r, 0, -180, 180) };
+        var o = { x: clampNum(t.x, 0, -24, 24), y: clampNum(t.y, 0, -24, 24), s: clampNum(t.s, 1, (k === 'accessory' ? 0.02 : 0.3), 2.5), r: clampNum(t.r, 0, -180, 180) };
         if (o.x || o.y || o.s !== 1 || o.r) out[k] = o;
       }
     }

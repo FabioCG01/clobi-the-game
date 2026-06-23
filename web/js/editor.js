@@ -18,6 +18,7 @@
   function clone(c) { var o = {}; for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) o[k] = c[k]; return o; }
   function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
   function clampN(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function minS(k) { return k === 'accessory' ? 0.02 : 0.4; }   // accessory shrinks with no real limit
   function toHex6(h) { if (typeof h !== 'string' || h[0] !== '#') return '#000000'; var x = h.slice(1); if (x.length === 3) x = x[0] + x[0] + x[1] + x[1] + x[2] + x[2]; return '#' + x.slice(0, 6); }
 
   // transformable parts (humanoid): label + which sliders apply.
@@ -228,7 +229,7 @@
     if (!adjBody) return; adjBody.innerHTML = '';
     var sel = panelEl.querySelector('.ed2-objsel'); if (sel) Array.prototype.forEach.call(sel.children, function (b) { b.classList.toggle('active', b.dataset.k === tfSel); });
     var which = (TF_OBJ[tfSel] || ['', ''])[1];
-    adjBody.appendChild(tfSlider(t('editor.size', 'Size'), 's', 0.4, 2.2, 0.05));
+    adjBody.appendChild(tfSlider(t('editor.size', 'Size'), 's', minS(tfSel), 2.2, 0.05));
     if (which.indexOf('x') >= 0) {
       adjBody.appendChild(tfSlider(t('editor.moveX', 'Move X'), 'x', -16, 16, 1));
       adjBody.appendChild(tfSlider(t('editor.moveY', 'Move Y'), 'y', -16, 16, 1));
@@ -325,13 +326,13 @@
   function onMove(e) {
     if (!dragMode) return; var g = evtGrid(e);
     if (dragMode === 'move') { if (tfSel !== 'head') { setTf(tfSel, 'x', clampN(dragStart.x + (g.gx - dragStart.gx), -24, 24)); setTf(tfSel, 'y', clampN(dragStart.y + (g.gy - dragStart.gy), -24, 24)); lastClick = null; } }
-    else if (dragMode === 'resize') { var d = Math.hypot(g.px - dragStart.cx, g.py - dragStart.cy); setTf(tfSel, 's', clampN(dragStart.s * d / dragStart.dist, 0.4, 2.5)); }
+    else if (dragMode === 'resize') { var d = Math.hypot(g.px - dragStart.cx, g.py - dragStart.cy); setTf(tfSel, 's', clampN(dragStart.s * d / dragStart.dist, minS(tfSel), 2.5)); }
     else if (dragMode === 'rotate') { var a = Math.atan2(g.py - dragStart.cy, g.px - dragStart.cx), dd = (a - dragStart.ang) * 180 / Math.PI * facing; setTf(tfSel, 'r', clampN(Math.round(dragStart.r + dd), -180, 180)); }
     refreshAdjSliders();
   }
   function onUp() { if (dragMode) { dragMode = null; refreshAdjSliders(); commitNow(); } }
   function onWheel(e) {
-    if (tfSel) { e.preventDefault(); var tv = getTf(tfSel); if (e.shiftKey && tfSel !== 'head') setTf(tfSel, 'r', clampN((tv.r || 0) + (e.deltaY < 0 ? 6 : -6), -180, 180)); else setTf(tfSel, 's', clampN((tv.s || 1) * (e.deltaY < 0 ? 1.08 : 0.926), 0.4, 2.5)); refreshAdjSliders(); commitSoon(); }
+    if (tfSel) { e.preventDefault(); var tv = getTf(tfSel); if (e.shiftKey && tfSel !== 'head') setTf(tfSel, 'r', clampN((tv.r || 0) + (e.deltaY < 0 ? 6 : -6), -180, 180)); else setTf(tfSel, 's', clampN((tv.s || 1) * (e.deltaY < 0 ? 1.08 : 0.926), minS(tfSel), 2.5)); refreshAdjSliders(); commitSoon(); }
     else { e.preventDefault(); setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15)); }
   }
   function updateHint() {
