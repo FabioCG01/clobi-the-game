@@ -167,6 +167,14 @@ var App = (function () {
       Store.loadCharacterRemote().then(function (c) {
         if (c) { _character = normalizeCharacter(c); announceHello(); refreshUI(); }
       }).catch(function () { /* offline / no character — keep local */ });
+    } else if (hasStore() && !savedChar && Store.getDefaultCharacter) {
+      // 4b) Guests / brand-new players (no saved character) start with the
+      //     admin-chosen global default look, fetched from the server.
+      Store.getDefaultCharacter().then(function (c) {
+        if (c && !(Store.getCharacter && Store.getCharacter())) {
+          _character = normalizeCharacter(c); announceHello(); refreshUI();
+        }
+      }).catch(function () { /* keep local default */ });
     }
 
     // 5) Language changes: menu.js and editor.js each self-register their own

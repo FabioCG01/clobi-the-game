@@ -18,16 +18,18 @@ ENV CGO_ENABLED=0 \
     GOOS=linux \
     GOFLAGS=-trimpath
 
-# Download dependencies first so this layer is cached until go.mod/go.sum change.
+# Dependencies are vendored (committed under ./vendor), so the build is fully
+# offline and reproducible — no module proxy access needed at build time. The
+# embedded DB driver (go.etcd.io/bbolt) is pure Go, so the binary stays static.
 COPY go.mod go.sum ./
-RUN go mod download
+COPY vendor ./vendor
 
-# Copy the Go source tree and build the server.
+# Copy the Go source tree and build the server from the vendored modules.
 COPY cmd ./cmd
 COPY internal ./internal
 
 # -s -w strips the symbol table and DWARF debug info -> smaller binary.
-RUN go build -ldflags="-s -w" -o /clobi ./cmd/server
+RUN go build -mod=vendor -ldflags="-s -w" -o /clobi ./cmd/server
 
 # -----------------------------------------------------------------------------
 # Stage 2 — runtime: minimal Alpine with an unprivileged user.
@@ -43,7 +45,7 @@ WORKDIR /app
 COPY --from=builder /clobi /app/clobi
 COPY web /app/web
 
-# Writable data directory (accounts.json lives here), owned by the app user.
+# Writable data directory (the bbolt database lives here), owned by the app user.
 RUN mkdir -p /app/data && chown -R clobi:clobi /app
 
 # Tunables — all read by cmd/server/main.go.

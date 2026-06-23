@@ -257,6 +257,22 @@
     row.appendChild(mini(t('editor.savePreset', 'Save'), onSavePreset));
     row.appendChild(mini(t('editor.delete', 'Delete'), onDelPreset));
     panelEl.appendChild(row);
+    // Admin only: publish this exact look as everyone's default.
+    if (window.Store && Store.isAdmin && Store.isAdmin()) {
+      var ac = el('div', 'ed2-card');
+      ac.appendChild(el('div', 'ed2-cardlbl', t('editor.admin', 'Admin')));
+      ac.appendChild(el('div', 'ed2-note', t('editor.adminDefaultHint', 'Publish this exact look (including transforms) as the default character that loads for everyone.')));
+      ac.appendChild(mini(t('editor.setDefault', 'Set as global default'), onSetGlobalDefault));
+      panelEl.appendChild(ac);
+    }
+  }
+  function onSetGlobalDefault() {
+    if (!(window.Store && Store.setDefaultRemote)) return;
+    var payload = sanitize(character); payload.name = '';
+    setStatus('editor.savingDefault', 'Publishing default...');
+    Store.setDefaultRemote(payload)
+      .then(function () { setStatus('editor.defaultSet', 'Done — this is now the default for everyone.'); })
+      .catch(function (e) { setStatus(null, (e && e.message) || 'Failed to set default.'); });
   }
   function mini(label, fn) { var b = el('button', 'ed2-mini', label); b.type = 'button'; b.addEventListener('click', fn); return b; }
   function refreshPresets() { if (!presetSel) return; presetSel.innerHTML = ''; var list = readPresets(); if (!list.length) { var o = el('option', null, t('editor.noPresets', '— none —')); o.value = ''; presetSel.appendChild(o); return; } list.forEach(function (p, i) { var o = el('option', null, p.name || ('#' + i)); o.value = String(i); presetSel.appendChild(o); }); }

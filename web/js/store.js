@@ -26,6 +26,7 @@ var Store = (function () {
   var KEY_CHAR = 'clobi.character';
   var KEY_TOKEN = 'clobi.token';
   var KEY_USER = 'clobi.username';
+  var KEY_ADMIN = 'clobi.isAdmin';
   var COOKIE_NICK = 'clobi_nick';
 
   // ---- low-level localStorage helpers (degrade gracefully if unavailable) ----
@@ -134,6 +135,7 @@ var Store = (function () {
     if (data && data.token) {
       lsSet(KEY_TOKEN, data.token);
       lsSet(KEY_USER, String(username));
+      lsSet(KEY_ADMIN, data.isAdmin ? '1' : '');
     }
     var character = (data && data.character) ? data.character : null;
     if (character) {
@@ -205,6 +207,41 @@ var Store = (function () {
     logout: function () {
       lsRemove(KEY_TOKEN);
       lsRemove(KEY_USER);
+      lsRemove(KEY_ADMIN);
+    },
+
+    isAdmin: function () {
+      return lsGet(KEY_ADMIN) === '1';
+    },
+
+    // GET the global default character (admin-set, else built-in). Public; used
+    // to start guests / brand-new players with the admin's chosen look.
+    getDefaultCharacter: function () {
+      return request('GET', '/api/default-character', null, false)
+        .then(function (data) {
+          return (data && typeof data === 'object' && data.bodyType) ? data : null;
+        })
+        .catch(function () { return null; });
+    },
+
+    // Admin only: set the global default character (full look incl. transforms).
+    setDefaultRemote: function (character) {
+      return request('POST', '/api/admin/default', character, true);
+    },
+
+    // GDPR: download all personal data we hold for this account.
+    exportAccountData: function () {
+      return request('GET', '/api/account/export', null, true);
+    },
+
+    // GDPR: permanently erase this account and all its data, then sign out.
+    deleteAccount: function () {
+      var self = this;
+      return request('DELETE', '/api/account', null, true).then(function (r) {
+        self.logout();
+        writeCharacter(null);
+        return r;
+      });
     },
 
     // PUT the character to the server. No-op (resolves null) unless logged in.

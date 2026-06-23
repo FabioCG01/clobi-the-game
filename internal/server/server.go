@@ -55,7 +55,11 @@ type server struct {
 // listen address (e.g. ":1337"), webDir is the static client directory, dataDir
 // is where the accounts JSON file lives.
 func Run(addr, webDir, dataDir string) error {
-	acc, err := accounts.NewStore(filepath.Join(dataDir, "accounts.json"))
+	adminUser := os.Getenv("ADMIN_USER")
+	if adminUser == "" {
+		adminUser = "fabiocg"
+	}
+	acc, err := accounts.NewStore(dataDir, adminUser)
 	if err != nil {
 		return err
 	}
@@ -75,6 +79,10 @@ func Run(addr, webDir, dataDir string) error {
 	mux.HandleFunc("/api/register", s.handleRegister)
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/character", s.handleCharacter)
+	mux.HandleFunc("/api/default-character", s.handleDefaultCharacter)
+	mux.HandleFunc("/api/admin/default", s.handleAdminDefault)
+	mux.HandleFunc("/api/account/export", s.handleExport)
+	mux.HandleFunc("/api/account", s.handleAccount)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/", s.handleStatic)
 
@@ -92,6 +100,7 @@ type authResponse struct {
 	Token     string             `json:"token"`
 	Username  string             `json:"username"`
 	Character protocol.Character `json:"character"`
+	IsAdmin   bool               `json:"isAdmin"`
 }
 
 type credentials struct {
@@ -119,6 +128,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Token:     token,
 		Username:  strings.TrimSpace(creds.Username),
 		Character: ch,
+		IsAdmin:   s.acc.IsAdmin(strings.TrimSpace(creds.Username)),
 	})
 }
 
@@ -142,6 +152,7 @@ func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Token:     token,
 		Username:  strings.TrimSpace(creds.Username),
 		Character: ch,
+		IsAdmin:   s.acc.IsAdmin(strings.TrimSpace(creds.Username)),
 	})
 }
 
@@ -181,6 +192,85 @@ func (s *server) handleCharacter(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// handleDefaultCharacter (GET, public) returns the look new players start with:
+// the admin-set default if one exists, otherwise the built-in Clobi.
+func (s *server) handleDefaultCharacter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.acc.DefaultCharacter(""))
+}
+
+// handleAdminDefault (POST, admin only) sets the global default character that
+// loads automatically for everyone who has not customised their own.
+func (s *server) handleAdminDefault(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	if !s.acc.IsAdmin(username) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return
+	}
+	var ch protocol.Character
+	if err := decodeJSON(r, &ch); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid character body")
+		return
+	}
+	if ch.BodyType != "tux" && ch.BodyType != "humanoid" {
+		ch.BodyType = "humanoid"
+	}
+	if err := s.acc.SetDefaultCharacter(ch); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save default")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleExport (GET, auth) returns all personal data for the user (GDPR access).
+func (s *server) handleExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	data, found := s.acc.ExportAccount(username)
+	if !found {
+		writeError(w, http.StatusNotFound, "no account")
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename=\"clobi-my-data.json\"")
+	writeJSON(w, http.StatusOK, data)
+}
+
+// handleAccount (DELETE, auth) erases the account and all its data (GDPR erasure).
+func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	if err := s.acc.DeleteAccount(username); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete account")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // authUser extracts and verifies a Bearer token from the Authorization header.

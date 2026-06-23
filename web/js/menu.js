@@ -327,7 +327,13 @@ const Menu = (function () {
       rel: 'noopener noreferrer',
       title: 'Open source on GitHub'
     }, [icon('code', 12), el('span', { text: t('footer.openSource', 'Open source on GitHub') })]);
-    return [tribute, oss];
+    // Always-reachable privacy notice (GDPR transparency).
+    const privacy = el('a', {
+      id: 'menu-privacy', class: 'menu-oss', href: '#',
+      title: 'Privacy & your data',
+      onclick: function (e) { e.preventDefault(); openPrivacyModal(); }
+    }, [el('span', { text: t('footer.privacy', 'Privacy & data') })]);
+    return [tribute, el('div', { class: 'footer-links' }, [oss, privacy])];
   }
 
   // Recompute all static (non-list) labels after a language switch.
@@ -1148,17 +1154,48 @@ const Menu = (function () {
 
   function openAccountLoggedIn() {
     const name = (Store.getUsername && Store.getUsername()) || 'penguin';
+    const isAdmin = !!(Store.isAdmin && Store.isAdmin());
+
+    function doExport() {
+      if (!Store.exportAccountData) return;
+      Store.exportAccountData().then(function (data) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'clobi-my-data.json';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+      }).catch(function () { /* ignore */ });
+    }
+    function doDelete() {
+      if (!window.confirm(t('account.deleteConfirm', 'Permanently delete your account and ALL its data? This cannot be undone.'))) return;
+      Store.deleteAccount().then(function () {
+        if (typeof App !== 'undefined' && App.updateCharacter && typeof Sprites !== 'undefined' && Sprites.defaultCharacter) {
+          try { App.updateCharacter(Sprites.defaultCharacter()); } catch (e) { /* ignore */ }
+        }
+        refreshAccountUi(); closeAnyModal();
+      }).catch(function () { /* ignore */ });
+    }
+
     const body = [
       el('div', { class: 'account-status' }, [
         icon('user', 16),
-        el('span', { class: 'account-user', text: t('account.loggedInAs', 'Signed in as') + ' ' + name })
+        el('span', { class: 'account-user', text: t('account.loggedInAs', 'Signed in as') + ' ' + name + (isAdmin ? ' ★' : '') })
       ]),
       el('p', { class: 'modal-lead', text: t('account.cloudHint', 'Your character syncs to your account.') }),
+      el('div', { class: 'gdpr-row' }, [
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: doExport },
+          [el('span', { text: t('account.export', 'Export my data') })]),
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: openPrivacyModal },
+          [el('span', { text: t('privacy.link', 'Privacy & data') })])
+      ]),
       el('div', { class: 'modal-actions' }, [
         el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
           [el('span', { text: t('common.close', 'Close') })]),
+        el('button', { class: 'pixbtn pixbtn-danger', type: 'button', onclick: doDelete },
+          [el('span', { text: t('account.delete', 'Delete account') })]),
         el('button', {
-          class: 'pixbtn pixbtn-danger', type: 'button',
+          class: 'pixbtn pixbtn-primary', type: 'button',
           onclick: function () {
             if (Store.logout) Store.logout();
             refreshAccountUi();
@@ -1168,6 +1205,33 @@ const Menu = (function () {
       ])
     ];
     openModal(modalShell(t('account.signIn', 'Account'), body));
+  }
+
+  // Privacy & data notice (GDPR transparency). Reachable from the footer, the
+  // account modal, and the register consent line.
+  function openPrivacyModal() {
+    const head = function (txt) { return el('div', { class: 'privacy-h', text: txt }); };
+    const para = function (txt) { return el('p', { class: 'privacy-p', text: txt }); };
+    const P = el('div', { class: 'privacy-body' }, [
+      para(t('privacy.intro', 'Playing is fully anonymous — an account is optional and only saves your penguin across devices. Here is exactly what that involves.')),
+      head(t('privacy.collectH', 'What we store')),
+      para(t('privacy.collect', 'Only the username you choose, your password as a one-way bcrypt hash (never in plaintext), and your character configuration. No email, no real name, no IP logs, no analytics, no tracking.')),
+      head(t('privacy.whyH', 'Why & legal basis')),
+      para(t('privacy.why', 'Solely to provide the account feature you ask for: saving and syncing your penguin. Legal basis: your consent. We never share your data with third parties.')),
+      head(t('privacy.storeH', 'Where & how long')),
+      para(t('privacy.store', 'In an embedded database on the game server, kept until you delete your account. Local storage / cookies are used only for functional things (nickname, session, settings) — never for tracking.')),
+      head(t('privacy.rightsH', 'Your rights (GDPR)')),
+      para(t('privacy.rights', 'Access & portability: download everything via "Export my data". Erasure: "Delete account" wipes it all immediately. Rectification: change your nickname and character anytime in the editor.')),
+      head(t('privacy.contactH', 'Data controller')),
+      para(t('privacy.contact', 'Contact: info@deltalux.lu'))
+    ]);
+    openModal(modalShell(t('privacy.title', 'Privacy & your data'), [
+      P,
+      el('div', { class: 'modal-actions' }, [
+        el('button', { class: 'pixbtn pixbtn-primary', type: 'button', onclick: closeAnyModal },
+          [el('span', { text: t('common.close', 'Close') })])
+      ])
+    ]));
   }
 
   function openAccountAuth() {
@@ -1182,6 +1246,18 @@ const Menu = (function () {
       placeholder: t('account.password', 'password')
     });
     const errLine = el('div', { class: 'form-err', text: '' });
+
+    const consentCheck = el('input', { type: 'checkbox', class: 'consent-check' });
+    const consentRow = el('label', { class: 'consent-row' }, [
+      consentCheck,
+      el('span', { class: 'consent-text' }, [
+        document.createTextNode(t('account.consent', 'I agree to my username, hashed password and character being stored. ')),
+        el('a', {
+          class: 'link', href: '#',
+          onclick: function (e) { e.preventDefault(); openPrivacyModal(); }
+        }, [el('span', { text: t('privacy.link', 'Privacy & data') })])
+      ])
+    ]);
 
     function makeTabBtn(id, labelKey, labelEn) {
       return el('button', {
@@ -1212,6 +1288,10 @@ const Menu = (function () {
       const p = passInput.value;
       if (!u || !p) {
         errLine.textContent = t('account.error', 'Username and password required.');
+        return;
+      }
+      if (accountTab === 'register' && !consentCheck.checked) {
+        errLine.textContent = t('account.mustConsent', 'Please agree to the data notice to register.');
         return;
       }
       if (typeof Store === 'undefined') {
@@ -1263,6 +1343,7 @@ const Menu = (function () {
           onclick: function (e) { e.preventDefault(); accountTab = 'login'; rerender(); }
         }, [el('span', { text: t('account.login', 'Log in') })]));
       }
+      consentRow.style.display = (accountTab === 'register') ? 'flex' : 'none';
       errLine.textContent = '';
       setBusy(false);
     }
@@ -1276,6 +1357,7 @@ const Menu = (function () {
       el('p', { class: 'account-lead', text: t('account.cloudHint', 'Optional. Sign in to sync your penguin across devices.') }),
       formRow(t('account.username', 'Username'), userInput),
       formRow(t('account.password', 'Password'), passInput),
+      consentRow,
       errLine,
       el('div', { class: 'modal-actions' }, [
         el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
@@ -1591,6 +1673,15 @@ const Menu = (function () {
       '  text-decoration:none;border:2px solid #2a3350;background:#11131f;padding:6px 11px;',
       '  font-size:8px;letter-spacing:1px;}',
       '.menu-oss:hover{background:#7ff9e0;color:#11131f;border-color:#7ff9e0;}',
+      '.footer-links{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}',
+      '.gdpr-row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 2px;}',
+      '.gdpr-row .pixbtn-ghost{font-size:8px;padding:9px 11px;}',
+      '.consent-row{display:flex;align-items:flex-start;gap:9px;margin:10px 0 2px;cursor:pointer;}',
+      '.consent-check{margin-top:2px;width:16px;height:16px;accent-color:#7ff9e0;flex:0 0 auto;}',
+      '.consent-text{font-size:8px;color:#cfd4e8;line-height:1.7;}',
+      '.privacy-body{max-height:54vh;overflow-y:auto;padding-right:6px;}',
+      '.privacy-h{font-size:10px;color:#ff9e2c;margin:12px 0 4px;text-shadow:1px 1px 0 #000;}',
+      '.privacy-p{font-size:9px;color:#cfd4e8;line-height:1.8;margin:0 0 4px;}',
       '.sp-hint{font-size:9px;color:#9aa3bf;text-align:center;margin:0 0 12px;line-height:1.7;}',
       '.sp-modes{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}',
       '.sp-mode{min-width:150px;justify-content:center;}',

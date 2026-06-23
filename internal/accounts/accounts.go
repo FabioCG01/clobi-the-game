@@ -1,8 +1,18 @@
-// Package accounts provides a tiny, dependency-free account store for
-// TUX SMASH ROYALE: bcrypt-hashed passwords persisted to a single JSON file
-// guarded by a mutex, plus per-login random bearer tokens kept only in memory.
+// Package accounts is the account + settings store for TUX SMASH ROYALE.
 //
-// There is no database and no cgo. Plaintext passwords are never stored.
+// Storage is a proper embedded database: bbolt (go.etcd.io/bbolt), the pure-Go,
+// ACID, single-file transactional key/value engine that powers etcd and Consul.
+// It keeps the project a single static binary (no cgo, no external DB service),
+// while giving real transactions, crash safety and a file we can lock down on
+// the data volume (0600). There is no SQL, so there is no injection surface;
+// passwords are only ever stored as bcrypt hashes.
+//
+// Two buckets:
+//   "accounts" : lower(username) -> JSON account{username,hash,character,isAdmin,timestamps}
+//   "settings" : "defaultCharacter" -> JSON Character set by the admin (loaded for everyone)
+//
+// Session tokens are random bearer tokens kept only in memory (not personal data
+// at rest). A one-time migration imports any legacy accounts.json on first boot.
 package accounts
 
 import (
@@ -14,14 +24,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"clobi/internal/protocol"
 
+	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// Errors returned by the Store. Callers may compare against these with
-// errors.Is.
+// Errors returned by the Store (compare with errors.Is).
 var (
 	ErrUserExists   = errors.New("username already taken")
 	ErrBadCreds     = errors.New("invalid username or password")
@@ -31,88 +42,65 @@ var (
 	ErrInvalidToken = errors.New("invalid token")
 )
 
-// account is the on-disk record for one user.
+var (
+	bAccounts    = []byte("accounts")
+	bSettings    = []byte("settings")
+	kDefaultChar = []byte("defaultCharacter")
+)
+
+// account is the stored record for one user (JSON-encoded in the accounts bucket).
 type account struct {
 	Username  string             `json:"username"`
 	Hash      string             `json:"hash"`
 	Character protocol.Character `json:"character"`
+	IsAdmin   bool               `json:"isAdmin"`
+	CreatedAt string             `json:"createdAt"`
+	UpdatedAt string             `json:"updatedAt"`
 }
 
-// fileModel is the JSON document persisted to disk.
-type fileModel struct {
-	Accounts map[string]account `json:"accounts"`
-}
-
-// Store is a concurrency-safe account store backed by a JSON file.
+// Store is a concurrency-safe account + settings store backed by bbolt.
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	accounts map[string]account // keyed by lowercase username
-	tokens   map[string]string  // token -> canonical username (in-memory only)
+	db     *bolt.DB
+	mu     sync.Mutex        // guards tokens only (bbolt has its own locking)
+	tokens map[string]string // token -> canonical username (in-memory only)
+	admin  string            // lowercase admin username (gets isAdmin on touch)
 }
 
-// NewStore loads the JSON file at path, creating it (and parent dirs) if it does
-// not yet exist.
-func NewStore(path string) (*Store, error) {
-	s := &Store{
-		path:     path,
-		accounts: make(map[string]account),
-		tokens:   make(map[string]string),
+// NewStore opens (creating if needed) the bbolt database under dataDir, ensures
+// the buckets exist, migrates any legacy accounts.json once, and marks adminUser
+// as an admin. The DB file is created mode 0600.
+func NewStore(dataDir, adminUser string) (*Store, error) {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, err
 	}
-
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
-		}
-	}
-
-	data, err := os.ReadFile(path)
+	db, err := bolt.Open(filepath.Join(dataDir, "clobi.db"), 0o600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Fresh start: write an empty document so the file exists.
-			if werr := s.persistLocked(); werr != nil {
-				return nil, werr
-			}
-			return s, nil
+		return nil, err
+	}
+	s := &Store{db: db, tokens: make(map[string]string), admin: key(adminUser)}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if _, e := tx.CreateBucketIfNotExists(bAccounts); e != nil {
+			return e
 		}
+		_, e := tx.CreateBucketIfNotExists(bSettings)
+		return e
+	}); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return s, nil
-	}
-
-	var model fileModel
-	if err := json.Unmarshal(data, &model); err != nil {
-		return nil, err
-	}
-	if model.Accounts != nil {
-		s.accounts = model.Accounts
-	}
+	s.migrateJSON(filepath.Join(dataDir, "accounts.json"))
+	s.ensureAdmin()
 	return s, nil
 }
 
+// Close releases the database file.
+func (s *Store) Close() error { return s.db.Close() }
+
 // key normalizes a username for case-insensitive lookups.
-func key(username string) string {
-	return strings.ToLower(strings.TrimSpace(username))
-}
+func key(username string) string { return strings.ToLower(strings.TrimSpace(username)) }
 
-// persistLocked writes the current account map to disk atomically. The caller
-// must hold s.mu.
-func (s *Store) persistLocked() error {
-	model := fileModel{Accounts: s.accounts}
-	data, err := json.MarshalIndent(model, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
-}
+func nowStr() string { return time.Now().UTC().Format(time.RFC3339) }
 
-// newToken returns a cryptographically random hex token.
 func newToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -121,107 +109,48 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// defaultCharacter returns the classic Tux used for brand-new accounts. The
-// indices line up with the client's Sprites.PARTS default selection.
-func defaultCharacter(name string) protocol.Character {
-	return protocol.Character{
-		Name:       name,
-		BodyType:   "humanoid",
-		Gender:     "male",
-		Body:       "#11131c",
-		Belly:      "#fdfdfd",
-		Feet:       "#5a3a22",
-		Skin:       "#f3c69a",
-		HairColor:  "#b07a43",
-		BeardColor: "#7a4a1f",
-		Pants:      "#33405c",
-		CapeColor:  "#ff5a3c",
-		IrisColor:  "#222a3a",
-		MouthColor: "",
-		Fat:        0,
-		Hair:       1, // short
-		Beard:      3, // full
-		ShirtStyle: 5, // suit (shirt + tie)
-		PantsStyle: 0,
-		ShoeStyle:  0,
-		Hat:        0,
-		Eyes:       0,
-		Eyebrows:   0,
-		Mouth:      0,
-		Accessory:  0,
-		Cape:       0,
+func (s *Store) getAccount(tx *bolt.Tx, k string) (account, bool) {
+	v := tx.Bucket(bAccounts).Get([]byte(k))
+	if v == nil {
+		return account{}, false
 	}
+	var a account
+	if json.Unmarshal(v, &a) != nil {
+		return account{}, false
+	}
+	return a, true
 }
 
-// Register creates a new account, returning a fresh session token and the
-// account's (default) character.
-func (s *Store) Register(username, password string) (string, protocol.Character, error) {
-	uname := strings.TrimSpace(username)
-	if n := len([]rune(uname)); n < 2 || n > 20 {
-		return "", protocol.Character{}, ErrBadUsername
-	}
-	if len(password) < 4 {
-		return "", protocol.Character{}, ErrBadPassword
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	k := key(uname)
-	if _, exists := s.accounts[k]; exists {
-		return "", protocol.Character{}, ErrUserExists
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+func (s *Store) putAccount(tx *bolt.Tx, k string, a account) error {
+	data, err := json.Marshal(a)
 	if err != nil {
-		return "", protocol.Character{}, err
+		return err
 	}
+	return tx.Bucket(bAccounts).Put([]byte(k), data)
+}
 
-	acc := account{
-		Username:  uname,
-		Hash:      string(hash),
-		Character: defaultCharacter(uname),
-	}
-	s.accounts[k] = acc
+// ---- tokens (in-memory sessions) ----
 
-	if err := s.persistLocked(); err != nil {
-		delete(s.accounts, k)
-		return "", protocol.Character{}, err
-	}
-
+func (s *Store) newSession(uname string) (string, error) {
 	token, err := newToken()
 	if err != nil {
-		return "", protocol.Character{}, err
+		return "", err
 	}
+	s.mu.Lock()
 	s.tokens[token] = uname
-	return token, acc.Character, nil
+	s.mu.Unlock()
+	return token, nil
 }
 
-// Login verifies credentials and returns a fresh session token plus the stored
-// character.
-func (s *Store) Login(username, password string) (string, protocol.Character, error) {
+func (s *Store) revokeUser(username string) {
+	u := strings.TrimSpace(username)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	acc, ok := s.accounts[key(username)]
-	if !ok {
-		// Run a throwaway compare to reduce username-enumeration timing leaks.
-		_ = bcrypt.CompareHashAndPassword(
-			[]byte("$2a$10$3euPcmQFCiblsZeEu5s7p.9OVHgeHWFDk9nhMqZ0m/3pd/lhwZgES"),
-			[]byte(password),
-		)
-		return "", protocol.Character{}, ErrBadCreds
+	for t, who := range s.tokens {
+		if strings.EqualFold(who, u) {
+			delete(s.tokens, t)
+		}
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(acc.Hash), []byte(password)); err != nil {
-		return "", protocol.Character{}, ErrBadCreds
-	}
-
-	token, err := newToken()
-	if err != nil {
-		return "", protocol.Character{}, err
-	}
-	s.tokens[token] = acc.Username
-	return token, acc.Character, nil
+	s.mu.Unlock()
 }
 
 // VerifyToken resolves a session token to its canonical username.
@@ -235,35 +164,252 @@ func (s *Store) VerifyToken(token string) (string, bool) {
 	return uname, ok
 }
 
-// GetCharacter returns the stored character for a username.
-func (s *Store) GetCharacter(username string) (protocol.Character, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	acc, ok := s.accounts[key(username)]
-	if !ok {
-		return protocol.Character{}, false
+// ---- default character (admin-controlled, loaded for everyone) ----
+
+// builtinDefault is the fallback look when the admin has not set a default: a
+// male humanoid "Clobi" — light-brown ponytail, full beard, white shirt + tie.
+func builtinDefault(name string) protocol.Character {
+	return protocol.Character{
+		Name: name, BodyType: "humanoid", Gender: "male",
+		Body: "#11131c", Belly: "#fdfdfd", Feet: "#5a3a22", Skin: "#f3c69a",
+		HairColor: "#b07a43", BeardColor: "#7a4a1f", Pants: "#33405c",
+		CapeColor: "#ff5a3c", IrisColor: "#222a3a", MouthColor: "",
+		Fat: 0, Hair: 3, Beard: 3, ShirtStyle: 5, PantsStyle: 0, ShoeStyle: 0,
+		Hat: 0, Eyes: 0, Eyebrows: 0, Mouth: 0, Accessory: 0, Cape: 0,
 	}
-	return acc.Character, true
 }
 
-// SetCharacter persists a new character for a username.
-func (s *Store) SetCharacter(username string, c protocol.Character) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	k := key(username)
-	acc, ok := s.accounts[k]
-	if !ok {
-		return ErrUnknownUser
+// DefaultCharacter returns the effective default look (admin-set if present,
+// else the built-in Clobi), with the given name applied.
+func (s *Store) DefaultCharacter(name string) protocol.Character {
+	if c, ok := s.GetDefaultCharacter(); ok {
+		c.Name = name
+		return c
 	}
-	prev := acc.Character
-	acc.Character = c
-	s.accounts[k] = acc
+	return builtinDefault(name)
+}
 
-	if err := s.persistLocked(); err != nil {
-		acc.Character = prev
-		s.accounts[k] = acc
+// GetDefaultCharacter returns the admin-set default character, if one is stored.
+func (s *Store) GetDefaultCharacter() (protocol.Character, bool) {
+	var c protocol.Character
+	found := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bSettings).Get(kDefaultChar)
+		if v != nil && json.Unmarshal(v, &c) == nil {
+			found = true
+		}
+		return nil
+	})
+	return c, found
+}
+
+// SetDefaultCharacter stores the character that loads by default for everyone.
+func (s *Store) SetDefaultCharacter(c protocol.Character) error {
+	c.Name = "" // a shared default carries no personal name
+	data, err := json.Marshal(c)
+	if err != nil {
 		return err
 	}
-	return nil
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bSettings).Put(kDefaultChar, data)
+	})
+}
+
+// ---- accounts ----
+
+// Register creates a new account and returns a session token + its character.
+func (s *Store) Register(username, password string) (string, protocol.Character, error) {
+	uname := strings.TrimSpace(username)
+	if n := len([]rune(uname)); n < 2 || n > 20 {
+		return "", protocol.Character{}, ErrBadUsername
+	}
+	if len(password) < 4 {
+		return "", protocol.Character{}, ErrBadPassword
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	ch := s.DefaultCharacter(uname)
+	k := key(uname)
+	now := nowStr()
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		if _, ok := s.getAccount(tx, k); ok {
+			return ErrUserExists
+		}
+		return s.putAccount(tx, k, account{
+			Username: uname, Hash: string(hash), Character: ch,
+			IsAdmin: k == s.admin && s.admin != "", CreatedAt: now, UpdatedAt: now,
+		})
+	})
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	token, err := s.newSession(uname)
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	return token, ch, nil
+}
+
+// Login verifies credentials and returns a session token + the stored character.
+func (s *Store) Login(username, password string) (string, protocol.Character, error) {
+	var acc account
+	ok := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		acc, ok = s.getAccount(tx, key(username))
+		return nil
+	})
+	if !ok {
+		// Throwaway compare to blunt username-enumeration timing leaks.
+		_ = bcrypt.CompareHashAndPassword(
+			[]byte("$2a$10$3euPcmQFCiblsZeEu5s7p.9OVHgeHWFDk9nhMqZ0m/3pd/lhwZgES"),
+			[]byte(password))
+		return "", protocol.Character{}, ErrBadCreds
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(acc.Hash), []byte(password)); err != nil {
+		return "", protocol.Character{}, ErrBadCreds
+	}
+	token, err := s.newSession(acc.Username)
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	return token, acc.Character, nil
+}
+
+// GetCharacter returns the stored character for a username.
+func (s *Store) GetCharacter(username string) (protocol.Character, bool) {
+	var ch protocol.Character
+	found := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, key(username))
+		if ok {
+			ch, found = a.Character, true
+		}
+		return nil
+	})
+	return ch, found
+}
+
+// SetCharacter persists a new character for a username (preserves all fields,
+// including per-object transforms).
+func (s *Store) SetCharacter(username string, c protocol.Character) error {
+	k := key(username)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, k)
+		if !ok {
+			return ErrUnknownUser
+		}
+		a.Character = c
+		a.UpdatedAt = nowStr()
+		return s.putAccount(tx, k, a)
+	})
+}
+
+// IsAdmin reports whether the user may set the global default character.
+func (s *Store) IsAdmin(username string) bool {
+	admin := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		if a, ok := s.getAccount(tx, key(username)); ok {
+			admin = a.IsAdmin
+		}
+		return nil
+	})
+	return admin
+}
+
+// ---- GDPR: access + erasure ----
+
+// ExportAccount returns every piece of personal data held for the user, for the
+// GDPR right of access / data portability. The password hash is intentionally
+// excluded (a one-way bcrypt hash is not exported).
+func (s *Store) ExportAccount(username string) (map[string]interface{}, bool) {
+	var out map[string]interface{}
+	ok := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		a, found := s.getAccount(tx, key(username))
+		if !found {
+			return nil
+		}
+		ok = true
+		out = map[string]interface{}{
+			"username":  a.Username,
+			"character": a.Character,
+			"isAdmin":   a.IsAdmin,
+			"createdAt": a.CreatedAt,
+			"updatedAt": a.UpdatedAt,
+			"note":      "This is all personal data we store about your account. Your password is kept only as a one-way bcrypt hash and is never exported. No email, IP address, or tracking data is collected.",
+		}
+		return nil
+	})
+	return out, ok
+}
+
+// DeleteAccount erases the account and all its data, and revokes its sessions
+// (GDPR right to erasure).
+func (s *Store) DeleteAccount(username string) error {
+	k := key(username)
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if _, ok := s.getAccount(tx, k); !ok {
+			return ErrUnknownUser
+		}
+		return tx.Bucket(bAccounts).Delete([]byte(k))
+	})
+	if err == nil {
+		s.revokeUser(username)
+	}
+	return err
+}
+
+// ---- maintenance ----
+
+// ensureAdmin flags the configured admin account (if it exists) as admin.
+func (s *Store) ensureAdmin() {
+	if s.admin == "" {
+		return
+	}
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, s.admin)
+		if ok && !a.IsAdmin {
+			a.IsAdmin = true
+			return s.putAccount(tx, s.admin, a)
+		}
+		return nil
+	})
+}
+
+// migrateJSON imports a legacy accounts.json exactly once (when the accounts
+// bucket is still empty), then renames the file so it is not re-imported and no
+// stale copy of the data lingers on disk.
+func (s *Store) migrateJSON(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var model struct {
+		Accounts map[string]struct {
+			Username  string             `json:"username"`
+			Hash      string             `json:"hash"`
+			Character protocol.Character `json:"character"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(data, &model) != nil || len(model.Accounts) == 0 {
+		_ = os.Rename(path, path+".imported")
+		return
+	}
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bAccounts).Stats().KeyN > 0 {
+			return nil // already populated; don't clobber
+		}
+		now := nowStr()
+		for k, old := range model.Accounts {
+			lk := key(k)
+			_ = s.putAccount(tx, lk, account{
+				Username: old.Username, Hash: old.Hash, Character: old.Character,
+				IsAdmin: lk == s.admin && s.admin != "", CreatedAt: now, UpdatedAt: now,
+			})
+		}
+		return nil
+	})
+	_ = os.Rename(path, path+".imported")
 }
