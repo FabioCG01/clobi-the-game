@@ -26,7 +26,7 @@ var Sprites = (function () {
     skin: ['#f3c69a'], hair: ['#b07a43'], body: ['#11131c'], belly: ['#fdfdfd'],
     shirt: ['#fdfdfd'], pants: ['#33405c'], feet: ['#ff9e2c'], beard: ['#7a4a1f'], cape: ['#ff5a3c']
   };
-  var CLOBI = P.clobi || { gender: 'male', skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f', belly: '#fdfdfd', feet: '#5a3a22', pants: '#33405c', hair: 1, beard: 3, shirtStyle: 5, pantsStyle: 0, shoeStyle: 0 };
+  var CLOBI = P.clobi || { gender: 'male', skin: '#f3c69a', hairColor: '#b07a43', beardColor: '#7a4a1f', belly: '#fdfdfd', feet: '#5a3a22', pants: '#33405c', hair: 3, beard: 3, shirtStyle: 5, pantsStyle: 0, shoeStyle: 0 };
 
   // catalog length for a group (from the loaded texture manifest; 0 until ready)
   function catLen(g) { var T = window.Textures; var a = T && T.catalog && T.catalog(g); return (a && a.length) || 0; }
@@ -40,7 +40,7 @@ var Sprites = (function () {
       body: '#11131c', belly: CLOBI.belly || '#fdfdfd', feet: CLOBI.feet || '#5a3a22',
       skin: CLOBI.skin, hairColor: CLOBI.hairColor, beardColor: CLOBI.beardColor,
       pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c', irisColor: '#222a3a', mouthColor: '',
-      hair: (CLOBI.hair != null ? CLOBI.hair : 1), beard: (CLOBI.beard != null ? CLOBI.beard : 3),
+      hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 3),
       shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
       hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}
     };

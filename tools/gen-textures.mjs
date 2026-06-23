@@ -260,7 +260,23 @@ function tuxBeak() { const b = new Buf(); b.rect(14, 10, 4, 2, 250); b.rect(14, 
 // =============================================================================
 // BUILD — author at 32x36, Scale2x to 64x72, save PNG
 // =============================================================================
-function save(rel, buf) { const up = nearest2x(buf); const file = path.join(OUT, rel); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, encodePNG(up.w, up.h, up.d)); return rel.replace(/\\/g, '/'); }
+// First-run only: NEVER overwrite an existing texture, so hand-edited / custom
+// PNGs survive every re-run and redeploy. Pass --force (or FORCE=1) to fully
+// regenerate, e.g. after intentionally changing the art in this generator.
+const FORCE = process.argv.includes('--force') || process.env.FORCE === '1';
+let _wrote = 0, _kept = 0;
+function save(rel, buf) {
+  const file = path.join(OUT, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  if (FORCE || !fs.existsSync(file)) {
+    const up = nearest2x(buf);
+    fs.writeFileSync(file, encodePNG(up.w, up.h, up.d));
+    _wrote++;
+  } else {
+    _kept++;
+  }
+  return rel.replace(/\\/g, '/');
+}
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 const manifest = { grid: { w: GW * 2, h: GH * 2 }, base: {}, catalog: {} };
@@ -303,4 +319,4 @@ manifest.catalog.cape = ['none', 'classic', 'long', 'round', 'royal', 'tattered'
 
 fs.writeFileSync(path.join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 1));
 let count = 0; (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) walk(path.join(d, e.name)); else if (e.name.endsWith('.png')) count++; } })(OUT);
-console.log('Baked ' + count + ' PNGs at ' + (GW * 2) + 'x' + (GH * 2) + ' (nearest 2x) + manifest.json');
+console.log('Textures: ' + _wrote + ' written, ' + _kept + ' kept (existing) — ' + count + ' PNGs total at ' + (GW * 2) + 'x' + (GH * 2) + (FORCE ? ' [--force]' : '') + '. manifest.json updated.');
