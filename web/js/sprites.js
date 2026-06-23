@@ -32,14 +32,17 @@ var Sprites = (function () {
   function catLen(g) { var T = window.Textures; var a = T && T.catalog && T.catalog(g); return (a && a.length) || 0; }
 
   // ---- character factories -------------------------------------------------
+  // The default look is CLOBI himself: a male humanoid with a light-brown ponytail,
+  // a small beard framing the mouth, a white shirt and brown shoes.
   function defaultCharacter() {
     return {
-      name: '', bodyType: 'tux', gender: 'male', fat: 0,
-      body: '#11131c', belly: '#fdfdfd', feet: '#ff9e2c',
+      name: '', bodyType: 'humanoid', gender: CLOBI.gender || 'male', fat: 0,
+      body: '#11131c', belly: CLOBI.belly || '#fdfdfd', feet: CLOBI.feet || '#5a3a22',
       skin: CLOBI.skin, hairColor: CLOBI.hairColor, beardColor: CLOBI.beardColor,
-      pants: '#33405c', capeColor: '#ff5a3c',
-      hair: 0, beard: 0, shirtStyle: 0, pantsStyle: 0, shoeStyle: 0,
-      hat: 0, eyes: 0, accessory: 0, cape: 0
+      pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c',
+      hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 2),
+      shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
+      hat: 0, eyes: 0, mouth: 0, accessory: 0, cape: 0
     };
   }
 
@@ -68,7 +71,7 @@ var Sprites = (function () {
       pants: pick(PRESETS.pants), capeColor: pick(PRESETS.cape),
       hair: ri('hair', 8), beard: ri('beard', 6),
       shirtStyle: ri('shirt', 6), pantsStyle: ri('pants', 5), shoeStyle: ri('shoes', 4),
-      hat: ri('hat', 7), eyes: ri('eyes', 5), accessory: ri('accessory', 6), cape: ri('cape', 6)
+      hat: ri('hat', 7), eyes: ri('eyes', 5), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6)
     };
   }
 
@@ -98,7 +101,7 @@ var Sprites = (function () {
       hair: idx(c.hair, 'hair', 0), beard: idx(c.beard, 'beard', 0),
       shirtStyle: idx(c.shirtStyle, 'shirt', 0), pantsStyle: idx(c.pantsStyle, 'pants', 0),
       shoeStyle: idx(c.shoeStyle, 'shoes', 0),
-      hat: idx(c.hat, 'hat', 0), eyes: idx(c.eyes, 'eyes', 0),
+      hat: idx(c.hat, 'hat', 0), eyes: idx(c.eyes, 'eyes', 0), mouth: idx(c.mouth, 'mouth', 0),
       accessory: idx(c.accessory, 'accessory', 0), cape: idx(c.cape, 'cape', 0)
     };
   }
@@ -107,7 +110,12 @@ var Sprites = (function () {
   function drawCharacter(ctx, character, x, y, scale, facing) {
     var c = sanitize(character);
     var flip = (facing < 0) ? -1 : 1;
-    var s = scale * 16 / GW;                       // px per grid cell (GW=32 -> scale/2)
+    // On-screen size is independent of the texture RESOLUTION: derive the grid
+    // width from the loaded manifest, so bumping the texture res (32->64->128...)
+    // keeps the same on-screen size (display width stays ~scale*16). This lets the
+    // art be re-baked at any resolution without rescaling every caller.
+    var gw = (window.Textures && Textures.grid && Textures.grid() && Textures.grid().w) ? Textures.grid().w : GW;
+    var s = scale * 16 / gw;
     if (window.Textures && Textures.isReady() && Textures.draw(ctx, c, x, y, s, flip)) return;
     fallbackDraw(ctx, c, x, y, s, flip);
   }

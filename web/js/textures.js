@@ -112,6 +112,7 @@ var Textures = (function () {
       if (hf) L.push({ f: hf, c: col(ch, 'hairColor', '#b07a43') });
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
       if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f') });
+      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: null });  // mouth over the beard
       L.push({ f: styleFile('eyes', ch.eyes), c: null });
     } else {
       L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c') });
@@ -130,7 +131,7 @@ var Textures = (function () {
 
   function sig(ch) {
     return [ch.bodyType, ch.body, ch.belly, ch.feet, ch.skin, ch.hairColor, ch.beardColor,
-      ch.pants, ch.capeColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.accessory, ch.cape,
+      ch.pants, ch.capeColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.mouth, ch.accessory, ch.cape,
       ch.shirtStyle, ch.pantsStyle, ch.shoeStyle].join(',');
   }
 

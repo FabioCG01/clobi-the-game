@@ -11,7 +11,7 @@
   'use strict';
 
   // character field -> texture catalog group (for style pickers)
-  var CAT = { hair: 'hair', beard: 'beard', shirtStyle: 'shirt', pantsStyle: 'pants', shoeStyle: 'shoes', hat: 'hat', eyes: 'eyes', accessory: 'accessory', cape: 'cape' };
+  var CAT = { hair: 'hair', beard: 'beard', shirtStyle: 'shirt', pantsStyle: 'pants', shoeStyle: 'shoes', hat: 'hat', eyes: 'eyes', mouth: 'mouth', accessory: 'accessory', cape: 'cape' };
 
   var LAYOUT = {
     tux: {
@@ -20,7 +20,7 @@
     },
     humanoid: {
       colors: [['skin', 'editor.skin', 'Skin', 'skin'], ['hairColor', 'editor.hairColor', 'Hair', 'hair'], ['beardColor', 'editor.beardColor', 'Beard', 'beard'], ['belly', 'editor.shirt', 'Shirt', 'shirt'], ['pants', 'editor.pants', 'Pants', 'pants'], ['feet', 'editor.shoes', 'Shoes', 'feet']],
-      lists: [['hair', 'editor.hairstyle', 'Hairstyle'], ['beard', 'editor.beard', 'Beard'], ['shirtStyle', 'editor.shirtStyle', 'Shirt'], ['pantsStyle', 'editor.pantsStyle', 'Pants'], ['shoeStyle', 'editor.shoeStyle', 'Shoes'], ['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
+      lists: [['hair', 'editor.hairstyle', 'Hairstyle'], ['beard', 'editor.beard', 'Beard'], ['shirtStyle', 'editor.shirtStyle', 'Shirt'], ['pantsStyle', 'editor.pantsStyle', 'Pants'], ['shoeStyle', 'editor.shoeStyle', 'Shoes'], ['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['mouth', 'editor.mouth', 'Mouth'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
     }
   };
   var PRESETS_KEY = 'clobi.presets';

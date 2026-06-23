@@ -87,8 +87,20 @@ function humanoidBody() {
   b.row(12, 19, 11, 230); b.row(14, 17, 12, 230);
   b.rect(10, 8, 1, 2, 230); b.rect(21, 8, 1, 2, 230);   // ears
   b.rect(14, 13, 4, 1, 230);                            // neck
-  // faint mouth (kept open; beards frame it)
-  b.row(14, 17, 10, 150, 120);
+  return b;
+}
+
+// MOUTH — selectable expressions, composited ON TOP of the beard so the mouth shows
+// through any (editable) beard. The "mouth gap" is this texture, not hardcoded logic.
+function mouthStyle(kind) {
+  const b = new Buf();
+  const lr = 120, lg = 78, lb = 72, dr = 70, dg = 44, db = 40, wr = 240, wg = 240, wb = 245;
+  if (kind === 'smile') { b.rectC(14, 11, 4, 1, lr, lg, lb); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); }
+  else if (kind === 'grin') { b.rectC(14, 10, 4, 1, dr, dg, db); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); b.rectC(14, 11, 4, 1, wr, wg, wb); }
+  else if (kind === 'frown') { b.rectC(14, 10, 4, 1, lr, lg, lb); b.setC(13, 11, lr, lg, lb); b.setC(18, 11, lr, lg, lb); }
+  else if (kind === 'open') { b.rectC(14, 10, 4, 1, lr, lg, lb); b.rectC(15, 11, 2, 1, dr, dg, db); }
+  else if (kind === 'serious') { b.rectC(14, 10, 3, 1, lr, lg, lb); }
+  else { b.rectC(14, 10, 4, 1, lr, lg, lb); } // neutral
   return b;
 }
 
@@ -120,23 +132,20 @@ function shoeDress() { const b = new Buf(); b.rect(11, 31, 5, 2, 255); b.rect(16
 function shoeSandal() { const b = new Buf(); b.rect(11, 32, 5, 1, 255); b.rect(16, 32, 5, 1, 255); return b; }
 
 // ---- HAIR (tint: hairColor) — ORIGINAL shapes; x<11 pieces read as BEHIND ----
-const HAIR_DATA = {
-  bald: [],
-  short: [[12, 2, 8, 1], [11, 3, 10, 1], [11, 4, 1, 2], [20, 4, 1, 2]],
-  long: [[12, 2, 8, 1], [11, 3, 10, 1], [10, 4, 2, 8], [20, 4, 2, 8]],
-  ponytail: [[12, 2, 8, 1], [11, 3, 10, 1], [11, 4, 1, 2], [20, 4, 1, 2], [8, 5, 3, 1], [7, 6, 3, 5], [8, 11, 2, 1]],
-  spiky: [[11, 4, 10, 1], [12, 2, 1, 2], [14, 1, 1, 3], [16, 0, 1, 4], [18, 1, 1, 3], [20, 2, 1, 2]],
-  bun: [[12, 2, 8, 1], [11, 3, 10, 1], [14, 0, 4, 2]],
-  mohawk: [[15, 0, 2, 5], [14, 3, 4, 1]],
-  afro: [[10, 1, 12, 4], [9, 2, 2, 4], [21, 2, 2, 4]],
-  curly: [[12, 1, 8, 1], [11, 2, 10, 2], [10, 3, 1, 2], [21, 3, 1, 2], [12, 4, 1, 1], [16, 4, 1, 1], [19, 4, 1, 1]]
-};
 function hairStyle(kind) {
-  const front = new Buf(), back = new Buf();
-  for (const r of (HAIR_DATA[kind] || [])) {
-    const tgt = (r[0] < 11) ? back : front;
-    tgt.rect(r[0], r[1], r[2], r[3] === undefined ? 1 : r[3], 230);
-  }
+  const front = new Buf(), back = new Buf(), V = 230;
+  if (kind === 'bald') return { front, back };
+  // solid cap that fully covers the head crown (head: y4..6 wide) down to a clean
+  // hairline at y5/6, so no skin shows on top. x<11 pieces read as BEHIND the body.
+  const cap = () => { front.row(13, 18, 2, V); front.row(12, 19, 3, V); front.rect(11, 4, 10, 2, V); front.set(11, 6, V); front.set(20, 6, V); };
+  if (kind === 'mohawk') { front.rect(15, 0, 2, 6, V); front.rect(14, 4, 4, 2, V); return { front, back }; }
+  if (kind === 'afro') { front.rect(10, 1, 12, 5, V); front.rect(9, 2, 1, 5, V); front.rect(22, 2, 1, 5, V); back.rect(10, 6, 12, 1, V); return { front, back }; }
+  cap();
+  if (kind === 'long') { front.rect(11, 6, 1, 6, V); front.rect(20, 6, 1, 6, V); back.rect(10, 5, 1, 9, V); back.rect(21, 5, 1, 9, V); }
+  else if (kind === 'ponytail') { back.rect(8, 5, 2, 6, V); back.rect(7, 6, 1, 4, V); }
+  else if (kind === 'spiky') { front.set(12, 1, V); front.set(14, 0, V); front.set(16, 1, V); front.set(18, 0, V); front.set(20, 1, V); }
+  else if (kind === 'bun') { front.rect(14, 0, 4, 2, V); }
+  else if (kind === 'curly') { front.set(11, 6, V); front.set(13, 6, V); front.set(16, 6, V); front.set(19, 6, V); }
   return { front, back };
 }
 
@@ -153,16 +162,20 @@ function beardStyle(kind) {
 }
 
 // ---- EYES (fixed colour) — original positions L=13,R=17,y=8 ----
+// EYES = a face EXPRESSION: eyebrows (give emotion) + clean dark eyes with a glint.
 function eyesStyle(kind) {
-  const b = new Buf(); const W = [245, 245, 250], D = [20, 22, 34], C = [127, 249, 224];
-  const L = 13, R = 17, y = 8;
-  const white = (x) => { b.setC(x, y, ...W); b.setC(x + 1, y, ...W); b.setC(x, y + 1, ...W); b.setC(x + 1, y + 1, ...W); };
-  const pupil = (x, c = D) => { b.setC(x + 1, y, ...c); b.setC(x + 1, y + 1, ...c); };
-  if (kind === 'angry') { white(L); white(R); pupil(L); pupil(R); b.setC(L - 1, y - 1, ...D); b.setC(L, y - 1, ...D); b.setC(R + 1, y - 1, ...D); b.setC(R, y - 1, ...D); }
-  else if (kind === 'sleepy') { b.setC(L, y, ...D); b.setC(L + 1, y, ...D); b.setC(R, y, ...D); b.setC(R + 1, y, ...D); b.setC(L, y + 1, ...W); b.setC(R + 1, y + 1, ...W); }
-  else if (kind === 'shades') { b.rectC(L - 1, y - 1, 7, 3, 18, 20, 30); b.setC(L, y, ...C); }
-  else if (kind === 'sparkle') { white(L); white(R); pupil(L, C); pupil(R, C); }
-  else { white(L); white(R); pupil(L); pupil(R); }
+  const b = new Buf();
+  const wr = 246, wg = 246, wb = 252, dr = 28, dg = 30, db = 44, cr = 127, cg = 249, cb = 224;
+  const e1 = 62, e2 = 44, e3 = 34;                 // eyebrow dark-brown
+  const browFlat = () => { b.rectC(12, 6, 3, 1, e1, e2, e3); b.rectC(17, 6, 3, 1, e1, e2, e3); };
+  const browAngry = () => { b.setC(12, 6, e1, e2, e3); b.setC(13, 6, e1, e2, e3); b.setC(13, 7, e1, e2, e3); b.setC(14, 7, e1, e2, e3); b.setC(19, 6, e1, e2, e3); b.setC(18, 6, e1, e2, e3); b.setC(18, 7, e1, e2, e3); b.setC(17, 7, e1, e2, e3); };
+  const browRaised = () => { b.rectC(12, 5, 3, 1, e1, e2, e3); b.rectC(17, 5, 3, 1, e1, e2, e3); };
+  const eyeOpen = () => { b.rectC(13, 8, 2, 2, dr, dg, db); b.rectC(17, 8, 2, 2, dr, dg, db); b.setC(13, 8, wr, wg, wb); b.setC(17, 8, wr, wg, wb); };
+  if (kind === 'angry') { browAngry(); b.rectC(13, 8, 2, 1, dr, dg, db); b.rectC(17, 8, 2, 1, dr, dg, db); b.setC(13, 8, wr, wg, wb); b.setC(17, 8, wr, wg, wb); }
+  else if (kind === 'sleepy') { browFlat(); b.rectC(13, 9, 2, 1, dr, dg, db); b.rectC(17, 9, 2, 1, dr, dg, db); }
+  else if (kind === 'shades') { browFlat(); b.rectC(12, 8, 7, 2, 18, 20, 30); b.setC(13, 8, cr, cg, cb); }
+  else if (kind === 'sparkle') { browRaised(); eyeOpen(); b.setC(14, 9, 255, 255, 255); b.setC(18, 9, 255, 255, 255); }
+  else { browFlat(); eyeOpen(); }
   return b;
 }
 
@@ -263,6 +276,7 @@ manifest.catalog.shoes = [
 manifest.catalog.hair = ['bald', 'short', 'long', 'ponytail', 'spiky', 'bun', 'mohawk', 'afro', 'curly'].map(k => { const { front, back } = hairStyle(k); return { id: k, name: cap(k), front: save('hair/' + k + '_f.png', front), back: save('hair/' + k + '_b.png', back) }; });
 manifest.catalog.beard = ['none', 'stubble', 'clobi', 'goatee', 'full', 'moustache'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('beard/' + k + '.png', beardStyle(k)) }));
 manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle'].map(k => ({ id: k, name: cap(k), file: save('eyes/' + k + '.png', eyesStyle(k)) }));
+manifest.catalog.mouth = ['neutral', 'smile', 'grin', 'frown', 'open', 'serious'].map(k => ({ id: k, name: cap(k), file: save('mouth/' + k + '.png', mouthStyle(k)) }));
 manifest.catalog.hat = ['none', 'cap', 'wizard', 'beanie', 'tophat', 'crown', 'halo'].map(k => ({ id: k, name: k === 'cap' ? 'Vim Cap' : cap(k), file: k === 'none' ? null : save('hat/' + k + '.png', hatStyle(k)) }));
 manifest.catalog.accessory = ['none', 'bowtie', 'scarf', 'fish', 'badge', 'chain'].map(k => ({ id: k, name: k === 'fish' ? "Fisherman's" : cap(k), file: k === 'none' ? null : save('acc/' + k + '.png', accStyle(k)) }));
 manifest.catalog.cape = ['none', 'classic', 'long', 'round', 'royal', 'tattered'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('cape/' + k + '.png', capeStyle(k)) }));

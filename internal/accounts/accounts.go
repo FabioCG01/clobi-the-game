@@ -126,24 +126,25 @@ func newToken() (string, error) {
 func defaultCharacter(name string) protocol.Character {
 	return protocol.Character{
 		Name:       name,
-		BodyType:   "tux",
+		BodyType:   "humanoid",
 		Gender:     "male",
 		Body:       "#11131c",
 		Belly:      "#fdfdfd",
-		Feet:       "#ff9e2c",
+		Feet:       "#5a3a22",
 		Skin:       "#f3c69a",
 		HairColor:  "#b07a43",
 		BeardColor: "#7a4a1f",
 		Pants:      "#33405c",
 		CapeColor:  "#ff5a3c",
 		Fat:        0,
-		Hair:       0,
-		Beard:      0,
+		Hair:       3, // ponytail
+		Beard:      2, // clobi (around the mouth)
 		ShirtStyle: 0,
 		PantsStyle: 0,
 		ShoeStyle:  0,
 		Hat:        0,
 		Eyes:       0,
+		Mouth:      0,
 		Accessory:  0,
 		Cape:       0,
 	}

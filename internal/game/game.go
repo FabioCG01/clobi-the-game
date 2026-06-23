@@ -1429,6 +1429,7 @@ func randomBotCharacter(rng *rand.Rand) protocol.Character {
 		ShoeStyle:  rng.Intn(4),
 		Hat:        rng.Intn(7),
 		Eyes:       rng.Intn(5),
+		Mouth:      rng.Intn(6),
 		Accessory:  rng.Intn(6),
 		Cape:       rng.Intn(6),
 	}

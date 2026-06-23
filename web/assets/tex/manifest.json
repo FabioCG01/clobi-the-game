@@ -207,6 +207,38 @@
     "file": "eyes/sparkle.png"
    }
   ],
+  "mouth": [
+   {
+    "id": "neutral",
+    "name": "Neutral",
+    "file": "mouth/neutral.png"
+   },
+   {
+    "id": "smile",
+    "name": "Smile",
+    "file": "mouth/smile.png"
+   },
+   {
+    "id": "grin",
+    "name": "Grin",
+    "file": "mouth/grin.png"
+   },
+   {
+    "id": "frown",
+    "name": "Frown",
+    "file": "mouth/frown.png"
+   },
+   {
+    "id": "open",
+    "name": "Open",
+    "file": "mouth/open.png"
+   },
+   {
+    "id": "serious",
+    "name": "Serious",
+    "file": "mouth/serious.png"
+   }
+  ],
   "hat": [
    {
     "id": "none",

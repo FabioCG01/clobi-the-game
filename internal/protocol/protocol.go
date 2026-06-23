@@ -64,6 +64,7 @@ type Character struct {
 	ShoeStyle  int     `json:"shoeStyle"`  // shoe style index (humanoid)
 	Hat        int     `json:"hat"`
 	Eyes       int     `json:"eyes"`
+	Mouth      int     `json:"mouth"`     // mouth/expression style index (humanoid)
 	Accessory  int     `json:"accessory"`
 	Cape       int     `json:"cape"`
 }
