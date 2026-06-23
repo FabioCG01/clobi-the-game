@@ -334,6 +334,10 @@ func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if ct := contentTypeFor(full); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
+	// Revalidate instead of serving stale: ServeFile still sends Last-Modified, so
+	// caches (browser + Cloudflare) do a conditional request and pick up a redeploy
+	// immediately rather than serving old JS/textures for hours.
+	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, full)
 }
 

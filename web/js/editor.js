@@ -11,7 +11,10 @@
   'use strict';
 
   // character field -> texture catalog group (for style pickers)
-  var CAT = { hair: 'hair', beard: 'beard', shirtStyle: 'shirt', pantsStyle: 'pants', shoeStyle: 'shoes', hat: 'hat', eyes: 'eyes', mouth: 'mouth', accessory: 'accessory', cape: 'cape' };
+  var CAT = { hair: 'hair', beard: 'beard', shirtStyle: 'shirt', pantsStyle: 'pants', shoeStyle: 'shoes', hat: 'hat', eyes: 'eyes', eyebrows: 'eyebrows', mouth: 'mouth', accessory: 'accessory', cape: 'cape' };
+  // objects the player can move/resize/rotate (head = resize only). Humanoid only.
+  var TF_OBJECTS = [['head', 'Head', 's'], ['hair', 'Hair', 'xysr'], ['eyebrows', 'Brows', 'xysr'], ['eyes', 'Eyes', 'xysr'], ['mouth', 'Mouth', 'xysr'], ['beard', 'Beard', 'xysr'], ['accessory', 'Acc.', 'xysr']];
+  var tfSel = 'head';
 
   var LAYOUT = {
     tux: {
@@ -20,7 +23,7 @@
     },
     humanoid: {
       colors: [['skin', 'editor.skin', 'Skin', 'skin'], ['hairColor', 'editor.hairColor', 'Hair', 'hair'], ['beardColor', 'editor.beardColor', 'Beard', 'beard'], ['belly', 'editor.shirt', 'Shirt', 'shirt'], ['pants', 'editor.pants', 'Pants', 'pants'], ['feet', 'editor.shoes', 'Shoes', 'feet']],
-      lists: [['hair', 'editor.hairstyle', 'Hairstyle'], ['beard', 'editor.beard', 'Beard'], ['shirtStyle', 'editor.shirtStyle', 'Shirt'], ['pantsStyle', 'editor.pantsStyle', 'Pants'], ['shoeStyle', 'editor.shoeStyle', 'Shoes'], ['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['mouth', 'editor.mouth', 'Mouth'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
+      lists: [['hair', 'editor.hairstyle', 'Hairstyle'], ['beard', 'editor.beard', 'Beard'], ['shirtStyle', 'editor.shirtStyle', 'Shirt'], ['pantsStyle', 'editor.pantsStyle', 'Pants'], ['shoeStyle', 'editor.shoeStyle', 'Shoes'], ['hat', 'editor.hat', 'Hat'], ['eyes', 'editor.eyes', 'Eyes'], ['eyebrows', 'editor.eyebrows', 'Eyebrows'], ['mouth', 'editor.mouth', 'Mouth'], ['accessory', 'editor.accessory', 'Accessory'], ['cape', 'editor.cape', 'Cape']]
     }
   };
   var PRESETS_KEY = 'clobi.presets';
@@ -133,6 +136,7 @@
     optionsEl.appendChild(sectionLabel(t('editor.styles', 'Styles')));
     lay.lists.forEach(function (c) { optionsEl.appendChild(buildListRow({ field: c[0], key: c[1], en: c[2], cat: CAT[c[0]] })); });
 
+    if (bt === 'humanoid') optionsEl.appendChild(buildAdjustSection());
     optionsEl.appendChild(buildPresetsRow());
     syncTabs();
   }
@@ -200,6 +204,49 @@
     var next = el('button', 'ed-arrow', '›'); next.type = 'button'; next.addEventListener('click', function () { cycle(cfg.field, cfg.cat, 1); });
     ctrl.appendChild(prev); ctrl.appendChild(val); ctrl.appendChild(next);
     row.appendChild(ctrl); updateListVal(cfg.field); return row;
+  }
+
+  // ---- Adjust (move / resize / rotate) — humanoid face objects + head size ----
+  function getTf(key) { var t = (character.tf && character.tf[key]) || null; return { x: (t && t.x) || 0, y: (t && t.y) || 0, s: (t && t.s) || 1, r: (t && t.r) || 0 }; }
+  function setTf(key, prop, val) { if (!character.tf) character.tf = {}; var t = character.tf[key] || { x: 0, y: 0, s: 1, r: 0 }; t[prop] = val; character.tf[key] = t; }
+  var adjSlidersEl = null, adjTabs = {};
+  function syncObjTabs() { for (var k in adjTabs) adjTabs[k].classList.toggle('active', k === tfSel); }
+  function adjSlider(label, prop, min, max, step) {
+    var row = el('div', 'ed-row');
+    row.appendChild(el('div', 'ed-rowlabel', label));
+    var ctrl = el('div', 'ed-rowctrl');
+    var sl = el('input', 'ed-slider'); sl.type = 'range'; sl.min = String(min); sl.max = String(max); sl.step = String(step);
+    sl.value = String(getTf(tfSel)[prop]);
+    sl.addEventListener('input', function () { setTf(tfSel, prop, +sl.value); });
+    ctrl.appendChild(sl); row.appendChild(ctrl); return row;
+  }
+  function renderAdjSliders() {
+    if (!adjSlidersEl) return; adjSlidersEl.innerHTML = '';
+    var which = 's';
+    for (var i = 0; i < TF_OBJECTS.length; i++) if (TF_OBJECTS[i][0] === tfSel) which = TF_OBJECTS[i][2];
+    adjSlidersEl.appendChild(adjSlider(t('editor.size', 'Size'), 's', 0.4, 2.2, 0.05));
+    if (which.indexOf('x') >= 0) {
+      adjSlidersEl.appendChild(adjSlider(t('editor.moveX', 'Move X'), 'x', -16, 16, 1));
+      adjSlidersEl.appendChild(adjSlider(t('editor.moveY', 'Move Y'), 'y', -16, 16, 1));
+      adjSlidersEl.appendChild(adjSlider(t('editor.rotate', 'Rotate'), 'r', -180, 180, 5));
+    }
+  }
+  function buildAdjustSection() {
+    var box = el('div', 'ed-adjust');
+    box.appendChild(sectionLabel(t('editor.adjust', 'Adjust (move / size / rotate)')));
+    var sel = el('div', 'ed-objsel'); adjTabs = {};
+    TF_OBJECTS.forEach(function (o) {
+      var b = el('button', 'ed-objtab', t('editor.obj.' + o[0], o[1])); b.type = 'button';
+      b.addEventListener('click', function () { tfSel = o[0]; renderAdjSliders(); syncObjTabs(); });
+      adjTabs[o[0]] = b; sel.appendChild(b);
+    });
+    box.appendChild(sel);
+    adjSlidersEl = el('div', 'ed-adjsliders'); box.appendChild(adjSlidersEl);
+    var reset = el('button', 'ed-mini', t('editor.resetObj', 'Reset object')); reset.type = 'button';
+    reset.addEventListener('click', function () { if (character.tf) delete character.tf[tfSel]; renderAdjSliders(); });
+    box.appendChild(reset);
+    renderAdjSliders(); syncObjTabs();
+    return box;
   }
 
   function buildPresetsRow() {
@@ -368,6 +415,11 @@
       '.ed-listval{flex:1 1 auto;font-size:9px;background:#11131f;border:2px solid #000;box-shadow:2px 2px 0 #000;padding:8px 6px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}',
       '.ed-listval-text{color:#7ff9e0;}',
       '.ed-slider{flex:1 1 auto;accent-color:#ff9e2c;}',
+      '.ed-adjust{display:flex;flex-direction:column;gap:6px;}',
+      '.ed-objsel{display:flex;flex-wrap:wrap;gap:4px;}',
+      '.ed-objtab{font-family:inherit;font-size:8px;color:#e8ecff;background:#11131f;border:2px solid #000;box-shadow:2px 2px 0 #000;padding:6px 6px;cursor:pointer;}',
+      '.ed-objtab.active{background:#7ff9e0;color:#10131f;}',
+      '.ed-adjsliders{display:flex;flex-direction:column;gap:6px;}',
       '.ed-slmin,.ed-slmax{font-size:7px;color:#cfd4e8;}',
       '.ed-presets{display:flex;flex-direction:column;gap:6px;}',
       '.ed-select{flex:1 1 auto;font-family:inherit;font-size:9px;color:#10131f;background:#e8ecff;border:2px solid #000;padding:6px;min-width:0;}',

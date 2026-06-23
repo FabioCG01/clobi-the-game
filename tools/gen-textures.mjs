@@ -74,33 +74,39 @@ function nearest2x(src) {
 //   head x11..20 y4..12 | torso y14..22 | arms sides y15..21 | legs y24..30 | shoes y31..32
 //   eyes y8, mouth ~y10.5 (drawn faint). gender + fat handled at runtime (warp).
 // =============================================================================
+// BODY = the skeleton (torso/arms/legs/neck), NO head. This is the fixed shape the
+// server hitbox follows; head + face parts are separate, transformable layers.
 function humanoidBody() {
   const b = new Buf();
-  // torso + leg skin base (covered by clothes; two legs with a gap so no crotch skin)
-  b.rect(11, 14, 10, 9, 230);
-  b.rect(12, 24, 3, 8, 230); b.rect(17, 24, 3, 8, 230);
-  // arms (skin) at the sides + hands
-  b.rect(9, 15, 2, 6, 230); b.rect(21, 15, 2, 6, 230);
-  b.rect(9, 20, 2, 2, 230); b.rect(21, 20, 2, 2, 230);
-  // head (original shape)
+  b.rect(11, 14, 10, 9, 230);                           // torso
+  b.rect(12, 24, 3, 8, 230); b.rect(17, 24, 3, 8, 230); // two legs (gap = no crotch skin)
+  b.rect(9, 15, 2, 6, 230); b.rect(21, 15, 2, 6, 230);  // arms
+  b.rect(9, 20, 2, 2, 230); b.rect(21, 20, 2, 2, 230);  // hands
+  b.rect(14, 13, 4, 1, 230);                            // neck (always stays put)
+  return b;
+}
+// HEAD = head + ears (its own layer so it can be resized; anchored at the neck).
+function humanoidHead() {
+  const b = new Buf();
   b.row(13, 18, 4, 230); b.row(12, 19, 5, 230); b.rect(11, 6, 10, 5, 230);
   b.row(12, 19, 11, 230); b.row(14, 17, 12, 230);
   b.rect(10, 8, 1, 2, 230); b.rect(21, 8, 1, 2, 230);   // ears
-  b.rect(14, 13, 4, 1, 230);                            // neck
   return b;
 }
 
 // MOUTH — selectable expressions, composited ON TOP of the beard so the mouth shows
 // through any (editable) beard. The "mouth gap" is this texture, not hardcoded logic.
+// Baked GRAYSCALE and tinted at runtime by a slightly-darker-than-skin colour, so
+// the mouth always reads as a natural lip shade on any skin. Lighter values stay
+// lighter (teeth), darker values read as a deeper crease/open inside.
 function mouthStyle(kind) {
   const b = new Buf();
-  const lr = 116, lg = 68, lb = 56, dr = 64, dg = 38, db = 36, wr = 240, wg = 240, wb = 245;
-  if (kind === 'smile') { b.rectC(14, 11, 4, 1, lr, lg, lb); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); }
-  else if (kind === 'grin') { b.rectC(14, 10, 4, 1, dr, dg, db); b.setC(13, 10, lr, lg, lb); b.setC(18, 10, lr, lg, lb); b.rectC(14, 11, 4, 1, wr, wg, wb); }
-  else if (kind === 'frown') { b.rectC(14, 10, 4, 1, lr, lg, lb); b.setC(13, 11, lr, lg, lb); b.setC(18, 11, lr, lg, lb); }
-  else if (kind === 'open') { b.rectC(14, 10, 4, 1, lr, lg, lb); b.rectC(15, 11, 2, 1, dr, dg, db); }
-  else if (kind === 'serious') { b.rectC(14, 10, 3, 1, lr, lg, lb); }
-  else { b.rectC(14, 10, 4, 1, lr, lg, lb); } // neutral
+  if (kind === 'smile') { b.rect(14, 12, 4, 1, 235); b.set(13, 11, 235); b.set(18, 11, 235); }
+  else if (kind === 'grin') { b.rect(14, 11, 4, 1, 150); b.set(13, 11, 235); b.set(18, 11, 235); b.rect(14, 12, 4, 1, 255); }
+  else if (kind === 'frown') { b.rect(14, 11, 4, 1, 235); b.set(13, 12, 235); b.set(18, 12, 235); }
+  else if (kind === 'open') { b.rect(14, 11, 4, 1, 235); b.rect(15, 12, 2, 1, 95); }
+  else if (kind === 'serious') { b.rect(14, 11, 3, 1, 235); }
+  else { b.rect(14, 11, 4, 1, 235); } // neutral (one row lower so it never touches the eyes)
   return b;
 }
 
@@ -164,20 +170,32 @@ function beardStyle(kind) {
 }
 
 // ---- EYES (fixed colour) — original positions L=13,R=17,y=8 ----
-// EYES = a face EXPRESSION: eyebrows (give emotion) + clean dark eyes with a glint.
+// EYES = just the eyes (clean dark eye with a glint). Eyebrows are a SEPARATE
+// catalog now, so you choose eyes and brows independently.
 function eyesStyle(kind) {
   const b = new Buf();
   const wr = 246, wg = 246, wb = 252, dr = 28, dg = 30, db = 44, cr = 127, cg = 249, cb = 224;
-  const e1 = 62, e2 = 44, e3 = 34;                 // eyebrow dark-brown
-  const browFlat = () => { b.rectC(12, 6, 3, 1, e1, e2, e3); b.rectC(17, 6, 3, 1, e1, e2, e3); };
-  const browAngry = () => { b.setC(12, 6, e1, e2, e3); b.setC(13, 6, e1, e2, e3); b.setC(13, 7, e1, e2, e3); b.setC(14, 7, e1, e2, e3); b.setC(19, 6, e1, e2, e3); b.setC(18, 6, e1, e2, e3); b.setC(18, 7, e1, e2, e3); b.setC(17, 7, e1, e2, e3); };
-  const browRaised = () => { b.rectC(12, 5, 3, 1, e1, e2, e3); b.rectC(17, 5, 3, 1, e1, e2, e3); };
-  const eyeOpen = () => { b.rectC(13, 8, 2, 2, dr, dg, db); b.rectC(17, 8, 2, 2, dr, dg, db); b.setC(13, 8, wr, wg, wb); b.setC(17, 8, wr, wg, wb); };
-  if (kind === 'angry') { browAngry(); b.rectC(13, 8, 2, 1, dr, dg, db); b.rectC(17, 8, 2, 1, dr, dg, db); b.setC(13, 8, wr, wg, wb); b.setC(17, 8, wr, wg, wb); }
-  else if (kind === 'sleepy') { browFlat(); b.rectC(13, 9, 2, 1, dr, dg, db); b.rectC(17, 9, 2, 1, dr, dg, db); }
-  else if (kind === 'shades') { browFlat(); b.rectC(12, 8, 7, 2, 18, 20, 30); b.setC(13, 8, cr, cg, cb); }
-  else if (kind === 'sparkle') { browRaised(); eyeOpen(); b.setC(14, 9, 255, 255, 255); b.setC(18, 9, 255, 255, 255); }
-  else { browFlat(); eyeOpen(); }
+  const eyeOpen = () => { b.rectC(13, 7, 2, 2, dr, dg, db); b.rectC(17, 7, 2, 2, dr, dg, db); b.setC(13, 7, wr, wg, wb); b.setC(17, 7, wr, wg, wb); };
+  if (kind === 'angry') { b.rectC(13, 7, 2, 1, dr, dg, db); b.rectC(17, 7, 2, 1, dr, dg, db); b.setC(13, 7, wr, wg, wb); b.setC(17, 7, wr, wg, wb); }        // narrowed
+  else if (kind === 'sleepy') { b.rectC(13, 8, 2, 1, dr, dg, db); b.rectC(17, 8, 2, 1, dr, dg, db); }                                                        // half-lidded
+  else if (kind === 'shades') { b.rectC(12, 7, 7, 2, 18, 20, 30); b.setC(13, 7, cr, cg, cb); }
+  else if (kind === 'sparkle') { eyeOpen(); b.setC(14, 8, 255, 255, 255); b.setC(18, 8, 255, 255, 255); }
+  else if (kind === 'wide') { b.rectC(13, 6, 2, 3, wr, wg, wb); b.rectC(17, 6, 2, 3, wr, wg, wb); b.setC(14, 7, dr, dg, db); b.setC(14, 8, dr, dg, db); b.setC(17, 7, dr, dg, db); b.setC(17, 8, dr, dg, db); }
+  else { eyeOpen(); }    // classic
+  return b;
+}
+
+// EYEBROWS = their own catalog, tinted by the HAIR colour. Grayscale = tintable.
+// Sit at y5/6, just above the eyes (y7).
+function eyebrowsStyle(kind) {
+  const b = new Buf();
+  if (kind === 'none') return b;
+  if (kind === 'flat') { b.rect(12, 6, 3, 1, 230); b.rect(17, 6, 3, 1, 230); }
+  else if (kind === 'angry') { b.set(12, 5, 230); b.set(13, 5, 230); b.set(13, 6, 230); b.set(14, 6, 230); b.set(19, 5, 230); b.set(18, 5, 230); b.set(18, 6, 230); b.set(17, 6, 230); }
+  else if (kind === 'raised') { b.rect(12, 5, 3, 1, 230); b.rect(17, 5, 3, 1, 230); }
+  else if (kind === 'worried') { b.set(12, 6, 230); b.set(13, 5, 230); b.set(14, 5, 230); b.set(17, 5, 230); b.set(18, 5, 230); b.set(19, 6, 230); }
+  else if (kind === 'thick') { b.rect(12, 5, 3, 2, 230); b.rect(17, 5, 3, 2, 230); }
+  else if (kind === 'unibrow') { b.rect(12, 6, 8, 1, 230); }
   return b;
 }
 
@@ -249,6 +267,7 @@ function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 const manifest = { grid: { w: GW * 2, h: GH * 2 }, base: {}, catalog: {} };
 manifest.base.humanoidBody = save('base/humanoidBody.png', humanoidBody());
+manifest.base.humanoidHead = save('base/humanoidHead.png', humanoidHead());
 manifest.base.tuxBody = save('base/tuxBody.png', tuxBody());
 manifest.base.tuxBelly = save('base/tuxBelly.png', tuxBelly());
 manifest.base.tuxFeet = save('base/tuxFeet.png', tuxFeet());
@@ -277,7 +296,8 @@ manifest.catalog.shoes = [
 ];
 manifest.catalog.hair = ['bald', 'short', 'long', 'ponytail', 'spiky', 'bun', 'mohawk', 'afro', 'curly'].map(k => { const { front, back } = hairStyle(k); return { id: k, name: cap(k), front: save('hair/' + k + '_f.png', front), back: save('hair/' + k + '_b.png', back) }; });
 manifest.catalog.beard = ['none', 'stubble', 'clobi', 'goatee', 'full', 'moustache'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('beard/' + k + '.png', beardStyle(k)) }));
-manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle'].map(k => ({ id: k, name: cap(k), file: save('eyes/' + k + '.png', eyesStyle(k)) }));
+manifest.catalog.eyes = ['classic', 'angry', 'sleepy', 'shades', 'sparkle', 'wide'].map(k => ({ id: k, name: cap(k), file: save('eyes/' + k + '.png', eyesStyle(k)) }));
+manifest.catalog.eyebrows = ['flat', 'angry', 'raised', 'worried', 'thick', 'unibrow', 'none'].map(k => ({ id: k, name: cap(k), file: k === 'none' ? null : save('brow/' + k + '.png', eyebrowsStyle(k)) }));
 manifest.catalog.mouth = ['neutral', 'smile', 'grin', 'frown', 'open', 'serious'].map(k => ({ id: k, name: cap(k), file: save('mouth/' + k + '.png', mouthStyle(k)) }));
 manifest.catalog.hat = ['none', 'cap', 'wizard', 'beanie', 'tophat', 'crown', 'halo'].map(k => ({ id: k, name: k === 'cap' ? 'Vim Cap' : cap(k), file: k === 'none' ? null : save('hat/' + k + '.png', hatStyle(k)) }));
 manifest.catalog.accessory = ['none', 'bowtie', 'scarf', 'fish', 'badge', 'chain'].map(k => ({ id: k, name: k === 'fish' ? "Fisherman's" : cap(k), file: k === 'none' ? null : save('acc/' + k + '.png', accStyle(k)) }));

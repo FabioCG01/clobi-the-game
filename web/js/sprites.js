@@ -42,8 +42,24 @@ var Sprites = (function () {
       pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c',
       hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 2),
       shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
-      hat: 0, eyes: 0, mouth: 0, accessory: 0, cape: 0
+      hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}
     };
+  }
+
+  // ---- per-object transform sanitiser (move/resize/rotate). Visual only. ----
+  var TF_KEYS = ['head', 'hair', 'beard', 'eyes', 'eyebrows', 'mouth', 'accessory'];
+  function clampNum(v, def, lo, hi) { v = (typeof v === 'number' && isFinite(v)) ? v : def; return Math.max(lo, Math.min(hi, v)); }
+  function sanitizeTf(tf) {
+    if (!tf || typeof tf !== 'object') return {};
+    var out = {};
+    for (var i = 0; i < TF_KEYS.length; i++) {
+      var k = TF_KEYS[i], t = tf[k];
+      if (t && typeof t === 'object') {
+        var o = { x: clampNum(t.x, 0, -24, 24), y: clampNum(t.y, 0, -24, 24), s: clampNum(t.s, 1, 0.3, 2.5), r: clampNum(t.r, 0, -180, 180) };
+        if (o.x || o.y || o.s !== 1 || o.r) out[k] = o;
+      }
+    }
+    return out;
   }
 
   function clobiHumanoid(base) {
@@ -71,7 +87,7 @@ var Sprites = (function () {
       pants: pick(PRESETS.pants), capeColor: pick(PRESETS.cape),
       hair: ri('hair', 8), beard: ri('beard', 6),
       shirtStyle: ri('shirt', 6), pantsStyle: ri('pants', 5), shoeStyle: ri('shoes', 4),
-      hat: ri('hat', 7), eyes: ri('eyes', 5), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6)
+      hat: ri('hat', 7), eyes: ri('eyes', 6), eyebrows: ri('eyebrows', 7), mouth: ri('mouth', 6), accessory: ri('accessory', 6), cape: ri('cape', 6), tf: {}
     };
   }
 
@@ -101,8 +117,8 @@ var Sprites = (function () {
       hair: idx(c.hair, 'hair', 0), beard: idx(c.beard, 'beard', 0),
       shirtStyle: idx(c.shirtStyle, 'shirt', 0), pantsStyle: idx(c.pantsStyle, 'pants', 0),
       shoeStyle: idx(c.shoeStyle, 'shoes', 0),
-      hat: idx(c.hat, 'hat', 0), eyes: idx(c.eyes, 'eyes', 0), mouth: idx(c.mouth, 'mouth', 0),
-      accessory: idx(c.accessory, 'accessory', 0), cape: idx(c.cape, 'cape', 0)
+      hat: idx(c.hat, 'hat', 0), eyes: idx(c.eyes, 'eyes', 0), eyebrows: idx(c.eyebrows, 'eyebrows', 0), mouth: idx(c.mouth, 'mouth', 0),
+      accessory: idx(c.accessory, 'accessory', 0), cape: idx(c.cape, 'cape', 0), tf: sanitizeTf(c.tf)
     };
   }
 

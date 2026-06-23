@@ -144,6 +144,7 @@ func defaultCharacter(name string) protocol.Character {
 		ShoeStyle:  0,
 		Hat:        0,
 		Eyes:       0,
+		Eyebrows:   0,
 		Mouth:      0,
 		Accessory:  0,
 		Cape:       0,

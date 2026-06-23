@@ -5,6 +5,7 @@
  },
  "base": {
   "humanoidBody": "base/humanoidBody.png",
+  "humanoidHead": "base/humanoidHead.png",
   "tuxBody": "base/tuxBody.png",
   "tuxBelly": "base/tuxBelly.png",
   "tuxFeet": "base/tuxFeet.png",
@@ -205,6 +206,48 @@
     "id": "sparkle",
     "name": "Sparkle",
     "file": "eyes/sparkle.png"
+   },
+   {
+    "id": "wide",
+    "name": "Wide",
+    "file": "eyes/wide.png"
+   }
+  ],
+  "eyebrows": [
+   {
+    "id": "flat",
+    "name": "Flat",
+    "file": "brow/flat.png"
+   },
+   {
+    "id": "angry",
+    "name": "Angry",
+    "file": "brow/angry.png"
+   },
+   {
+    "id": "raised",
+    "name": "Raised",
+    "file": "brow/raised.png"
+   },
+   {
+    "id": "worried",
+    "name": "Worried",
+    "file": "brow/worried.png"
+   },
+   {
+    "id": "thick",
+    "name": "Thick",
+    "file": "brow/thick.png"
+   },
+   {
+    "id": "unibrow",
+    "name": "Unibrow",
+    "file": "brow/unibrow.png"
+   },
+   {
+    "id": "none",
+    "name": "None",
+    "file": null
    }
   ],
   "mouth": [

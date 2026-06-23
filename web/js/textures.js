@@ -95,35 +95,44 @@ var Textures = (function () {
     return (typeof v === 'string' && /^#/.test(v)) ? v : def;
   }
 
-  // Build the ordered list of {file, hex} layers for a character.
+  // ---- per-object transforms (move / resize / rotate). Purely VISUAL — the
+  // server hitbox is the fixed body skeleton and is never affected. Anchors are
+  // given in 32x36 authoring space and scaled to the real grid.
+  var ANCHOR_A = { head: [16, 12], hair: [16, 4], beard: [16, 11], eyes: [16, 7], eyebrows: [16, 6], mouth: [16, 11], accessory: [16, 16] };
+  function anchorFor(key) { var a = ANCHOR_A[key] || [16, 18]; return { x: a[0] * GW / 32, y: a[1] * GH / 36 }; }
+
+  // Build the ordered list of {file, hex, key?} layers for a character.
   function layersFor(ch) {
     var L = [];
+    var skin = col(ch, 'skin', '#f3c69a'), hcol = col(ch, 'hairColor', '#b07a43');
     var capeF = (ch.cape | 0) ? styleFile('cape', ch.cape) : null;
     if (capeF) L.push({ f: capeF, c: col(ch, 'capeColor', '#ff5a3c') });
 
     if (ch.bodyType === 'humanoid') {
       var hb = styleFile('hair', ch.hair, 'back');
-      if (hb) L.push({ f: hb, c: col(ch, 'hairColor', '#b07a43') });
-      L.push({ f: manifest.base.humanoidBody, c: col(ch, 'skin', '#f3c69a') });
+      if (hb) L.push({ f: hb, c: hcol, key: 'hair' });
+      L.push({ f: manifest.base.humanoidBody, c: skin });                          // skeleton (fixed)
       L.push({ f: styleFile('pants', ch.pantsStyle), c: col(ch, 'pants', '#3a4a66') });
       L.push({ f: styleFile('shirt', ch.shirtStyle), c: col(ch, 'belly', '#fdfdfd') });
       L.push({ f: styleFile('shoes', ch.shoeStyle), c: col(ch, 'feet', '#5a3a22') });
+      L.push({ f: manifest.base.humanoidHead, c: skin, key: 'head' });             // resizable
       var hf = styleFile('hair', ch.hair, 'front');
-      if (hf) L.push({ f: hf, c: col(ch, 'hairColor', '#b07a43') });
+      if (hf) L.push({ f: hf, c: hcol, key: 'hair' });
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
-      if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f') });
-      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: null });  // mouth over the beard
-      L.push({ f: styleFile('eyes', ch.eyes), c: null });
+      if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard' });
+      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: darken(skin, 0.85), key: 'mouth' }); // slightly darker skin
+      var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' }); // a touch darker than hair so they read
+      L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });
     } else {
       L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c') });
       L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd') });
       L.push({ f: manifest.base.tuxFeet, c: col(ch, 'feet', '#ff9e2c') });
       L.push({ f: manifest.base.tuxBeak, c: col(ch, 'feet', '#ff9e2c') });
-      L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 8 });
+      L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 5 });
     }
     var tux = (ch.bodyType !== 'humanoid');
     var accF = (ch.accessory | 0) ? styleFile('accessory', ch.accessory) : null;
-    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0 });
+    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: tux ? undefined : 'accessory' });
     var hatF = (ch.hat | 0) ? styleFile('hat', ch.hat) : null;
     if (hatF) L.push({ f: hatF, c: null, dy: tux ? 8 : 0 });
     return L;
@@ -131,8 +140,8 @@ var Textures = (function () {
 
   function sig(ch) {
     return [ch.bodyType, ch.body, ch.belly, ch.feet, ch.skin, ch.hairColor, ch.beardColor,
-      ch.pants, ch.capeColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.mouth, ch.accessory, ch.cape,
-      ch.shirtStyle, ch.pantsStyle, ch.shoeStyle].join(',');
+      ch.pants, ch.capeColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.eyebrows, ch.mouth, ch.accessory, ch.cape,
+      ch.shirtStyle, ch.pantsStyle, ch.shoeStyle, JSON.stringify(ch.tf || {})].join(',');
   }
 
   function canon(ch) {
@@ -140,9 +149,23 @@ var Textures = (function () {
     if (canonCache[k]) return canonCache[k];
     var c = newCanvas(GW, GH), cx = c.getContext('2d');
     cx.imageSmoothingEnabled = false;
+    var tf = ch.tf || {};
     layersFor(ch).forEach(function (ly) {
       var t = tint(ly.f, ly.c);
-      if (t) cx.drawImage(t, 0, ly.dy || 0);
+      if (!t) return;
+      var T = ly.key ? tf[ly.key] : null;
+      if (T && (T.x || T.y || (T.s && T.s !== 1) || T.r)) {
+        var a = anchorFor(ly.key);
+        cx.save();
+        cx.translate(a.x + (T.x || 0), a.y + (T.y || 0));
+        if (T.r) cx.rotate(T.r * Math.PI / 180);
+        var sc = T.s || 1; if (sc !== 1) cx.scale(sc, sc);
+        cx.translate(-a.x, -a.y);
+        cx.drawImage(t, 0, 0);
+        cx.restore();
+      } else {
+        cx.drawImage(t, 0, ly.dy || 0);
+      }
     });
     canonCache[k] = c; return c;
   }
@@ -211,6 +234,12 @@ var Textures = (function () {
     if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
     var n = parseInt(h.slice(0, 6), 16);
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  // darken a hex colour by factor f (0..1); used to derive the mouth shade from skin.
+  function darken(hex, f) {
+    var c = hexToRgb(hex);
+    function h2(v) { v = Math.max(0, Math.min(255, Math.round(v * f))); return ('0' + v.toString(16)).slice(-2); }
+    return '#' + h2(c[0]) + h2(c[1]) + h2(c[2]);
   }
 
   return {
