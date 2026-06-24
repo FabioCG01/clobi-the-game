@@ -128,7 +128,9 @@
   function setZoom(z, fromS) { zoom = clampN(z, 0.6, 3); if (zoomSlider && !fromS) zoomSlider.value = String(zoom); }
 
   // ---- tabs ---------------------------------------------------------------
-  function tabsFor(bt) { return bt === 'humanoid' ? [['body', 'Body'], ['face', 'Face'], ['hair', 'Hair'], ['wear', 'Wear'], ['adjust', 'Adjust'], ['saves', 'Saves']] : [['body', 'Body'], ['wear', 'Wear'], ['saves', 'Saves']]; }
+  function tabsFor(bt) { return bt === 'humanoid' ? [['body', 'Body'], ['face', 'Face'], ['hair', 'Hair'], ['wear', 'Wear'], ['adjust', 'Adjust'], ['saves', 'Saves']] : [['body', 'Body'], ['wear', 'Wear'], ['adjust', 'Adjust'], ['saves', 'Saves']]; }
+  // Transformable parts per body type (Tux only has eyes / accessory / hat).
+  function tfOrderFor(bt) { return bt === 'humanoid' ? TF_ORDER : ['eyes', 'accessory', 'hat']; }
   function ensureTab() { var ids = tabsFor(character.bodyType).map(function (x) { return x[0]; }); if (ids.indexOf(activeTab) < 0) activeTab = 'body'; }
   function buildTabs() {
     ensureTab(); tabbarEl.innerHTML = '';
@@ -175,7 +177,7 @@
     if (auto) { var ab = el('button', 'ed2-auto-btn', t('editor.auto', 'AUTO')); ab.type = 'button'; ab.title = t('editor.autoSkin', 'Match skin'); ab.addEventListener('click', function () { character[field] = ''; setChip(); }); sw.appendChild(ab); }
     presetsFor(presetKey).forEach(function (hex) { var s = el('button', 'ed2-swatch'); s.type = 'button'; s.style.background = hex; s.title = hex; s.addEventListener('click', function () { character[field] = hex; setChip(); }); sw.appendChild(s); });
     row.appendChild(sw);
-    var custom = el('label', 'ed2-custom'); custom.title = t('editor.pickColor', 'Pick any colour'); custom.appendChild(el('span', 'ed2-custico', '🎨'));
+    var custom = el('label', 'ed2-custom'); custom.title = t('editor.pickColor', 'Pick any color'); custom.appendChild(el('span', 'ed2-custico', '🎨'));
     var picker = el('input', 'ed2-picker'); picker.type = 'color'; picker.value = toHex6(character[field] || '#888888');
     picker.addEventListener('input', function () { character[field] = picker.value; setChip(); }); custom.appendChild(picker);
     row.appendChild(custom);
@@ -212,6 +214,8 @@
       panelEl.appendChild(card(t('editor.body', 'Body'), { color: ['body', 'body'] }));
       panelEl.appendChild(card(t('editor.belly', 'Belly'), { color: ['belly', 'belly'] }));
       panelEl.appendChild(card(t('editor.feet', 'Feet'), { color: ['feet', 'feet'] }));
+      // Beak has its own color (mouthColor); AUTO matches the feet for classic Tux.
+      panelEl.appendChild(card(t('editor.beak', 'Beak'), { color: ['mouthColor', 'feet', true] }));
     }
   }
   function buildFace() {
@@ -239,10 +243,11 @@
   function buildAdjust() {
     panelEl.appendChild(el('div', 'ed2-note', t('editor.adjustHint', 'Click a part on the preview, then drag to move, wheel to resize, Shift+wheel to rotate. Click again to pick the part underneath.')));
     var sel = el('div', 'ed2-objsel');
-    TF_ORDER.forEach(function (k) { var b = el('button', 'ed2-objtab', t('editor.obj.' + k, TF_OBJ[k][0])); b.type = 'button'; b.dataset.k = k; b.addEventListener('click', function () { tfSel = k; updateHint(); renderAdj(); }); sel.appendChild(b); });
+    var order = tfOrderFor(character.bodyType);
+    order.forEach(function (k) { var b = el('button', 'ed2-objtab', t('editor.obj.' + k, TF_OBJ[k][0])); b.type = 'button'; b.dataset.k = k; b.addEventListener('click', function () { tfSel = k; updateHint(); renderAdj(); }); sel.appendChild(b); });
     panelEl.appendChild(sel);
     adjBody = el('div', 'ed2-adjbody'); panelEl.appendChild(adjBody);
-    if (!tfSel) tfSel = 'head'; renderAdj();
+    if (!tfSel || order.indexOf(tfSel) < 0) tfSel = order[0]; renderAdj();
   }
   function renderAdj() {
     if (!adjBody) return; adjBody.innerHTML = '';
@@ -320,7 +325,7 @@
   }
   function drawSelBox() {
     selHandles = null;
-    if (!tfSel || !TX() || !TX().partBox || !character || character.bodyType !== 'humanoid') return;
+    if (!tfSel || !TX() || !TX().partBox || !character) return;
     var pb = TX().partBox(character, tfSel); if (!pb) return;
     var sx = mapCx + facing * (pb.cx - GWg() / 2) * mapS, sy = mapCy + (pb.cy - GHg() / 2) * mapS;
     var hw = pb.hw * mapS + 4, hh = pb.hh * mapS + 4;
@@ -347,12 +352,12 @@
     box.addEventListener('wheel', onWheel, { passive: false });
   }
   function onDbl(e) {
-    if (!character || character.bodyType !== 'humanoid' || !TX() || !TX().partAt) return;
+    if (!character || !TX() || !TX().partAt) return;
     var g = evtGrid(e), key = TX().partAt(character, g.gx, g.gy, null);
     if (key && character.tf && character.tf[key]) { delete character.tf[key]; if (activeTab === 'adjust') renderAdj(); commitNow(); }
   }
   function onDown(e) {
-    if (!character || character.bodyType !== 'humanoid') return;
+    if (!character) return;
     var g = evtGrid(e), i;
     if (tfSel && selHandles) {   // gizmo handles take priority
       for (i = 0; i < selHandles.corners.length; i++) if (near(selHandles.corners[i], g.px, g.py, 9)) { dragMode = 'resize'; dragStart = { dist: Math.max(2, Math.hypot(g.px - selHandles.center.x, g.py - selHandles.center.y)), s: getTf(tfSel).s, cx: selHandles.center.x, cy: selHandles.center.y }; if (e.preventDefault) e.preventDefault(); return; }
@@ -378,7 +383,6 @@
   }
   function updateHint() {
     if (!hintEl) return;
-    if (character && character.bodyType !== 'humanoid') { hintEl.textContent = t('editor.tuxHint', 'Wheel = zoom'); return; }
     if (tfSel) hintEl.textContent = (t('editor.selected', 'Selected') + ': ' + ((TF_OBJ[tfSel] && TF_OBJ[tfSel][0]) || tfSel) + ' — ' + t('editor.gizmoHint', 'drag=move · corners=resize · arrows=rotate · dbl-click=reset'));
     else hintEl.textContent = t('editor.clickHint', 'Click a part · drag/resize/rotate · Ctrl+Z undo');
   }

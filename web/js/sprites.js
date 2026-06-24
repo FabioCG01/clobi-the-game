@@ -6,13 +6,13 @@
 // THE UNIVERSAL CHARACTER (v3) — one object across both modes + both bodies:
 //   {
 //     name, bodyType:'tux'|'humanoid', gender:'male'|'female', fat:0..1,
-//     body, belly, feet,                 // tux colours (belly=shirt for humanoid)
-//     skin, hairColor, beardColor, pants, capeColor,  // humanoid + shared colours
+//     body, belly, feet,                 // tux colors (belly=shirt for humanoid)
+//     skin, hairColor, beardColor, pants, capeColor,  // humanoid + shared colors
 //     hair, beard,                       // humanoid style indices
 //     shirtStyle, pantsStyle, shoeStyle, // humanoid clothing style indices
 //     hat, eyes, accessory, cape         // shared style indices
 //   }
-// Colours are full hex strings (the editor offers a free colour picker).
+// Colors are full hex strings (the editor offers a free color picker).
 //
 // drawCharacter(ctx, character, x, y, scale, facing): (x,y) is the sprite CENTRE
 // in canvas px; `scale` is destination px per OLD-16-grid cell (kept stable so

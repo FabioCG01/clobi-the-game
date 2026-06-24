@@ -2,7 +2,7 @@
 //
 // Loads the baked PNG masks (web/assets/tex/, see tools/gen-textures.mjs) and
 // the manifest, then for any character:
-//   1) TINTS each grayscale mask by the fighter's chosen colour (multiply),
+//   1) TINTS each grayscale mask by the fighter's chosen color (multiply),
 //   2) COMPOSITES the paper-doll layers back-to-front onto a canonical canvas,
 //   3) WARPS that canvas horizontally for gender + fat (head/feet stay put, the
 //      torso/hips widen or cinch) — purely visual, the hitbox never changes.
@@ -25,13 +25,13 @@ var Textures = (function () {
   // ---- custom (user-painted) textures -------------------------------------
   // A custom texture is a GW×GH packed image: R = grayscale value (tinted at
   // wear-time like a built-in mask), G = glow intensity, A = alpha. The glow
-  // colour is per-texture metadata. Stored by id; tinted canvases are cached.
+  // color is per-texture metadata. Stored by id; tinted canvases are cached.
   var customTex = {};        // id -> {id, slot, data:Uint8ClampedArray(GW*GH*4), glowColor, tintHint}
   var customCache = {};      // id|hex -> canvas(GW,GH)
 
-  // Which character colour field tints a custom texture in each paint slot, and
+  // Which character color field tints a custom texture in each paint slot, and
   // which body type(s) the slot applies to. tint:null => use the texture's own
-  // tintHint (a fixed colour, for slots with no natural wearer colour).
+  // tintHint (a fixed color, for slots with no natural wearer color).
   var PAINT_SLOTS = {
     body:      { tint: 'body',       tux: true,  hum: false },
     belly:     { tint: 'belly',      tux: true,  hum: false },
@@ -88,7 +88,7 @@ var Textures = (function () {
 
   // ---- tinting ------------------------------------------------------------
   function newCanvas(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
-  // tint a grayscale mask by hex; hex===null => raw (fixed-colour) image.
+  // tint a grayscale mask by hex; hex===null => raw (fixed-color) image.
   function tint(file, hex) {
     if (!file || !imgs[file]) return null;
     var key = file + '|' + (hex || 'RAW');
@@ -150,7 +150,7 @@ var Textures = (function () {
 
   // Build (and cache) the rendered canvas for a custom texture tinted by hex.
   // value channel is multiplied by the tint; glow pixels are blended toward the
-  // glow colour with a chunky 1px pixelated halo.
+  // glow color with a chunky 1px pixelated halo.
   function customCanvas(id, hex) {
     var ct = customTex[id]; if (!ct) return null;
     var key = id + '|' + (hex || ct.tintHint || 'RAW');
@@ -158,7 +158,7 @@ var Textures = (function () {
     var rgb = hexToRgb(hex || ct.tintHint || '#cccccc');
     var gc = hexToRgb(ct.glowColor || '#7ff9e0');
     var src = ct.data, n = GW * GH;
-    // First pass: base tinted colour + collect glow field.
+    // Pass 1: base tinted color + collect the glow field.
     var out = newCanvas(GW, GH), octx = out.getContext('2d');
     var img = octx.createImageData(GW, GH), d = img.data;
     var glow = new Float32Array(n);
@@ -171,30 +171,38 @@ var Textures = (function () {
       d[p + 2] = Math.round(rgb[2] * v);
       d[p + 3] = Math.round(a * 255);
     }
-    // Pixelated glow halo: dilate the glow field by 1px at reduced strength.
-    for (var y = 0; y < GH; y++) {
-      for (var x = 0; x < GW; x++) {
-        var idx = y * GW + x, gg = glow[idx];
-        // neighbour max for a chunky 1px bloom
-        var halo = 0;
-        if (x > 0) halo = Math.max(halo, glow[idx - 1]);
-        if (x < GW - 1) halo = Math.max(halo, glow[idx + 1]);
-        if (y > 0) halo = Math.max(halo, glow[idx - GW]);
-        if (y < GH - 1) halo = Math.max(halo, glow[idx + GW]);
-        var emit = Math.max(gg, halo * 0.45);
-        if (emit <= 0) continue;
-        var p2 = idx * 4;
-        d[p2] = Math.round(d[p2] * (1 - emit) + gc[0] * emit);
-        d[p2 + 1] = Math.round(d[p2 + 1] * (1 - emit) + gc[1] * emit);
-        d[p2 + 2] = Math.round(d[p2 + 2] * (1 - emit) + gc[2] * emit);
-        d[p2 + 3] = Math.max(d[p2 + 3], Math.round(emit * 255));
+    // Pass 2: a chunky, pixelated bloom field — each glow pixel spills into a 2px
+    // ring (no smoothing, stepped falloff) so it reads as emitting light.
+    var bloom = new Float32Array(n);
+    var R1 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    var R2 = [[2, 0], [-2, 0], [0, 2], [0, -2], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    function gAt(x, y) { return (x < 0 || y < 0 || x >= GW || y >= GH) ? 0 : glow[y * GW + x]; }
+    for (var y2 = 0; y2 < GH; y2++) {
+      for (var x2 = 0; x2 < GW; x2++) {
+        var b = glow[y2 * GW + x2];
+        for (var r1 = 0; r1 < R1.length; r1++) b = Math.max(b, gAt(x2 + R1[r1][0], y2 + R1[r1][1]) * 0.6);
+        for (var r2 = 0; r2 < R2.length; r2++) b = Math.max(b, gAt(x2 + R2[r2][0], y2 + R2[r2][1]) * 0.3);
+        bloom[y2 * GW + x2] = b;
       }
+    }
+    // Pass 3: ADD the glow color on top of the texture (emissive — the art stays
+    // visible and lights up), with a hot near-white core where glow is strongest.
+    for (var j = 0; j < n; j++) {
+      var emit = bloom[j]; if (emit <= 0) continue;
+      var pp = j * 4, core = glow[j];
+      var add0 = gc[0] * emit + 255 * core * 0.35;
+      var add1 = gc[1] * emit + 255 * core * 0.35;
+      var add2 = gc[2] * emit + 255 * core * 0.35;
+      d[pp] = Math.min(255, d[pp] + Math.round(add0));
+      d[pp + 1] = Math.min(255, d[pp + 1] + Math.round(add1));
+      d[pp + 2] = Math.min(255, d[pp + 2] + Math.round(add2));
+      d[pp + 3] = Math.max(d[pp + 3], Math.round(Math.min(1, emit * 1.1) * 255));
     }
     octx.putImageData(img, 0, 0);
     customCache[key] = out; return out;
   }
 
-  // The wear-time tint colour for a custom texture in a given slot.
+  // The wear-time tint color for a custom texture in a given slot.
   function customTintFor(ch, slot, id) {
     var def = PAINT_SLOTS[slot];
     var ct = customTex[id];
@@ -202,7 +210,7 @@ var Textures = (function () {
     return (ct && ct.tintHint) || '#cccccc';
   }
 
-  // ---- character colour/style resolution ----------------------------------
+  // ---- character color/style resolution ----------------------------------
   function cat(g) { return (manifest && manifest.catalog[g]) || []; }
   function styleFile(g, idx, which) {
     var a = cat(g), it = a[(idx | 0) % (a.length || 1)] || a[0];
@@ -242,21 +250,28 @@ var Textures = (function () {
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
       if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard', slot: 'beard' });
       var mcol = (typeof ch.mouthColor === 'string' && /^#/.test(ch.mouthColor)) ? ch.mouthColor : darken(skin, 0.85);
-      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth' });               // mouth colour (default = darker skin)
+      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth' });               // mouth color (default = darker skin)
       var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' });
       L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });                                        // sclera (fixed)
-      var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes', slot: 'eyes' }); // iris colour
+      var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes', slot: 'eyes' }); // iris color
     } else {
       L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c'), slot: 'body' });
       L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd'), slot: 'belly' });
       L.push({ f: manifest.base.tuxFeet, c: col(ch, 'feet', '#ff9e2c'), slot: 'feet' });
-      L.push({ f: manifest.base.tuxBeak, c: col(ch, 'feet', '#ff9e2c') });
-      L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 5 });
+      // Beak gets its OWN color (mouthColor), defaulting to the feet color for
+      // the classic all-orange Tux until the player picks a separate beak color.
+      var beakC = (typeof ch.mouthColor === 'string' && /^#/.test(ch.mouthColor)) ? ch.mouthColor : col(ch, 'feet', '#ff9e2c');
+      L.push({ f: manifest.base.tuxBeak, c: beakC });
+      // Eyes: draw the sclera AND the iris (like the humanoid) so the penguin has
+      // real eyes, sat on the black head dome above the beak (no downward shift).
+      L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes', slot: 'eyes' });
+      var tIris = styleFile('eyes', ch.eyes, 'iris');
+      if (tIris) L.push({ f: tIris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes', slot: 'eyes' });
     }
     var accF = (ch.accessory | 0) ? styleFile('accessory', ch.accessory) : null;
-    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: tux ? undefined : 'accessory', slot: 'accessory' });
+    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: 'accessory', slot: 'accessory' });
     var hatF = (ch.hat | 0) ? styleFile('hat', ch.hat) : null;
-    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 2 : 0, key: tux ? undefined : 'hat', slot: 'hat' });
+    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 2 : 0, key: 'hat', slot: 'hat' });
 
     // ---- custom (user-painted) texture injection ----
     if (ch.tex) {
@@ -388,7 +403,7 @@ var Textures = (function () {
     var n = parseInt(h.slice(0, 6), 16);
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
-  // darken a hex colour by factor f (0..1); used to derive the mouth shade from skin.
+  // darken a hex color by factor f (0..1); used to derive the mouth shade from skin.
   function darken(hex, f) {
     var c = hexToRgb(hex);
     function h2(v) { v = Math.max(0, Math.min(255, Math.round(v * f))); return ('0' + v.toString(16)).slice(-2); }
@@ -419,7 +434,7 @@ var Textures = (function () {
   }
   // all transformable parts under grid (gx,gy), front-to-back (deduped by key).
   function partsAt(ch, gx, gy) {
-    if (!ready || ch.bodyType !== 'humanoid') return [];
+    if (!ready) return [];
     var tf = ch.tf || {}, L = layersFor(ch), hits = [];
     for (var i = L.length - 1; i >= 0; i--) {
       var ly = L[i]; if (!ly.key || !ly.f || !imgs[ly.f] || hits.indexOf(ly.key) >= 0) continue;
