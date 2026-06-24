@@ -131,6 +131,9 @@ var Store = (function () {
     });
   }
 
+  // Extract the {item} envelope returned by most marketplace mutations.
+  function it(d) { return d && d.item; }
+
   // Persist the session returned by register/login and surface the character.
   function adoptSession(username, data) {
     if (data && data.token) {
@@ -270,6 +273,36 @@ var Store = (function () {
     // server derives the slot from its bodyType/gender). Full look incl. transforms.
     setDefaultRemote: function (character) {
       return request('POST', '/api/admin/default', character, true);
+    },
+
+    // -------- marketplace REST client (always-free cosmetics) --------
+    // All calls pass auth when a token exists (so the server can fill in the
+    // "my rating / my report / my vouch" flags), and degrade to anonymous.
+    market: {
+      list: function (opts) {
+        opts = opts || {};
+        var qp = [];
+        if (opts.q) qp.push('q=' + encodeURIComponent(opts.q));
+        if (opts.sort) qp.push('sort=' + encodeURIComponent(opts.sort));
+        if (opts.kind) qp.push('kind=' + encodeURIComponent(opts.kind));
+        if (opts.slot) qp.push('slot=' + encodeURIComponent(opts.slot));
+        var q = qp.length ? ('?' + qp.join('&')) : '';
+        return request('GET', '/api/market/list' + q, null, true).then(function (d) { return (d && d.items) || []; });
+      },
+      get: function (id) {
+        return request('GET', '/api/market/item?id=' + encodeURIComponent(id), null, true).then(function (d) { return d && d.item; });
+      },
+      publish: function (item) { return request('POST', '/api/market/publish', item, true); },
+      rate: function (id, stars) { return request('POST', '/api/market/rate', { id: id, stars: stars }, true).then(it); },
+      comment: function (id, text, parentId) { return request('POST', '/api/market/comment', { id: id, text: text, parentId: parentId || '' }, true).then(it); },
+      report: function (id, reason) { return request('POST', '/api/market/report', { id: id, reason: reason || '' }, true).then(it); },
+      unreport: function (id) { return request('POST', '/api/market/unreport', { id: id }, true).then(it); },
+      vouch: function (id) { return request('POST', '/api/market/vouch', { id: id }, true).then(it); },
+      unvouch: function (id) { return request('POST', '/api/market/unvouch', { id: id }, true).then(it); },
+      download: function (id) { return request('POST', '/api/market/download', { id: id }, true).then(it); },
+      del: function (id) { return request('POST', '/api/market/delete', { id: id }, true); },
+      ban: function (id) { return request('POST', '/api/market/admin/ban', { id: id }, true).then(it); },
+      revoke: function (id) { return request('POST', '/api/market/admin/revoke', { id: id }, true).then(it); }
     },
 
     // GDPR: download all personal data we hold for this account.
