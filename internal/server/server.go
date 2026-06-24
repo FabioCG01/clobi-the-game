@@ -1,15 +1,13 @@
-// Package server is the HTTP/WebSocket transport for TUX SMASH ROYALE. It wires
-// together the account store, the rooms Hub, the REST account API, and a static
-// file handler for the web client, then serves them all from one net/http mux.
+// Package server is the HTTP transport for Clobi's Arena. It wires together the
+// account store, the REST account API, and a static file handler for the web
+// client, then serves them all from one net/http mux.
 //
-// The simulation and lobby logic live in the game and rooms packages; this layer
-// only handles transport concerns: routing, auth, the gorilla WebSocket upgrade,
-// and the per-connection read/write pumps.
+// The realtime PvP gamemodes and their WebSocket transport have been retired;
+// this layer now handles only HTTP concerns: routing, auth, the account/character
+// REST API, and serving the static creator + marketplace client.
 package server
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"mime"
@@ -22,38 +20,17 @@ import (
 
 	"clobi/internal/accounts"
 	"clobi/internal/protocol"
-	"clobi/internal/rooms"
-
-	"github.com/gorilla/websocket"
 )
-
-// WebSocket pump tuning.
-const (
-	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 1 << 16 // 64 KiB inbound frame cap
-)
-
-// upgrader turns an HTTP request into a WebSocket. Origin is permitted from any
-// host: this is a self-hosted hobby game with no cookies/sessions on the socket
-// (the WS itself carries no credentials), so CSRF is not a concern here.
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin:     func(r *http.Request) bool { return true },
-}
 
 // server bundles the long-lived dependencies shared across handlers.
 type server struct {
 	acc    *accounts.Store
-	hub    *rooms.Hub
 	webDir string
 }
 
 // Run builds the HTTP mux and serves until ListenAndServe returns. addr is the
 // listen address (e.g. ":1337"), webDir is the static client directory, dataDir
-// is where the accounts JSON file lives.
+// is where the bbolt database lives.
 func Run(addr, webDir, dataDir string) error {
 	adminUser := os.Getenv("ADMIN_USER")
 	if adminUser == "" {
@@ -71,7 +48,6 @@ func Run(addr, webDir, dataDir string) error {
 
 	s := &server{
 		acc:    acc,
-		hub:    rooms.NewHub(acc),
 		webDir: absWeb,
 	}
 
@@ -83,7 +59,6 @@ func Run(addr, webDir, dataDir string) error {
 	mux.HandleFunc("/api/admin/default", s.handleAdminDefault)
 	mux.HandleFunc("/api/account/export", s.handleExport)
 	mux.HandleFunc("/api/account", s.handleAccount)
-	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/", s.handleStatic)
 
 	srv := &http.Server{
@@ -293,95 +268,6 @@ func registerStatus(err error) int {
 	default:
 		return http.StatusInternalServerError
 	}
-}
-
-// ---- WebSocket ----
-
-// handleWS upgrades the connection, registers a Client with the Hub, and runs
-// the read and write pumps. The connection lifecycle is fully owned here.
-func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return // upgrader already wrote an error response
-	}
-
-	client := rooms.NewClient(s.hub, newConnID())
-	s.hub.Register(client)
-
-	// Write pump runs in its own goroutine; read pump runs here. When the read
-	// pump returns the connection is closing, so unregister and let the write
-	// pump observe the closed channel.
-	go s.writePump(conn, client)
-	s.readPump(conn, client)
-}
-
-// readPump reads frames off the socket, decodes each into an Envelope, and hands
-// it to the Hub until the client disconnects or sends garbage.
-func (s *server) readPump(conn *websocket.Conn, client *rooms.Client) {
-	defer func() {
-		s.hub.Unregister(client)
-		_ = conn.Close()
-	}()
-
-	conn.SetReadLimit(maxMessageSize)
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
-	})
-
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		var env protocol.Envelope
-		if err := json.Unmarshal(data, &env); err != nil {
-			continue // ignore malformed frames rather than dropping the client
-		}
-		s.hub.Handle(client, env)
-	}
-}
-
-// writePump drains the client's send channel onto the socket and emits periodic
-// pings. It exits when the channel is closed (by Hub.Unregister) or a write
-// fails.
-func (s *server) writePump(conn *websocket.Conn, client *rooms.Client) {
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		_ = conn.Close()
-	}()
-
-	for {
-		select {
-		case env, ok := <-client.Send:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if !ok {
-				// Hub closed the channel: tell the peer and stop.
-				_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(
-					websocket.CloseNormalClosure, ""))
-				return
-			}
-			if err := conn.WriteJSON(env); err != nil {
-				return
-			}
-		case <-ticker.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// newConnID returns a short random hex id for a connection/player.
-func newConnID() string {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		// Fall back to a time-derived id; uniqueness is best-effort for ids.
-		return "p" + hex.EncodeToString([]byte(time.Now().Format("150405.000000")))
-	}
-	return "p" + hex.EncodeToString(b)
 }
 
 // ---- static files ----

@@ -1,26 +1,22 @@
 // menu.js -- global Menu.
 //
-// The main menu of "Tux Smash Royale" (Clobi's Arena):
-//   - Kahoot-style nickname field (prefilled from Store).
-//   - [Play] and [Edit Character] buttons.
-//   - The public ROOM LIST: auto-refresh via LIST_ROOMS/ROOM_LIST. Each row shows
-//     the room name, its mode (Tux Smash / Distro Royale), players/max, and a lock
-//     icon when password-protected. Click a row to join (prompts for a password if
-//     it is locked).
-//   - Create Room: name + optional password + MODE selector + max players.
-//   - In-room lobby: every player's character preview (via Sprites.drawCharacter),
-//     a Ready toggle, a host-only Start, and Leave.
-//   - A SUBTLE top-right "Sign in" button opening the account modal (register /
-//     login / logout via Store) and a small language switcher.
-//   - Menu.showLanguagePopup(): the first-visit / on-demand 8-bit language chooser
-//     listing I18n.LANGS, English highlighted as the default.
+// The home screen of Clobi's Arena. The realtime PvP gamemodes (Tux Smash /
+// Distro Royale) are retired and chained up behind a dramatic W.I.P. placeholder;
+// the menu now leads to the creative tools:
+//   - [Create] the texture paint tool (draw your own grayscale cosmetics),
+//   - [Marketplace] the open-source, always-free cosmetic marketplace,
+//   - [Edit Character] the universal Tux / Humanoid editor.
+//   - A SUBTLE top-right corner: language switcher, sound toggle, About (lore),
+//     and a Sign in button (account modal: register / login / logout via Store).
+//   - Menu.showLanguagePopup(): the first-visit / on-demand language chooser.
 //
-// A respectful TRIBUTE to Clobi delivered through comedy. ZERO forced-signup nags.
-// All user-facing text flows through I18n.t(key, fallbackEn) and re-renders when the
-// language changes.
+// A respectful TRIBUTE to Clobi delivered through comedy: vim, Fisherman's Friend,
+// Linux, and a militant NO to Windows (the "Activate Windows" gag lives on as an
+// About-modal easter egg). ZERO forced-signup nags. All user-facing text flows
+// through I18n.t(key, fallbackEn) and re-renders when the language changes.
 //
 // Exposes exactly one global: window.Menu
-// Depends on globals: Protocol, Net, Store, Sprites, I18n, App, Game, Editor.
+// Depends on globals: Store, Sprites, I18n, App, Editor (and optionally Paint, Market).
 
 const Menu = (function () {
   'use strict';
@@ -28,20 +24,7 @@ const Menu = (function () {
   // ---- internal state ----------------------------------------------------
   let rootEl = null;          // #screen-menu
   let built = false;          // DOM built once
-  let listTimer = null;       // room-list auto-refresh interval
-  let netWired = false;       // Net handlers attached once
   let i18nWired = false;      // I18n.onChange attached once
-  let myPlayerId = null;      // our own player id (from HELLO_OK / App.playerId)
-
-  // view = 'browser' (menu + room list) | 'lobby' (inside a room)
-  let view = 'browser';
-
-  let rooms = [];             // last ROOM_LIST payload (array of RoomSummary)
-  let currentRoom = null;     // last ROOM_JOINED / ROOM_UPDATE RoomInfo
-  let lobbyCanvases = [];     // {canvas, character} pending redraw
-  let soloPending = false;    // auto-start a solo (vs-bots) match after CREATE_ROOM
-
-  const LIST_REFRESH_MS = 2500;
 
   // ---- i18n shortcut -----------------------------------------------------
   function t(key, fallback) {
@@ -84,10 +67,7 @@ const Menu = (function () {
     }
   }
 
-  function clear(node) {
-    while (node && node.firstChild) node.removeChild(node.firstChild);
-  }
-
+  function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
   function byId(id) { return document.getElementById(id); }
 
   // SVG icon factory (real vector icons, NO emoji). Returns an <svg> scaled to px.
@@ -118,58 +98,29 @@ const Menu = (function () {
 
   // Blocky, low-detail SVG glyphs to match the chunky 8-bit aesthetic.
   const ICONS = {
-    user: [
-      'M4 21 L4 18 Q4 14 12 14 Q20 14 20 18 L20 21',
-      'M8 7 A4 4 0 1 0 16 7 A4 4 0 1 0 8 7'
-    ],
-    lock: [
-      'M5 11 H19 V21 H5 Z',
-      'M8 11 V7 A4 4 0 0 1 16 7 V11'
-    ],
+    user: ['M4 21 L4 18 Q4 14 12 14 Q20 14 20 18 L20 21', 'M8 7 A4 4 0 1 0 16 7 A4 4 0 1 0 8 7'],
+    lock: ['M5 11 H19 V21 H5 Z', 'M8 11 V7 A4 4 0 0 1 16 7 V11'],
     plus: ['M12 5 V19', 'M5 12 H19'],
-    refresh: [
-      'M20 11 A8 8 0 1 0 18 17',
-      'M20 5 V11 H14'
-    ],
     check: ['M5 13 L10 18 L19 6'],
-    play: ['M7 5 L19 12 L7 19 Z'],
     x: ['M6 6 L18 18', 'M18 6 L6 18'],
-    arrowLeft: ['M14 6 L8 12 L14 18'],
-    crown: ['M4 8 L8 14 L12 6 L16 14 L20 8 L18 19 L6 19 Z'],
     logout: ['M14 4 H6 V20 H14', 'M10 12 H21', 'M17 8 L21 12 L17 16'],
-    globe: [
-      'M3 12 A9 9 0 1 0 21 12 A9 9 0 1 0 3 12',
-      'M3 12 H21',
-      'M12 3 C8 7 8 17 12 21',
-      'M12 3 C16 7 16 17 12 21'
-    ],
-    sword: ['M14 4 L20 4 L20 10', 'M20 4 L11 13', 'M4 16 L8 20', 'M9 15 L6 18'],
-    storm: ['M5 13 A6 6 0 1 1 17 11', 'M13 9 L9 15 H13 L9 21'],
-    bot: ['M6 9 H18 V19 H6 Z', 'M12 4 V9', 'M10.5 3.5 A1.5 1.5 0 1 0 13.5 3.5 A1.5 1.5 0 1 0 10.5 3.5', 'M9 13 H11', 'M13 13 H15', 'M3 12 H6', 'M18 12 H21'],
+    globe: ['M3 12 A9 9 0 1 0 21 12 A9 9 0 1 0 3 12', 'M3 12 H21', 'M12 3 C8 7 8 17 12 21', 'M12 3 C16 7 16 17 12 21'],
     code: ['M9 8 L5 12 L9 16', 'M15 8 L19 12 L15 16'],
-    help: ['M9 9 A3 3 0 1 1 13 11 C12 12 12 13 12 14', 'M12 17 H12.01'],
+    info: ['M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3', 'M12 11 V16', 'M12 7 H12.01'],
     volume: ['M4 9 H7 L11 5 V19 L7 15 H4 Z', 'M15 9 A4 4 0 0 1 15 15'],
-    mute: ['M4 9 H7 L11 5 V19 L7 15 H4 Z', 'M15 9 L20 15', 'M20 9 L15 15']
+    mute: ['M4 9 H7 L11 5 V19 L7 15 H4 Z', 'M15 9 L20 15', 'M20 9 L15 15'],
+    // creative tools
+    brush: ['M4 20 C7 20 8 18 10 16', 'M10 16 L18 8', 'M14 4 L20 10 L17 13 L11 7 Z'],
+    palette: ['M12 4 A8 8 0 1 0 13 20 C14 20 13.5 18 15 17 C16.5 16 18 17 18 15 A4 4 0 0 0 18 12 A8 8 0 0 0 12 4 Z', 'M8 11 H8.01', 'M12 8 H12.01', 'M16 11 H16.01'],
+    store: ['M4 9 L5 5 H19 L20 9', 'M4 9 H20 V20 H4 Z', 'M9 20 V14 H15 V20'],
+    chain: ['M8 9 A3 3 0 0 0 8 15 H10', 'M16 9 A3 3 0 0 1 16 15 H14', 'M9 12 H15'],
+    edit: ['M5 19 H9 L18 10 L14 6 L5 15 Z', 'M13 7 L17 11']
   };
-
-  // ---- mode helpers ------------------------------------------------------
-  const MODE_SMASH = 'smash';
-  const MODE_ROYALE = 'royale';
-
-  function modeLabel(mode) {
-    if (mode === MODE_ROYALE) return t('mode.royale', 'Distro Royale');
-    return t('mode.smash', 'Tux Smash');
-  }
-
-  function modeIcon(mode, size) {
-    return icon(mode === MODE_ROYALE ? 'storm' : 'sword', size || 12);
-  }
 
   // ---- screen build ------------------------------------------------------
   function ensureRoot() {
     rootEl = byId('screen-menu');
     if (!rootEl) {
-      // Defensive: index.html owns these containers, but never break if missing.
       rootEl = el('div', { id: 'screen-menu', class: 'screen' });
       document.body.appendChild(rootEl);
     }
@@ -177,37 +128,16 @@ const Menu = (function () {
   }
 
   function build() {
-    if (built) {
-      // A rebuild is requested (e.g. language change) -- recompute labels.
-      rebuildStaticText();
-      return;
-    }
+    if (built) { rebuildStaticText(); return; }
     ensureRoot();
     clear(rootEl);
 
-    // ---------- Top-right corner: language switcher + subtle sign-in ----------
-    const langBtn = el('button', {
-      id: 'menu-lang-btn',
-      class: 'corner-btn pixbtn-ghost',
-      type: 'button',
-      title: t('nav.language', 'Language'),
-      onclick: showLanguagePopup
-    }, [icon('globe', 13), el('span', { class: 'corner-lang-label', text: currentLangName() })]);
-
-    const signLabel = el('span', { class: 'signin-label', text: t('nav.signIn', 'Sign in') });
-    const signBtn = el('button', {
-      id: 'menu-signin-btn',
-      class: 'corner-btn signin-btn pixbtn-ghost',
-      type: 'button',
-      title: t('nav.signIn', 'Sign in'),
-      onclick: openAccountModal
-    }, [icon('user', 13), signLabel]);
-
-    const helpBtn = el('button', {
-      id: 'menu-help-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
-      title: t('nav.controls', 'Controls'),
-      onclick: function () { if (window.Sound) Sound.play('click'); showControls(); }
-    }, [icon('help', 13), el('span', { class: 'corner-lang-label', text: t('nav.controls', 'Controls') })]);
+    // ---------- Top-right corner: about + sound + language + sign-in ----------
+    const aboutBtn = el('button', {
+      id: 'menu-about-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
+      title: t('nav.about', 'About'),
+      onclick: function () { if (window.Sound) Sound.play('click'); showAbout(); }
+    }, [icon('info', 13), el('span', { class: 'corner-lang-label', text: t('nav.about', 'About') })]);
 
     const muteBtn = el('button', {
       id: 'menu-mute-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
@@ -215,211 +145,150 @@ const Menu = (function () {
       onclick: function () { if (window.Sound) Sound.toggleMute(); updateMuteBtn(); }
     }, [icon('volume', 13)]);
 
-    const corner = el('div', { class: 'menu-corner' }, [helpBtn, muteBtn, langBtn, signBtn]);
+    const langBtn = el('button', {
+      id: 'menu-lang-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
+      title: t('nav.language', 'Language'),
+      onclick: showLanguagePopup
+    }, [icon('globe', 13), el('span', { class: 'corner-lang-label', text: currentLangName() })]);
+
+    const signLabel = el('span', { class: 'signin-label', text: t('nav.signIn', 'Sign in') });
+    const signBtn = el('button', {
+      id: 'menu-signin-btn', class: 'corner-btn signin-btn pixbtn-ghost', type: 'button',
+      title: t('nav.signIn', 'Sign in'),
+      onclick: openAccountModal
+    }, [icon('user', 13), signLabel]);
+
+    const corner = el('div', { class: 'menu-corner' }, [aboutBtn, muteBtn, langBtn, signBtn]);
 
     // ---------- Title ----------
     const title = el('div', { class: 'menu-title' }, [
       el('h1', { class: 'title-main', text: 'TUX SMASH' }),
       el('h2', { class: 'title-sub', text: 'ROYALE' }),
-      el('p', { id: 'menu-tagline', class: 'title-tag', text: t('app.tagline', "Clobi's Arena.") })
+      el('p', { id: 'menu-tagline', class: 'title-tag', text: t('app.tagline', "Clobi's Arena — forge your fighter.") })
     ]);
 
-    // ---------- Identity row: nickname (Kahoot-style) ----------
+    // ---------- Identity: display name ----------
     const nickInput = el('input', {
-      id: 'menu-nickname',
-      class: 'kahoot-nick pixinput',
-      type: 'text',
-      maxlength: '16',
-      autocomplete: 'off',
-      spellcheck: 'false',
+      id: 'menu-nickname', class: 'kahoot-nick pixinput', type: 'text',
+      maxlength: '16', autocomplete: 'off', spellcheck: 'false',
       placeholder: t('menu.nicknamePh', 'Your penguin name'),
       oninput: onNicknameInput
     });
     const nickRow = el('div', { class: 'menu-nick-row' }, [
-      el('label', { id: 'menu-nick-label', class: 'nick-label', for: 'menu-nickname', text: t('menu.nickname', 'Nickname') }),
+      el('label', { id: 'menu-nick-label', class: 'nick-label', for: 'menu-nickname', text: t('menu.nickname', 'Display name') }),
       nickInput
     ]);
 
-    // ---------- Primary actions ----------
-    const playBtn = el('button', {
-      id: 'menu-play-btn',
-      class: 'pixbtn pixbtn-primary',
-      type: 'button',
-      onclick: onClickPlay
-    }, [icon('play', 16), el('span', { text: t('nav.play', 'Play') })]);
+    // ---------- Primary actions: Create / Marketplace / Edit ----------
+    const createBtn = el('button', {
+      id: 'menu-create-btn', class: 'pixbtn pixbtn-primary', type: 'button', onclick: onClickCreate
+    }, [icon('brush', 16), el('span', { text: t('nav.create', 'Create') })]);
+
+    const marketBtn = el('button', {
+      id: 'menu-market-btn', class: 'pixbtn', type: 'button', onclick: onClickMarketplace
+    }, [icon('store', 16), el('span', { text: t('nav.marketplace', 'Marketplace') })]);
 
     const editBtn = el('button', {
-      id: 'menu-edit-btn',
-      class: 'pixbtn',
-      type: 'button',
-      onclick: onClickEditCharacter
-    }, [icon('user', 16), el('span', { text: t('nav.editChar', 'Edit Character') })]);
+      id: 'menu-edit-btn', class: 'pixbtn', type: 'button', onclick: onClickEditCharacter
+    }, [icon('edit', 16), el('span', { text: t('nav.editChar', 'Edit Character') })]);
 
-    const singleBtn = el('button', {
-      id: 'menu-solo-btn',
-      class: 'pixbtn',
-      type: 'button',
-      onclick: onClickSinglePlayer
-    }, [icon('bot', 16), el('span', { text: t('nav.singlePlayer', 'Single Player') })]);
+    const actionRow = el('div', { class: 'menu-actions' }, [createBtn, marketBtn, editBtn]);
 
-    const actionRow = el('div', { class: 'menu-actions' }, [playBtn, singleBtn, editBtn]);
-
-    // ---------- Public room browser ----------
-    const refreshBtn = el('button', {
-      id: 'menu-refresh-btn',
-      class: 'pixbtn-ghost lobby-refresh',
-      type: 'button',
-      title: t('menu.refresh', 'Refresh'),
-      onclick: requestRooms
-    }, [icon('refresh', 14), el('span', { text: t('menu.refresh', 'Refresh') })]);
-
-    const createBtn = el('button', {
-      id: 'menu-create-btn',
-      class: 'pixbtn-ghost lobby-create',
-      type: 'button',
-      title: t('menu.createRoom', 'Create Room'),
-      onclick: openCreateRoomModal
-    }, [icon('plus', 14), el('span', { text: t('menu.createRoom', 'Create Room') })]);
-
-    const lobbyHead = el('div', { class: 'lobby-head' }, [
-      el('h3', { id: 'menu-rooms-title', class: 'lobby-title', text: t('menu.rooms', 'Rooms') }),
-      el('div', { class: 'lobby-head-btns' }, [refreshBtn, createBtn])
-    ]);
-
-    const roomListEl = el('div', { id: 'menu-room-list', class: 'room-list' });
-
-    const browserView = el('div', { id: 'menu-browser', class: 'menu-browser' }, [
-      nickRow,
-      actionRow,
-      el('div', { class: 'lobby-panel pixpanel' }, [lobbyHead, roomListEl])
-    ]);
-
-    // ---------- In-room lobby view (hidden until joined) ----------
-    const lobbyView = el('div', { id: 'menu-lobby', class: 'menu-lobby hidden' });
+    // ---------- Chained-up W.I.P. arena placeholder ----------
+    const wip = buildWipArena();
 
     // ---------- Footer tribute (comedy, respectful) ----------
     const footer = el('div', { id: 'menu-footer', class: 'menu-footer' }, footerNodes());
 
     rootEl.appendChild(corner);
-    rootEl.appendChild(el('div', { class: 'menu-inner' }, [
-      title, browserView, lobbyView, footer
-    ]));
+    rootEl.appendChild(el('div', { class: 'menu-inner' }, [title, nickRow, actionRow, wip, footer]));
 
     injectStyles();
     built = true;
   }
 
+  // The dramatic, chained-up arena: Tux Smash & Distro Royale are locked away.
+  function buildWipArena() {
+    const stamp = el('div', { class: 'wip-stamp', text: 'W.I.P.' });
+    const inner = el('div', { class: 'wip-inner' }, [
+      el('div', { class: 'wip-badge' }, [icon('lock', 26)]),
+      el('h3', { id: 'wip-title', class: 'wip-title', text: t('wip.title', 'The Arena') }),
+      stamp,
+      el('p', { id: 'wip-desc', class: 'wip-desc', text: t('wip.desc', 'Tux Smash & Distro Royale are chained up while Clobi forges something new. The belly-bashing returns soon™.') })
+    ]);
+    // Two crossing chains + a padlock, drawn in pure CSS over the panel.
+    return el('div', { class: 'wip-arena' }, [
+      el('div', { class: 'wip-chain wip-chain-a' }),
+      el('div', { class: 'wip-chain wip-chain-b' }),
+      inner
+    ]);
+  }
+
   function footerNodes() {
-    // A wink to Clobi: vim, Fisherman's Friend menthol, and a firm NO to Windows.
     const tribute = el('div', { class: 'footer-line' }, [
-      'In honor of Clobi -- vim, ',
+      'In honor of Clobi — vim, ',
       el('span', { class: 'accent-mint', text: "Fisherman's Friend" }),
       ', and a militant ',
       el('span', { class: 'accent-blue', text: 'NO' }),
       ' to Windows.'
     ]);
-    // Open-source indicator linking to the project repo.
     const oss = el('a', {
-      id: 'menu-oss',
-      class: 'menu-oss',
+      id: 'menu-oss', class: 'menu-oss',
       href: 'https://github.com/FabioCG01/clobi-the-game',
-      target: '_blank',
-      rel: 'noopener noreferrer',
-      title: 'Open source on GitHub'
+      target: '_blank', rel: 'noopener noreferrer', title: 'Open source on GitHub'
     }, [icon('code', 12), el('span', { text: t('footer.openSource', 'Open source on GitHub') })]);
-    // Always-reachable privacy notice (GDPR transparency).
     const privacy = el('a', {
-      id: 'menu-privacy', class: 'menu-oss', href: '#',
-      title: 'Privacy & your data',
+      id: 'menu-privacy', class: 'menu-oss', href: '#', title: 'Privacy & your data',
       onclick: function (e) { e.preventDefault(); openPrivacyModal(); }
     }, [el('span', { text: t('footer.privacy', 'Privacy & data') })]);
     return [tribute, el('div', { class: 'footer-links' }, [oss, privacy])];
   }
 
-  // Recompute all static (non-list) labels after a language switch.
+  // Recompute all static labels after a language switch.
   function rebuildStaticText() {
-    setText('menu-tagline', t('app.tagline', "Clobi's Arena."));
-    setText('menu-nick-label', t('menu.nickname', 'Nickname'));
+    setText('menu-tagline', t('app.tagline', "Clobi's Arena — forge your fighter."));
+    setText('menu-nick-label', t('menu.nickname', 'Display name'));
     setPlaceholder('menu-nickname', t('menu.nicknamePh', 'Your penguin name'));
-    setBtnLabel('menu-play-btn', t('nav.play', 'Play'));
+    setBtnLabel('menu-create-btn', t('nav.create', 'Create'));
+    setBtnLabel('menu-market-btn', t('nav.marketplace', 'Marketplace'));
     setBtnLabel('menu-edit-btn', t('nav.editChar', 'Edit Character'));
-    setBtnLabel('menu-refresh-btn', t('menu.refresh', 'Refresh'));
-    setBtnLabel('menu-create-btn', t('menu.createRoom', 'Create Room'));
-    setText('menu-rooms-title', t('menu.rooms', 'Rooms'));
+    setText('wip-title', t('wip.title', 'The Arena'));
+    setText('wip-desc', t('wip.desc', 'Tux Smash & Distro Royale are chained up while Clobi forges something new. The belly-bashing returns soon™.'));
 
-    const langLabel = rootEl && rootEl.querySelector('.corner-lang-label');
+    const langLabel = rootEl && rootEl.querySelector('#menu-lang-btn .corner-lang-label');
     if (langLabel) langLabel.textContent = currentLangName();
-    const langBtn = byId('menu-lang-btn');
-    if (langBtn) langBtn.title = t('nav.language', 'Language');
-
+    const aboutLabel = rootEl && rootEl.querySelector('#menu-about-btn .corner-lang-label');
+    if (aboutLabel) aboutLabel.textContent = t('nav.about', 'About');
     refreshAccountUi();
   }
 
-  function setText(id, text) {
-    const n = byId(id);
-    if (n) n.textContent = text;
-  }
-  function setPlaceholder(id, text) {
-    const n = byId(id);
-    if (n) n.setAttribute('placeholder', text);
-  }
-  // Buttons render [icon, <span>label]; update the span only.
+  function setText(id, text) { const n = byId(id); if (n) n.textContent = text; }
+  function setPlaceholder(id, text) { const n = byId(id); if (n) n.setAttribute('placeholder', text); }
   function setBtnLabel(id, text) {
-    const n = byId(id);
-    if (!n) return;
-    const span = n.querySelector('span');
-    if (span) { span.textContent = text; }
-    n.title = text;
+    const n = byId(id); if (!n) return;
+    const span = n.querySelector('span'); if (span) span.textContent = text; n.title = text;
   }
 
   // ---- public: show / hide ----------------------------------------------
   function show() {
     build();
-    wireNet();
     wireI18n();
     syncFromApp();
     refreshAccountUi();
-    resolveMyId();
 
-    if (currentRoom) {
-      view = 'lobby';
-      renderLobby();
-    } else {
-      view = 'browser';
-      showBrowser();
-    }
+    if (typeof App !== 'undefined' && App.showScreen) App.showScreen('menu');
+    else { rootEl.classList.add('active'); rootEl.style.display = ''; }
 
-    if (typeof App !== 'undefined' && App.showScreen) {
-      App.showScreen('menu');
-    } else {
-      rootEl.classList.add('active');
-      rootEl.style.display = '';
-    }
-
-    startRoomPolling();
     if (window.Sound) { window.Sound.unlock(); window.Sound.music('menu'); }
     updateMuteBtn();
   }
 
-  function hide() {
-    stopRoomPolling();
-  }
+  function hide() { /* nothing to tear down anymore */ }
 
-  function showBrowser() {
-    view = 'browser';
-    const b = byId('menu-browser');
-    const l = byId('menu-lobby');
-    if (b) b.classList.remove('hidden');
-    if (l) l.classList.add('hidden');
-    renderRoomList();
-  }
-
-  function showLobbyPane() {
-    view = 'lobby';
-    const b = byId('menu-browser');
-    const l = byId('menu-lobby');
-    if (b) b.classList.add('hidden');
-    if (l) l.classList.remove('hidden');
+  function wireI18n() {
+    if (i18nWired || typeof I18n === 'undefined' || !I18n.onChange) return;
+    I18n.onChange(function () { rebuildStaticText(); });
+    i18nWired = true;
   }
 
   // ---- App / Store sync --------------------------------------------------
@@ -428,728 +297,102 @@ const Menu = (function () {
     if (typeof Store !== 'undefined' && Store.getNickname) return Store.getNickname() || '';
     return '';
   }
-
   function setNickname(n) {
     n = (n || '').slice(0, 16);
-    if (typeof App !== 'undefined') {
-      try { App.nickname = n; } catch (e) { /* setter may be read-only */ }
-    } else if (typeof Store !== 'undefined' && Store.setNickname) {
-      Store.setNickname(n);
-    }
+    if (typeof App !== 'undefined') { try { App.nickname = n; } catch (e) { /* read-only */ } }
+    else if (typeof Store !== 'undefined' && Store.setNickname) Store.setNickname(n);
   }
+  function syncFromApp() { const input = byId('menu-nickname'); if (input) input.value = getNickname(); }
+  function onNicknameInput(e) { setNickname(e.target.value); }
 
-  function getCharacter() {
-    if (typeof App !== 'undefined' && App.character) return App.character;
-    if (typeof Store !== 'undefined' && Store.getCharacter) {
-      const c = Store.getCharacter();
-      if (c) return c;
-    }
-    if (typeof Sprites !== 'undefined' && Sprites.defaultCharacter) {
-      return Sprites.defaultCharacter();
-    }
-    return {};
-  }
-
-  function syncFromApp() {
-    const input = byId('menu-nickname');
-    if (input) input.value = getNickname();
-  }
-
-  function onNicknameInput(e) {
-    setNickname(e.target.value);
-  }
-
-  function resolveMyId() {
-    if (typeof App !== 'undefined' && App.playerId) {
-      myPlayerId = App.playerId;
-    }
-    return myPlayerId;
-  }
-
-  // ---- Net wiring --------------------------------------------------------
-  function wireNet() {
-    if (netWired || typeof Net === 'undefined' || typeof Protocol === 'undefined') return;
-
-    Net.on(Protocol.HELLO_OK, onHelloOk);
-    Net.on(Protocol.ROOM_LIST, onRoomList);
-    Net.on(Protocol.ROOM_JOINED, onRoomJoined);
-    Net.on(Protocol.ROOM_UPDATE, onRoomUpdate);
-    Net.on(Protocol.JOIN_DENIED, onJoinDenied);
-    Net.on(Protocol.GAME_START, onGameStart);
-    Net.on(Protocol.ERRORMSG, onServerError);
-
-    if (Net.onOpen) {
-      Net.onOpen(function () {
-        if (isMenuVisible()) requestRooms();
-      });
-    }
-
-    netWired = true;
-  }
-
-  function wireI18n() {
-    if (i18nWired || typeof I18n === 'undefined' || !I18n.onChange) return;
-    I18n.onChange(function () {
-      // Recompute every label currently on screen.
-      rebuildStaticText();
-      if (view === 'lobby' && currentRoom) renderLobby();
-      else renderRoomList();
-    });
-    i18nWired = true;
-  }
-
-  function isMenuVisible() {
-    return rootEl && (rootEl.classList.contains('active') ||
-      (rootEl.style.display !== 'none' && document.body.contains(rootEl)));
-  }
-
-  // ---- Room list polling -------------------------------------------------
-  function startRoomPolling() {
-    stopRoomPolling();
-    requestRooms();
-    listTimer = setInterval(function () {
-      if (view === 'browser' && isMenuVisible()) requestRooms();
-    }, LIST_REFRESH_MS);
-  }
-
-  function stopRoomPolling() {
-    if (listTimer) { clearInterval(listTimer); listTimer = null; }
-  }
-
-  function requestRooms() {
-    if (typeof Net === 'undefined' || !Net.send) return;
-    Net.send(Protocol.LIST_ROOMS, {});
-  }
-
-  // ---- Net handlers ------------------------------------------------------
-  function onHelloOk(payload) {
-    // The Go server sends HELLO_OK as a PlayerLobby {id,nickname,character,ready};
-    // accept either a {playerId} or a {id} field for the local player's id.
-    var pid = payload && (payload.playerId || payload.id);
-    if (pid) {
-      myPlayerId = pid;
-      if (typeof App !== 'undefined') {
-        try { App.playerId = pid; } catch (e) { /* read-only ok */ }
-      }
-    }
-  }
-
-  function onRoomList(payload) {
-    rooms = (payload && Array.isArray(payload.rooms)) ? payload.rooms : [];
-    if (view === 'browser') renderRoomList();
-  }
-
-  // ROOM_JOINED / ROOM_UPDATE carry a RoomInfo object directly as the payload.
-  function onRoomJoined(payload) {
-    currentRoom = normalizeRoomInfo(payload);
-    if (!currentRoom) return;
-    closeAnyModal();
-    // Single-player: we created a private practice room — auto-ready and start
-    // immediately so the match fills with CPU bots (no waiting in an empty lobby).
-    if (soloPending) {
-      soloPending = false;
-      if (typeof Net !== 'undefined' && Net.send) {
-        Net.send(Protocol.READY, { ready: true });
-        Net.send(Protocol.START_GAME, {});
-      }
-      return;
-    }
-    showLobbyPane();
-    renderLobby();
-  }
-
-  function onRoomUpdate(payload) {
-    const room = normalizeRoomInfo(payload);
-    if (!room) return;
-    // Only react if this update concerns the room we are in.
-    if (!currentRoom || room.id === currentRoom.id) {
-      currentRoom = room;
-      if (view === 'lobby') renderLobby();
-    }
-  }
-
-  // Some servers may wrap the room in {room:...}; tolerate both shapes.
-  function normalizeRoomInfo(payload) {
-    if (!payload) return null;
-    if (payload.id) return payload;
-    if (payload.room && payload.room.id) return payload.room;
-    return null;
-  }
-
-  function onJoinDenied(payload) {
-    const reason = (payload && (payload.reason || payload.message)) ||
-      t('account.error', 'Could not join room.');
-    toast(reason, 'danger');
-  }
-
-  function onServerError(payload) {
-    const msg = (payload && (payload.message || payload.error)) ||
-      t('account.error', 'Something went wrong.');
-    toast(msg, 'danger');
-  }
-
-  function onGameStart(payload) {
-    stopRoomPolling();
-    closeAnyModal();
-    resolveMyId();
-    const roomInfo = currentRoom || normalizeRoomInfo(payload) || {};
-    if (typeof Game !== 'undefined' && Game.start) {
-      Game.start(roomInfo);
-    }
-    if (typeof App !== 'undefined' && App.showScreen) {
-      App.showScreen('game');
-    }
-  }
-
-  // ---- Room list rendering ----------------------------------------------
-  function renderRoomList() {
-    const listEl = byId('menu-room-list');
-    if (!listEl) return;
-    clear(listEl);
-
-    if (!rooms || rooms.length === 0) {
-      listEl.appendChild(el('div', { class: 'room-empty' }, [
-        el('p', { text: t('menu.noRooms', 'No open rooms.') }),
-        el('p', { class: 'room-empty-sub', text: t('menu.createRoom', 'Create Room') })
-      ]));
-      return;
-    }
-
-    rooms.forEach(function (r) {
-      const full = (r.players >= r.maxPlayers);
-      const playing = (r.state === 'playing');
-      const joinable = !full && !playing;
-
-      const row = el('div', {
-        class: 'room-row' + (joinable ? '' : ' room-row-disabled'),
-        role: 'button',
-        tabindex: joinable ? '0' : '-1',
-        onclick: joinable ? function () { attemptJoin(r); } : null,
-        onkeydown: joinable ? function (e) {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); attemptJoin(r); }
-        } : null
-      });
-
-      const nameCell = el('div', { class: 'room-cell room-name' }, [
-        r.hasPassword
-          ? el('span', { class: 'room-lock', title: t('menu.locked', 'Locked') }, [icon('lock', 12)])
-          : null,
-        el('span', { class: 'room-name-text', text: r.name || 'Room' })
-      ]);
-
-      const modeCell = el('div', { class: 'room-cell room-mode' }, [
-        el('span', {
-          class: 'mode-tag mode-tag-' + (r.mode === MODE_ROYALE ? 'royale' : 'smash'),
-          title: modeLabel(r.mode)
-        }, [modeIcon(r.mode, 11), el('span', { class: 'mode-tag-text', text: modeLabel(r.mode) })])
-      ]);
-
-      const countCell = el('div', { class: 'room-cell room-count' }, [
-        el('span', {
-          class: full ? 'count-full' : 'count-ok',
-          text: r.players + '/' + r.maxPlayers
-        })
-      ]);
-
-      const stateCell = el('div', { class: 'room-cell room-state' }, [
-        playing
-          ? el('span', { class: 'tag tag-playing', text: t('game.alive', 'In match') })
-          : (full
-            ? el('span', { class: 'tag tag-full', text: t('menu.locked', 'Full') })
-            : el('span', { class: 'tag tag-open', text: t('menu.join', 'Join') }))
-      ]);
-
-      row.appendChild(nameCell);
-      row.appendChild(modeCell);
-      row.appendChild(countCell);
-      row.appendChild(stateCell);
-      listEl.appendChild(row);
-    });
-  }
-
-  function attemptJoin(r) {
-    if (typeof Net === 'undefined' || !Net.send) return;
-    if (r.hasPassword) {
-      openPasswordPrompt(r);
-    } else {
-      Net.send(Protocol.JOIN_ROOM, { roomId: r.id, password: '' });
-    }
-  }
-
-  // ---- In-room lobby rendering ------------------------------------------
-  function renderLobby() {
-    const lobby = byId('menu-lobby');
-    if (!lobby) return;
-    showLobbyPane();
-    clear(lobby);
-    lobbyCanvases = [];
-
-    const room = currentRoom;
-    if (!room) { showBrowser(); return; }
-
-    const players = room.players || [];
-    const myId = resolveMyId();
-    const me = players.filter(function (p) { return p.id === myId; })[0];
-    const isHost = isHostOf(room, myId);
-    const amReady = me ? !!me.ready : false;
-    const allReady = players.length > 0 &&
-      players.every(function (p) { return !!p.ready; });
-
-    // Header: leave + room name + lock + mode + count
-    const backBtn = el('button', {
-      class: 'pixbtn-ghost lobby-back',
-      type: 'button',
-      title: t('lobby.leave', 'Leave'),
-      onclick: leaveRoom
-    }, [icon('arrowLeft', 14), el('span', { text: t('lobby.leave', 'Leave') })]);
-
-    const head = el('div', { class: 'lobby-room-head' }, [
-      backBtn,
-      el('div', { class: 'lobby-room-title' }, [
-        room.hasPassword
-          ? el('span', { class: 'room-lock', title: t('menu.locked', 'Locked') }, [icon('lock', 12)])
-          : null,
-        el('span', { text: room.name || 'Room' })
-      ]),
-      el('div', { class: 'lobby-room-mode' }, [
-        modeIcon(room.mode, 12),
-        el('span', { text: modeLabel(room.mode) })
-      ]),
-      el('div', {
-        class: 'lobby-room-count',
-        text: players.length + '/' + (room.maxPlayers || '?')
-      })
-    ]);
-
-    // Players header + grid with character previews
-    const playersHead = el('div', { class: 'lobby-players-head' }, [
-      el('span', { text: t('lobby.players', 'Players') })
-    ]);
-
-    const grid = el('div', { class: 'lobby-player-grid' });
-    players.forEach(function (p) {
-      grid.appendChild(buildPlayerCard(p, room, myId));
-    });
-
-    // Controls: Ready toggle + (host) Start
-    const readyBtn = el('button', {
-      id: 'lobby-ready-btn',
-      class: 'pixbtn ' + (amReady ? 'pixbtn-ready-on' : 'pixbtn-primary pixbtn-ready-off'),
-      type: 'button',
-      onclick: function () { toggleReady(!amReady); }
-    }, [
-      icon('check', 16),
-      el('span', { text: amReady
-        ? t('lobby.readyCancel', 'Ready! (click to cancel)')
-        : t('lobby.readyUp', 'Ready up!') })
-    ]);
-
-    const controls = el('div', { class: 'lobby-controls' }, [readyBtn]);
-
-    if (isHost) {
-      const canStart = players.length >= 1 && allReady;
-      const startBtn = el('button', {
-        id: 'lobby-start-btn',
-        class: 'pixbtn pixbtn-primary' + (canStart ? '' : ' pixbtn-disabled'),
-        type: 'button',
-        disabled: canStart ? null : 'disabled',
-        onclick: canStart ? startGame : null
-      }, [icon('play', 16), el('span', { text: t('lobby.start', 'Start') })]);
-      controls.appendChild(startBtn);
-
-      if (!allReady) {
-        controls.appendChild(el('div', {
-          class: 'lobby-hint',
-          text: t('lobby.notReady', 'All players must be ready.')
-        }));
-      }
-    } else {
-      controls.appendChild(el('div', {
-        class: 'lobby-hint',
-        text: t('lobby.waitingHost', 'Waiting for the host to start...')
-      }));
-    }
-
-    lobby.appendChild(el('div', { class: 'lobby-card pixpanel' }, [
-      head,
-      playersHead,
-      el('div', { class: 'lobby-players-wrap' }, [grid]),
-      controls
-    ]));
-
-    drawLobbyCharacters();
-  }
-
-  function isHostOf(room, myId) {
-    if (!room || !myId) return false;
-    if (room.host) return room.host === myId;
-    // Fallback: first player is treated as host if the server omitted host.
-    const players = room.players || [];
-    return players.length > 0 && players[0].id === myId;
-  }
-
-  function buildPlayerCard(p, room, myId) {
-    const isMe = (p.id === myId);
-    const isHost = room.host
-      ? (room.host === p.id)
-      : (room.players && room.players[0] && room.players[0].id === p.id);
-
-    const canvas = el('canvas', {
-      class: 'lobby-char-canvas',
-      width: '72',
-      height: '84'
-    });
-    lobbyCanvases.push({ canvas: canvas, character: p.character });
-
-    const badges = el('div', { class: 'player-badges' }, [
-      isHost ? el('span', { class: 'badge badge-host', title: t('lobby.start', 'Host') }, [icon('crown', 12)]) : null,
-      p.ready
-        ? el('span', { class: 'badge badge-ready', title: t('lobby.ready', 'Ready') }, [icon('check', 12)])
-        : el('span', { class: 'badge badge-wait', title: t('lobby.notReady', 'Not ready') }, [icon('x', 12)])
-    ]);
-
-    return el('div', {
-      class: 'player-card' + (isMe ? ' player-card-me' : '') +
-        (p.ready ? ' player-card-ready' : '')
-    }, [
-      badges,
-      el('div', { class: 'player-canvas-wrap' }, [canvas]),
-      el('div', {
-        class: 'player-name' + (isMe ? ' player-name-me' : ''),
-        text: (p.nickname || 'Penguin')
-      })
-    ]);
-  }
-
-  function drawLobbyCharacters() {
-    if (typeof Sprites === 'undefined' || !Sprites.drawCharacter) return;
-    lobbyCanvases.forEach(function (entry) {
-      const cv = entry.canvas;
-      const ctx = cv.getContext('2d');
-      if (!ctx) return;
-      ctx.imageSmoothingEnabled = false;
-      ctx.clearRect(0, 0, cv.width, cv.height);
-      let character = entry.character;
-      if (!character && Sprites.defaultCharacter) character = Sprites.defaultCharacter();
-      try {
-        // Anchor at feet-center near the bottom of the small card.
-        Sprites.drawCharacter(ctx, character, cv.width / 2, cv.height - 8, 4, 1);
-      } catch (e) {
-        // Never let one bad character break the whole lobby.
-      }
-    });
-  }
-
-  // ---- Lobby actions -----------------------------------------------------
-  function toggleReady(ready) {
-    if (typeof Net === 'undefined' || !Net.send) return;
-    Net.send(Protocol.READY, { ready: !!ready });
-  }
-
-  function startGame() {
-    if (typeof Net === 'undefined' || !Net.send) return;
-    Net.send(Protocol.START_GAME, {});
-  }
-
-  function leaveRoom() {
-    if (typeof Net !== 'undefined' && Net.send) {
-      Net.send(Protocol.LEAVE_ROOM, {});
-    }
-    currentRoom = null;
-    showBrowser();
-    requestRooms();
-  }
-
-  // ---- Play button -------------------------------------------------------
-  function onClickPlay() {
+  // ---- primary actions ---------------------------------------------------
+  function onClickCreate() {
     if (window.Sound) Sound.play('click');
-    const nick = getNickname().trim();
-    if (!nick) {
-      const input = byId('menu-nickname');
-      if (input) {
-        input.focus();
-        input.classList.add('shake');
-        setTimeout(function () { input.classList.remove('shake'); }, 400);
-      }
-      toast(t('menu.nicknamePh', 'Pick a name first!'), 'warn');
-      return;
-    }
-    setNickname(nick);
-    // Re-announce identity so the server has the current nickname + character.
-    if (typeof Net !== 'undefined' && Net.send && typeof Protocol !== 'undefined') {
-      Net.send(Protocol.HELLO, { nickname: nick, character: getCharacter() });
-    }
-    // "Play" surfaces the public room browser (refresh + create are right there).
-    showBrowser();
-    requestRooms();
-    const panel = rootEl ? rootEl.querySelector('.lobby-panel') : null;
-    if (panel && panel.scrollIntoView) {
-      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (window.Paint && Paint.open) {
+      Paint.open();
+      if (typeof App !== 'undefined' && App.showScreen) App.showScreen('create');
+    } else {
+      toast(t('soon.create', 'The paint studio is warming up — coming soon!'), 'info');
     }
   }
 
-  // ---- Single Player / Practice vs bots ---------------------------------
-  function onClickSinglePlayer() {
+  function onClickMarketplace() {
     if (window.Sound) Sound.play('click');
-    const smash = el('button', {
-      class: 'pixbtn pixbtn-primary sp-mode', type: 'button',
-      onclick: function () { startSolo(MODE_SMASH); }
-    }, [modeIcon(MODE_SMASH, 18), el('span', { text: modeLabel(MODE_SMASH) })]);
-    const royale = el('button', {
-      class: 'pixbtn sp-mode', type: 'button',
-      onclick: function () { startSolo(MODE_ROYALE); }
-    }, [modeIcon(MODE_ROYALE, 18), el('span', { text: modeLabel(MODE_ROYALE) })]);
-    const body = [
-      el('p', { class: 'sp-hint', text: t('sp.hint', 'Practice against bots -- pick a mode:') }),
-      el('div', { class: 'sp-modes' }, [smash, royale])
-    ];
-    openModal(modalShell(t('nav.singlePlayer', 'Single Player'), body));
-  }
-
-  const SOLO_NAMES = ['Penguin', 'TuxFan', 'Rookie', 'Challenger', 'Hacker', 'Player'];
-  function randomName() {
-    return SOLO_NAMES[Math.floor(Math.random() * SOLO_NAMES.length)] +
-      Math.floor(Math.random() * 90 + 10);
-  }
-
-  function startSolo(mode) {
-    closeAnyModal();
-    let nick = getNickname().trim();
-    if (!nick) { nick = randomName(); setNickname(nick); }
-    if (typeof Net === 'undefined' || !Net.send || typeof Protocol === 'undefined') return;
-    // Announce identity, then create a private practice room and auto-start it.
-    Net.send(Protocol.HELLO, { nickname: nick, character: getCharacter() });
-    soloPending = true;
-    Net.send(Protocol.CREATE_ROOM, {
-      name: nick + "'s Practice",
-      password: '',
-      maxPlayers: (mode === MODE_ROYALE) ? 8 : 4,
-      mode: mode
-    });
+    if (window.Market && Market.open) {
+      Market.open();
+      if (typeof App !== 'undefined' && App.showScreen) App.showScreen('marketplace');
+    } else {
+      toast(t('soon.market', 'The marketplace is opening its doors — coming soon!'), 'info');
+    }
   }
 
   function onClickEditCharacter() {
     if (window.Sound) Sound.play('click');
-    if (typeof Editor !== 'undefined' && Editor.open) {
-      Editor.open();
-    }
-    if (typeof App !== 'undefined' && App.showScreen) {
-      App.showScreen('editor');
-    }
+    if (typeof Editor !== 'undefined' && Editor.open) Editor.open();
+    if (typeof App !== 'undefined' && App.showScreen) App.showScreen('editor');
   }
 
   // ---- Modal infrastructure ---------------------------------------------
-  // Modals live in #modal-root (outside the screen containers, always on top).
   function modalHost() {
     let host = byId('modal-root');
-    if (!host) {
-      host = el('div', { id: 'modal-root' });
-      document.body.appendChild(host);
-    }
+    if (!host) { host = el('div', { id: 'modal-root' }); document.body.appendChild(host); }
     return host;
   }
-
   function openModal(node) {
     closeAnyModal();
-    const overlay = el('div', {
-      class: 'modal-overlay',
-      onclick: function (e) { if (e.target === overlay) closeAnyModal(); }
-    }, [node]);
+    const overlay = el('div', { class: 'modal-overlay', onclick: function (e) { if (e.target === overlay) closeAnyModal(); } }, [node]);
     const onKey = function (e) { if (e.key === 'Escape') closeAnyModal(); };
     overlay._onKey = onKey;
     document.addEventListener('keydown', onKey);
     modalHost().appendChild(overlay);
     return overlay;
   }
-
   function closeAnyModal() {
-    const host = byId('modal-root');
-    if (!host) return;
+    const host = byId('modal-root'); if (!host) return;
     while (host.firstChild) {
       const ov = host.firstChild;
       if (ov._onKey) document.removeEventListener('keydown', ov._onKey);
       host.removeChild(ov);
     }
   }
-
   function modalShell(titleText, bodyNodes, opts) {
     opts = opts || {};
-    const closeBtn = el('button', {
-      class: 'modal-x',
-      type: 'button',
-      title: t('common.close', 'Close'),
-      onclick: closeAnyModal
-    }, [icon('x', 14)]);
-
+    const closeBtn = el('button', { class: 'modal-x', type: 'button', title: t('common.close', 'Close'), onclick: closeAnyModal }, [icon('x', 14)]);
     return el('div', { class: 'pixmodal' + (opts.wide ? ' pixmodal-wide' : '') }, [
-      el('div', { class: 'pixmodal-head' }, [
-        el('h3', { class: 'pixmodal-title', text: titleText }),
-        closeBtn
-      ]),
+      el('div', { class: 'pixmodal-head' }, [el('h3', { class: 'pixmodal-title', text: titleText }), closeBtn]),
       el('div', { class: 'pixmodal-body' }, bodyNodes)
     ]);
   }
 
-  // ---- Create-room modal -------------------------------------------------
-  function openCreateRoomModal() {
-    const nameInput = el('input', {
-      class: 'pixinput', type: 'text', maxlength: '24',
-      autocomplete: 'off', spellcheck: 'false',
-      placeholder: t('menu.roomName', 'Room name')
-    });
-    const passInput = el('input', {
-      class: 'pixinput', type: 'password', maxlength: '32',
-      autocomplete: 'new-password',
-      placeholder: t('menu.passwordOpt', '(optional)')
-    });
-
-    // ---- Mode selector: two big pickable cards ----
-    let chosenMode = MODE_SMASH;
-    const modeDesc = el('div', { class: 'mode-desc' });
-
-    function makeModeCard(mode, titleKey, titleEn, descKey, descEn) {
-      const card = el('button', {
-        type: 'button',
-        class: 'mode-card' + (mode === chosenMode ? ' mode-card-on' : ''),
-        dataset: { mode: mode },
-        onclick: function () { pickMode(mode); }
-      }, [
-        el('div', { class: 'mode-card-icon' }, [modeIcon(mode, 22)]),
-        el('div', { class: 'mode-card-name', text: t(titleKey, titleEn) })
-      ]);
-      return card;
-    }
-
-    const smashCard = makeModeCard(MODE_SMASH, 'mode.smash', 'Tux Smash');
-    const royaleCard = makeModeCard(MODE_ROYALE, 'mode.royale', 'Distro Royale');
-    const modeRow = el('div', { class: 'mode-row' }, [smashCard, royaleCard]);
-
-    // Max-players options depend on the mode (smash: 2-4, royale: up to 16).
-    const maxSelect = el('select', { class: 'pixinput pixselect' });
-
-    function pickMode(mode) {
-      chosenMode = mode;
-      smashCard.classList.toggle('mode-card-on', mode === MODE_SMASH);
-      royaleCard.classList.toggle('mode-card-on', mode === MODE_ROYALE);
-      modeDesc.textContent = (mode === MODE_ROYALE)
-        ? t('mode.royaleDesc', 'Shrinking Menthol Zone, BSOD storm outside. Up to 16.')
-        : t('mode.smashDesc', 'Shove rivals off the platform. 2 to 4 players.');
-      populateMax(mode);
-    }
-
-    function populateMax(mode) {
-      clear(maxSelect);
-      const opts = (mode === MODE_ROYALE) ? [2, 4, 6, 8, 12, 16] : [2, 3, 4];
-      const dflt = (mode === MODE_ROYALE) ? 8 : 4;
-      opts.forEach(function (n) {
-        maxSelect.appendChild(el('option', {
-          value: String(n),
-          text: n + ' ' + t('lobby.players', 'players')
-        }));
-      });
-      maxSelect.value = String(dflt);
-    }
-
-    pickMode(MODE_SMASH);
-
-    const errLine = el('div', { class: 'form-err', text: '' });
-
-    const submit = function () {
-      const name = nameInput.value.trim();
-      if (!name) {
-        errLine.textContent = t('menu.roomName', 'Give your room a name.');
-        nameInput.focus();
-        return;
+  // ---- About / lore modal (with the Activate Windows easter egg) ---------
+  function showAbout() {
+    const p = function (txt) { return el('p', { class: 'about-p', text: txt }); };
+    const eggBtn = el('button', {
+      class: 'pixbtn-ghost about-egg', type: 'button', title: 'Do NOT press',
+      onclick: function () {
+        closeAnyModal();
+        if (window.Gag && Gag.activate) { try { Gag.activate(10000); } catch (e) { /* ignore */ } }
+        else toast(t('about.eggFail', 'Freedom prevails. No Windows here.'), 'info');
       }
-      const maxPlayers = parseInt(maxSelect.value, 10) ||
-        (chosenMode === MODE_ROYALE ? 8 : 4);
-      if (typeof Net !== 'undefined' && Net.send) {
-        Net.send(Protocol.CREATE_ROOM, {
-          name: name,
-          password: passInput.value || '',
-          maxPlayers: maxPlayers,
-          mode: chosenMode
-        });
-      }
-      // The server replies with ROOM_JOINED, which switches us into the lobby.
-    };
+    }, [el('span', { text: t('about.egg', 'Activate Windows') })]);
 
     const body = [
-      formRow(t('menu.roomName', 'Room name'), nameInput),
-      formRow(t('menu.mode', 'Mode'), el('div', null, [modeRow, modeDesc])),
-      formRow(t('menu.maxPlayers', 'Max players'), maxSelect),
-      formRow(t('menu.password', 'Password'), passInput, t('menu.passwordOpt', 'Leave blank for a public room.')),
-      errLine,
-      el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
-          [el('span', { text: t('common.cancel', 'Cancel') })]),
-        el('button', { class: 'pixbtn pixbtn-primary', type: 'button', onclick: submit },
-          [icon('plus', 14), el('span', { text: t('common.create', 'Create') })])
+      p(t('about.l1', 'Clobi taught a generation Linux, open source, vim, and LibreOffice — fuelled by Fisherman\'s Friend menthol lozenges and a militant distaste for Microsoft.')),
+      p(t('about.l2', 'This is his arena: build penguins and people, paint your own cosmetics, and share them in an always-free, open-source marketplace. The brawling modes are chained up for now — but the workshop is wide open.')),
+      el('div', { class: 'about-egg-wrap' }, [
+        el('span', { class: 'about-egg-lead', text: t('about.eggLead', 'Whatever you do, do not press this:') }),
+        eggBtn
       ])
     ];
-
-    openModal(modalShell(t('menu.createRoom', 'Create Room'), body));
-    nameInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    });
-    passInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    });
-    setTimeout(function () { nameInput.focus(); }, 30);
-  }
-
-  // ---- Password prompt for locked rooms ---------------------------------
-  function openPasswordPrompt(room) {
-    const passInput = el('input', {
-      class: 'pixinput', type: 'password', maxlength: '32',
-      autocomplete: 'off', placeholder: t('menu.password', 'Password')
-    });
-    const errLine = el('div', { class: 'form-err', text: '' });
-
-    const submit = function () {
-      const pw = passInput.value;
-      if (!pw) {
-        errLine.textContent = t('menu.password', 'Enter the password.');
-        passInput.focus();
-        return;
-      }
-      if (typeof Net !== 'undefined' && Net.send) {
-        Net.send(Protocol.JOIN_ROOM, { roomId: room.id, password: pw });
-      }
-      closeAnyModal();
-    };
-
-    const body = [
-      el('p', { class: 'modal-lead' }, [
-        icon('lock', 13),
-        el('span', { text: ' "' + (room.name || 'Room') + '"' })
-      ]),
-      formRow(t('menu.password', 'Password'), passInput),
-      errLine,
-      el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
-          [el('span', { text: t('common.cancel', 'Cancel') })]),
-        el('button', { class: 'pixbtn pixbtn-primary', type: 'button', onclick: submit },
-          [el('span', { text: t('menu.join', 'Join') })])
-      ])
-    ];
-
-    openModal(modalShell(t('menu.locked', 'Locked'), body));
-    passInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    });
-    setTimeout(function () { passInput.focus(); }, 30);
+    openModal(modalShell(t('nav.about', 'About Clobi'), body, { wide: true }));
   }
 
   // ---- Account modal (register / login / logout) ------------------------
-  let accountTab = 'login'; // 'login' | 'register'
+  let accountTab = 'login';
 
   function openAccountModal() {
-    if (typeof Store !== 'undefined' && Store.isLoggedIn && Store.isLoggedIn()) {
-      openAccountLoggedIn();
-    } else {
-      openAccountAuth();
-    }
+    if (typeof Store !== 'undefined' && Store.isLoggedIn && Store.isLoggedIn()) openAccountLoggedIn();
+    else openAccountAuth();
   }
 
   function openAccountLoggedIn() {
@@ -1184,67 +427,49 @@ const Menu = (function () {
       ]),
       el('p', { class: 'modal-lead', text: t('account.cloudHint', 'Your character syncs to your account.') }),
       el('div', { class: 'gdpr-row' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: doExport },
-          [el('span', { text: t('account.export', 'Export my data') })]),
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: openPrivacyModal },
-          [el('span', { text: t('privacy.link', 'Privacy & data') })])
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: doExport }, [el('span', { text: t('account.export', 'Export my data') })]),
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: openPrivacyModal }, [el('span', { text: t('privacy.link', 'Privacy & data') })])
       ]),
       el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
-          [el('span', { text: t('common.close', 'Close') })]),
-        el('button', { class: 'pixbtn pixbtn-danger', type: 'button', onclick: doDelete },
-          [el('span', { text: t('account.delete', 'Delete account') })]),
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal }, [el('span', { text: t('common.close', 'Close') })]),
+        el('button', { class: 'pixbtn pixbtn-danger', type: 'button', onclick: doDelete }, [el('span', { text: t('account.delete', 'Delete account') })]),
         el('button', {
           class: 'pixbtn pixbtn-primary', type: 'button',
-          onclick: function () {
-            if (Store.logout) Store.logout();
-            refreshAccountUi();
-            closeAnyModal();
-          }
+          onclick: function () { if (Store.logout) Store.logout(); refreshAccountUi(); closeAnyModal(); }
         }, [icon('logout', 14), el('span', { text: t('account.logout', 'Log out') })])
       ])
     ];
     openModal(modalShell(t('account.signIn', 'Account'), body));
   }
 
-  // Privacy & data notice (GDPR transparency). Reachable from the footer, the
-  // account modal, and the register consent line.
+  // Privacy & data notice (GDPR transparency).
   function openPrivacyModal() {
     const head = function (txt) { return el('div', { class: 'privacy-h', text: txt }); };
     const para = function (txt) { return el('p', { class: 'privacy-p', text: txt }); };
     const P = el('div', { class: 'privacy-body' }, [
-      para(t('privacy.intro', 'Playing is fully anonymous — an account is optional and only saves your penguin across devices. Here is exactly what that involves.')),
+      para(t('privacy.intro', 'Playing is fully anonymous — an account is optional and only saves your penguin and your published cosmetics across devices. Here is exactly what that involves.')),
       head(t('privacy.collectH', 'What we store')),
-      para(t('privacy.collect', 'Only the username you choose, your password as a one-way bcrypt hash (never in plaintext), and your character configuration. No email, no real name, no IP logs, no analytics, no tracking.')),
+      para(t('privacy.collect', 'Only the username you choose, your password as a one-way bcrypt hash (never in plaintext), your character configuration, and any textures/characters you publish. No email, no real name, no IP logs, no analytics, no tracking.')),
       head(t('privacy.whyH', 'Why & legal basis')),
-      para(t('privacy.why', 'Solely to provide the account feature you ask for: saving and syncing your penguin. Legal basis: your consent. We never share your data with third parties.')),
+      para(t('privacy.why', 'Solely to provide the features you ask for: saving your penguin and crediting your marketplace creations. Legal basis: your consent. We never share your data with third parties.')),
       head(t('privacy.storeH', 'Where & how long')),
-      para(t('privacy.store', 'In an embedded database on the game server, kept until you delete your account. Local storage / cookies are used only for functional things (nickname, session, settings) — never for tracking.')),
+      para(t('privacy.store', 'In an embedded database on the game server, kept until you delete your account. Local storage / cookies are used only for functional things (name, session, settings) — never for tracking.')),
       head(t('privacy.rightsH', 'Your rights (GDPR)')),
-      para(t('privacy.rights', 'Access & portability: download everything via "Export my data". Erasure: "Delete account" wipes it all immediately. Rectification: change your nickname and character anytime in the editor.')),
+      para(t('privacy.rights', 'Access & portability: download everything via "Export my data". Erasure: "Delete account" wipes it all immediately. Rectification: change your name and character anytime in the editor.')),
       head(t('privacy.contactH', 'Data controller')),
       para(t('privacy.contact', 'Contact: info@deltalux.lu'))
     ]);
     openModal(modalShell(t('privacy.title', 'Privacy & your data'), [
       P,
       el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn pixbtn-primary', type: 'button', onclick: closeAnyModal },
-          [el('span', { text: t('common.close', 'Close') })])
+        el('button', { class: 'pixbtn pixbtn-primary', type: 'button', onclick: closeAnyModal }, [el('span', { text: t('common.close', 'Close') })])
       ])
     ]));
   }
 
   function openAccountAuth() {
-    const userInput = el('input', {
-      class: 'pixinput', type: 'text', maxlength: '24',
-      autocomplete: 'username', spellcheck: 'false',
-      placeholder: t('account.username', 'username')
-    });
-    const passInput = el('input', {
-      class: 'pixinput', type: 'password', maxlength: '64',
-      autocomplete: 'current-password',
-      placeholder: t('account.password', 'password')
-    });
+    const userInput = el('input', { class: 'pixinput', type: 'text', maxlength: '24', autocomplete: 'username', spellcheck: 'false', placeholder: t('account.username', 'username') });
+    const passInput = el('input', { class: 'pixinput', type: 'password', maxlength: '64', autocomplete: 'current-password', placeholder: t('account.password', 'password') });
     const errLine = el('div', { class: 'form-err', text: '' });
 
     const consentCheck = el('input', { type: 'checkbox', class: 'consent-check' });
@@ -1252,100 +477,56 @@ const Menu = (function () {
       consentCheck,
       el('span', { class: 'consent-text' }, [
         document.createTextNode(t('account.consent', 'I agree to my username, hashed password and character being stored. ')),
-        el('a', {
-          class: 'link', href: '#',
-          onclick: function (e) { e.preventDefault(); openPrivacyModal(); }
-        }, [el('span', { text: t('privacy.link', 'Privacy & data') })])
+        el('a', { class: 'link', href: '#', onclick: function (e) { e.preventDefault(); openPrivacyModal(); } }, [el('span', { text: t('privacy.link', 'Privacy & data') })])
       ])
     ]);
 
     function makeTabBtn(id, labelKey, labelEn) {
       return el('button', {
-        class: 'tab-btn' + (accountTab === id ? ' tab-btn-active' : ''),
-        type: 'button',
-        dataset: { tab: id },
+        class: 'tab-btn' + (accountTab === id ? ' tab-btn-active' : ''), type: 'button', dataset: { tab: id },
         onclick: function () { accountTab = id; rerender(); }
       }, [el('span', { text: t(labelKey, labelEn) })]);
     }
 
-    const tabs = el('div', { class: 'tab-row' }, [
-      makeTabBtn('login', 'account.login', 'Log in'),
-      makeTabBtn('register', 'account.register', 'Register')
-    ]);
-
-    const submitBtn = el('button', { class: 'pixbtn pixbtn-primary', type: 'button' },
-      [el('span', { text: t('account.login', 'Log in') })]);
+    const tabs = el('div', { class: 'tab-row' }, [makeTabBtn('login', 'account.login', 'Log in'), makeTabBtn('register', 'account.register', 'Register')]);
+    const submitBtn = el('button', { class: 'pixbtn pixbtn-primary', type: 'button' }, [el('span', { text: t('account.login', 'Log in') })]);
 
     function setBusy(on) {
       submitBtn.disabled = on ? 'disabled' : null;
-      if (on) submitBtn.classList.add('pixbtn-disabled');
-      else submitBtn.classList.remove('pixbtn-disabled');
+      if (on) submitBtn.classList.add('pixbtn-disabled'); else submitBtn.classList.remove('pixbtn-disabled');
     }
 
     function doSubmit() {
       errLine.textContent = '';
-      const u = userInput.value.trim();
-      const p = passInput.value;
-      if (!u || !p) {
-        errLine.textContent = t('account.error', 'Username and password required.');
-        return;
-      }
-      if (accountTab === 'register' && !consentCheck.checked) {
-        errLine.textContent = t('account.mustConsent', 'Please agree to the data notice to register.');
-        return;
-      }
-      if (typeof Store === 'undefined') {
-        errLine.textContent = t('account.error', 'Accounts unavailable.');
-        return;
-      }
+      const u = userInput.value.trim(); const p = passInput.value;
+      if (!u || !p) { errLine.textContent = t('account.error', 'Username and password required.'); return; }
+      if (accountTab === 'register' && !consentCheck.checked) { errLine.textContent = t('account.mustConsent', 'Please agree to the data notice to register.'); return; }
+      if (typeof Store === 'undefined') { errLine.textContent = t('account.error', 'Accounts unavailable.'); return; }
       const action = (accountTab === 'register') ? Store.register : Store.login;
-      if (typeof action !== 'function') {
-        errLine.textContent = t('account.error', 'Accounts unavailable.');
-        return;
-      }
-
+      if (typeof action !== 'function') { errLine.textContent = t('account.error', 'Accounts unavailable.'); return; }
       setBusy(true);
       Promise.resolve(action.call(Store, u, p))
-        .then(function (res) {
-          syncCharacterFromStore(res);
-          refreshAccountUi();
-          closeAnyModal();
-        })
-        .catch(function (err) {
-          setBusy(false);
-          errLine.textContent = humanizeAuthError(err);
-        });
+        .then(function (res) { syncCharacterFromStore(res); refreshAccountUi(); closeAnyModal(); })
+        .catch(function (err) { setBusy(false); errLine.textContent = humanizeAuthError(err); });
     }
-
     submitBtn.addEventListener('click', doSubmit);
 
     const switchHint = el('div', { class: 'auth-hint' });
-
     function rerender() {
       const tabBtns = tabs.querySelectorAll('.tab-btn');
       tabBtns[0].classList.toggle('tab-btn-active', accountTab === 'login');
       tabBtns[1].classList.toggle('tab-btn-active', accountTab === 'register');
-      const span = submitBtn.querySelector('span');
-      span.textContent = accountTab === 'login'
-        ? t('account.login', 'Log in')
-        : t('account.register', 'Register');
+      submitBtn.querySelector('span').textContent = accountTab === 'login' ? t('account.login', 'Log in') : t('account.register', 'Register');
       clear(switchHint);
       if (accountTab === 'login') {
         switchHint.appendChild(document.createTextNode(t('account.signUp', 'Need an account?') + ' '));
-        switchHint.appendChild(el('a', {
-          class: 'link', href: '#',
-          onclick: function (e) { e.preventDefault(); accountTab = 'register'; rerender(); }
-        }, [el('span', { text: t('account.register', 'Register') })]));
+        switchHint.appendChild(el('a', { class: 'link', href: '#', onclick: function (e) { e.preventDefault(); accountTab = 'register'; rerender(); } }, [el('span', { text: t('account.register', 'Register') })]));
       } else {
         switchHint.appendChild(document.createTextNode(t('account.signIn', 'Have an account?') + ' '));
-        switchHint.appendChild(el('a', {
-          class: 'link', href: '#',
-          onclick: function (e) { e.preventDefault(); accountTab = 'login'; rerender(); }
-        }, [el('span', { text: t('account.login', 'Log in') })]));
+        switchHint.appendChild(el('a', { class: 'link', href: '#', onclick: function (e) { e.preventDefault(); accountTab = 'login'; rerender(); } }, [el('span', { text: t('account.login', 'Log in') })]));
       }
       consentRow.style.display = (accountTab === 'register') ? 'flex' : 'none';
-      errLine.textContent = '';
-      setBusy(false);
+      errLine.textContent = ''; setBusy(false);
     }
 
     const enterToSubmit = function (e) { if (e.key === 'Enter') { e.preventDefault(); doSubmit(); } };
@@ -1354,19 +535,16 @@ const Menu = (function () {
 
     const body = [
       tabs,
-      el('p', { class: 'account-lead', text: t('account.cloudHint', 'Optional. Sign in to sync your penguin across devices.') }),
+      el('p', { class: 'account-lead', text: t('account.cloudHint', 'Optional. Sign in to sync your penguin and credit your creations.') }),
       formRow(t('account.username', 'Username'), userInput),
       formRow(t('account.password', 'Password'), passInput),
-      consentRow,
-      errLine,
+      consentRow, errLine,
       el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal },
-          [el('span', { text: t('common.cancel', 'Cancel') })]),
+        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal }, [el('span', { text: t('common.cancel', 'Cancel') })]),
         submitBtn
       ]),
       switchHint
     ];
-
     openModal(modalShell(t('account.signIn', 'Account'), body));
     rerender();
     setTimeout(function () { userInput.focus(); }, 30);
@@ -1375,127 +553,62 @@ const Menu = (function () {
   function syncCharacterFromStore(res) {
     let character = null;
     if (res && res.character) character = res.character;
+    else if (res && res.bodyType) character = res; // store.register/login resolve with the character
     else if (typeof Store !== 'undefined' && Store.getCharacter) character = Store.getCharacter();
-    if (character) {
-      if (typeof App !== 'undefined' && App.updateCharacter) {
-        App.updateCharacter(character);
-      } else if (typeof App !== 'undefined') {
-        try { App.character = character; } catch (e) { /* ignore */ }
-      }
-    }
-    // Re-announce identity so the server reflects the account's penguin.
-    if (typeof Net !== 'undefined' && Net.send && typeof Protocol !== 'undefined') {
-      Net.send(Protocol.HELLO, { nickname: getNickname(), character: character || getCharacter() });
+    if (character && typeof App !== 'undefined') {
+      if (App.updateCharacter) App.updateCharacter(character);
+      else { try { App.character = character; } catch (e) { /* ignore */ } }
     }
   }
 
   function humanizeAuthError(err) {
     let msg = '';
-    if (err) {
-      if (typeof err === 'string') msg = err;
-      else if (err.error) msg = err.error;
-      else if (err.message) msg = err.message;
-    }
+    if (err) { if (typeof err === 'string') msg = err; else if (err.error) msg = err.error; else if (err.message) msg = err.message; }
     if (!msg) msg = t('account.error', 'Something went wrong.');
     return msg;
   }
 
   // ---- Account UI (top-right button) ------------------------------------
   function refreshAccountUi() {
-    const btn = byId('menu-signin-btn');
-    if (!btn) return;
+    const btn = byId('menu-signin-btn'); if (!btn) return;
     const label = btn.querySelector('.signin-label');
     const loggedIn = (typeof Store !== 'undefined' && Store.isLoggedIn && Store.isLoggedIn());
     if (loggedIn) {
       const name = (Store.getUsername && Store.getUsername()) || t('nav.signIn', 'Account');
       if (label) label.textContent = name;
-      btn.classList.add('signed-in');
-      btn.title = name;
+      btn.classList.add('signed-in'); btn.title = name;
     } else {
       if (label) label.textContent = t('nav.signIn', 'Sign in');
-      btn.classList.remove('signed-in');
-      btn.title = t('nav.signIn', 'Sign in');
+      btn.classList.remove('signed-in'); btn.title = t('nav.signIn', 'Sign in');
     }
   }
 
   // ---- Language switcher / first-visit popup -----------------------------
-  function currentLangCode() {
-    if (typeof I18n !== 'undefined' && I18n.get) return I18n.get();
-    return 'en';
-  }
-
+  function currentLangCode() { if (typeof I18n !== 'undefined' && I18n.get) return I18n.get(); return 'en'; }
   function currentLangName() {
     const code = currentLangCode();
     const langs = (typeof I18n !== 'undefined' && I18n.LANGS) ? I18n.LANGS : [];
-    for (let i = 0; i < langs.length; i++) {
-      if (langs[i].code === code) return langs[i].name;
-    }
+    for (let i = 0; i < langs.length; i++) if (langs[i].code === code) return langs[i].name;
     return code.toUpperCase();
   }
 
   function updateMuteBtn() {
-    var b = byId('menu-mute-btn');
-    if (!b) return;
+    var b = byId('menu-mute-btn'); if (!b) return;
     var m = window.Sound && Sound.isMuted && Sound.isMuted();
-    clear(b);
-    b.appendChild(icon(m ? 'mute' : 'volume', 13));
-  }
-
-  // Controls + vim reference modal.
-  function showControls() {
-    function row(k, v) {
-      return el('div', { class: 'ctrl-row' }, [
-        el('span', { class: 'ctrl-k', text: k }),
-        el('span', { class: 'ctrl-v', text: v })
-      ]);
-    }
-    var kb = el('div', { class: 'ctrl-sec' }, [
-      el('h4', { class: 'ctrl-h', text: t('controls.keyboard', 'Keyboard') }),
-      row('A / D  </>', t('controls.move', 'Move')),
-      row('W / Space / Up', t('controls.jump', 'Jump (press twice = double jump)')),
-      row('J', t('controls.attack', 'Attack (belly-bash)')),
-      row('K', t('controls.throw', 'Throw a LibreOffice frisbee')),
-      row('Shift', t('controls.dash', 'Dash')),
-      row('S / Down', t('controls.fastfall', 'Fast-fall')),
-      row('1 / 2 / 3', t('controls.vimKeys', 'vim specials (instant, no typing)')),
-      row('/', t('controls.vimLine', 'vim command line (type a command)'))
-    ]);
-    var vim = el('div', { class: 'ctrl-sec' }, [
-      el('h4', { class: 'ctrl-h', text: t('controls.vimTitle', 'vim specials') }),
-      row(':wq  (1)', t('controls.wq', 'Blink-teleport a short hop to escape danger')),
-      row('dd  (2)', t('controls.dd', 'Delete nearby frisbees + a brief shield')),
-      row('sudo  (3)', t('controls.sudo', 'Screen-shaking AoE blast (needs the meter)'))
-    ]);
-    var goal = el('div', { class: 'ctrl-sec' }, [
-      el('h4', { class: 'ctrl-h', text: t('controls.goal', 'Goal') }),
-      el('p', { class: 'ctrl-note', text: t('controls.goalSmash', 'Tux Smash: pile on a rival’s damage % and knock them past the blast zone. Last with stocks wins.') }),
-      el('p', { class: 'ctrl-note', text: t('controls.goalRoyale', 'Distro Royale: survive the shrinking minty zone in a Luxembourg town, using buildings for cover. Last one standing wins.') })
-    ]);
-    var touch = el('div', { class: 'ctrl-sec' }, [
-      el('h4', { class: 'ctrl-h', text: t('controls.touch', 'Mobile') }),
-      el('p', { class: 'ctrl-note', text: t('controls.touchNote', 'On phones, on-screen buttons appear: a move pad + fast-fall, jump, attack / throw / dash, and :wq / dd / sudo.') })
-    ]);
-    openModal(modalShell(t('nav.controls', 'Controls & vim'), [kb, vim, goal, touch], { wide: true }));
+    clear(b); b.appendChild(icon(m ? 'mute' : 'volume', 13));
   }
 
   function showLanguagePopup() {
-    const langs = (typeof I18n !== 'undefined' && I18n.LANGS) ? I18n.LANGS : [
-      { code: 'en', name: 'English' }
-    ];
+    const langs = (typeof I18n !== 'undefined' && I18n.LANGS) ? I18n.LANGS : [{ code: 'en', name: 'English' }];
     const active = currentLangCode();
-
     const listWrap = el('div', { class: 'lang-list' });
     langs.forEach(function (lang) {
-      // English is highlighted as the default choice.
       const isDefault = (lang.code === 'en');
       const isActive = (lang.code === active);
       const row = el('button', {
         type: 'button',
-        class: 'lang-row' +
-          (isActive ? ' lang-row-active' : '') +
-          (isDefault ? ' lang-row-default' : ''),
-        dataset: { code: lang.code },
-        onclick: function () { chooseLanguage(lang.code); }
+        class: 'lang-row' + (isActive ? ' lang-row-active' : '') + (isDefault ? ' lang-row-default' : ''),
+        dataset: { code: lang.code }, onclick: function () { chooseLanguage(lang.code); }
       }, [
         el('span', { class: 'lang-code', text: lang.code.toUpperCase() }),
         el('span', { class: 'lang-name', text: lang.name }),
@@ -1504,72 +617,52 @@ const Menu = (function () {
       ]);
       listWrap.appendChild(row);
     });
-
-    const body = [
-      el('p', { class: 'lang-lead', text: t('lang.choose', 'Choose your language') }),
-      listWrap
-    ];
-
-    openModal(modalShell(t('nav.language', 'Language'), body));
+    openModal(modalShell(t('nav.language', 'Language'), [el('p', { class: 'lang-lead', text: t('lang.choose', 'Choose your language') }), listWrap]));
   }
 
   function chooseLanguage(code) {
-    if (typeof I18n !== 'undefined' && I18n.set) {
-      I18n.set(code);
-    }
-    // I18n.onChange re-renders the menu; just refresh the corner label + close.
-    const langLabel = rootEl && rootEl.querySelector('.corner-lang-label');
+    if (typeof I18n !== 'undefined' && I18n.set) I18n.set(code);
+    const langLabel = rootEl && rootEl.querySelector('#menu-lang-btn .corner-lang-label');
     if (langLabel) langLabel.textContent = currentLangName();
     closeAnyModal();
   }
 
-  // ---- form helpers ------------------------------------------------------
+  // ---- form + toast helpers ---------------------------------------------
   function formRow(labelText, control, hintText) {
     return el('div', { class: 'form-row' }, [
-      el('label', { class: 'form-label', text: labelText }),
-      control,
+      el('label', { class: 'form-label', text: labelText }), control,
       hintText ? el('div', { class: 'form-hint', text: hintText }) : null
     ]);
   }
 
-  // ---- toast -------------------------------------------------------------
   let toastTimer = null;
   function toast(msg, kind) {
     let host = byId('menu-toast');
-    if (!host) {
-      host = el('div', { id: 'menu-toast' });
-      document.body.appendChild(host);
-    }
+    if (!host) { host = el('div', { id: 'menu-toast' }); document.body.appendChild(host); }
     host.className = 'toast toast-' + (kind || 'info') + ' toast-show';
     host.textContent = msg;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () {
-      host.classList.remove('toast-show');
-    }, 2600);
+    toastTimer = setTimeout(function () { host.classList.remove('toast-show'); }, 2800);
   }
 
   // ---- styles (8-bit; self-injected) -------------------------------------
   function injectStyles() {
     if (byId('menu-styles')) return;
     const css = [
-      // palette: mint #7ff9e0, orange #ff9e2c, blue #2b5fff, slate #1a1d2e
       '#screen-menu{font-family:"Press Start 2P",monospace;color:#e8ecf5;position:relative;min-height:100%;}',
-      '.menu-inner{max-width:740px;margin:0 auto;padding:28px 16px 60px;}',
+      '.menu-inner{max-width:740px;margin:0 auto;padding:28px 16px 40px;}',
       // title
       '.menu-title{text-align:center;margin:14px 0 22px;}',
       '.title-main{margin:0;font-size:30px;line-height:1.1;color:#ff9e2c;letter-spacing:2px;text-shadow:4px 4px 0 #1a1d2e,6px 6px 0 #2b5fff;}',
       '.title-sub{margin:6px 0 0;font-size:22px;color:#7ff9e0;letter-spacing:6px;text-shadow:3px 3px 0 #1a1d2e;}',
-      '.title-tag{margin:14px auto 0;max-width:540px;font-size:9px;line-height:1.7;color:#9aa3bf;}',
-      // nickname (Kahoot style)
+      '.title-tag{margin:14px auto 0;max-width:560px;font-size:9px;line-height:1.7;color:#9aa3bf;}',
+      // nickname
       '.menu-nick-row{display:flex;flex-direction:column;align-items:center;gap:8px;margin:0 0 18px;}',
       '.nick-label{font-size:9px;color:#9aa3bf;letter-spacing:1px;}',
-      '.kahoot-nick{width:100%;max-width:420px;text-align:center;font-size:16px;padding:16px 12px;}',
+      '.kahoot-nick{width:100%;max-width:420px;text-align:center;font-size:14px;padding:14px 12px;}',
       // inputs
       '.pixinput{font-family:inherit;background:#10121f;color:#e8ecf5;border:3px solid #3a3f5c;box-shadow:4px 4px 0 #0a0b14;padding:12px;font-size:11px;outline:none;border-radius:0;width:100%;box-sizing:border-box;}',
       '.pixinput:focus{border-color:#7ff9e0;box-shadow:4px 4px 0 #0a0b14,0 0 0 2px #7ff9e0 inset;}',
-      '.pixselect{cursor:pointer;}',
-      '.shake{animation:menu-shake .4s;}',
-      '@keyframes menu-shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-6px);}75%{transform:translateX(6px);}}',
       // buttons
       '.pixbtn{font-family:inherit;font-size:11px;color:#e8ecf5;background:#262a44;border:3px solid #e8ecf5;box-shadow:5px 5px 0 #0a0b14;padding:12px 16px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;justify-content:center;border-radius:0;}',
       '.pixbtn:hover{background:#e8ecf5;color:#1a1d2e;}',
@@ -1581,99 +674,43 @@ const Menu = (function () {
       '.pixbtn-ghost{font-family:inherit;font-size:10px;color:#9aa3bf;background:transparent;border:2px solid #3a3f5c;box-shadow:3px 3px 0 #0a0b14;padding:8px 12px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;border-radius:0;}',
       '.pixbtn-ghost:hover{color:#1a1d2e;background:#7ff9e0;border-color:#1a1d2e;}',
       '.pixbtn-disabled,.pixbtn:disabled{opacity:.45;cursor:not-allowed;}',
-      '.pixbtn-disabled:hover,.pixbtn:disabled:hover{background:#262a44;color:#e8ecf5;}',
-      '.pixbtn-ready-on{background:#7ff9e0;color:#1a1d2e;border-color:#1a1d2e;}',
-      '.pixbtn-ready-on:hover{background:#bff8ee;color:#1a1d2e;}',
-      '.pixbtn-ready-off{background:#262a44;color:#9aa3bf;border-color:#3a3f5c;}',
       // actions row
-      '.menu-actions{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin:0 0 26px;}',
+      '.menu-actions{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin:0 0 28px;}',
       '.menu-actions .pixbtn{min-width:180px;padding:16px 18px;font-size:12px;}',
-      // panels
-      '.pixpanel{background:#181b2c;border:3px solid #3a3f5c;box-shadow:6px 6px 0 #0a0b14;padding:14px;}',
-      '.lobby-panel{margin-top:4px;}',
-      '.lobby-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px;}',
-      '.lobby-title{margin:0;font-size:12px;color:#7ff9e0;letter-spacing:1px;}',
-      '.lobby-head-btns{display:flex;gap:8px;}',
-      // room list
-      '.room-list{display:flex;flex-direction:column;gap:8px;max-height:340px;overflow-y:auto;}',
-      '.room-row{display:grid;grid-template-columns:1fr auto auto auto;align-items:center;gap:10px;background:#10121f;border:3px solid #3a3f5c;box-shadow:3px 3px 0 #0a0b14;padding:12px;cursor:pointer;}',
-      '.room-row:hover{border-color:#7ff9e0;background:#13182c;}',
-      '.room-row:focus{outline:none;border-color:#ff9e2c;}',
-      '.room-row-disabled{opacity:.55;cursor:not-allowed;}',
-      '.room-row-disabled:hover{border-color:#3a3f5c;background:#10121f;}',
-      '.room-cell{display:flex;align-items:center;}',
-      '.room-name{gap:8px;min-width:0;}',
-      '.room-name-text{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '.room-lock{color:#ff9e2c;display:inline-flex;}',
-      '.room-mode{justify-content:center;}',
-      '.mode-tag{display:inline-flex;align-items:center;gap:5px;font-size:8px;padding:4px 7px;border:2px solid;}',
-      '.mode-tag-smash{color:#ff9e2c;border-color:#ff9e2c;}',
-      '.mode-tag-royale{color:#7ff9e0;border-color:#7ff9e0;}',
-      '.mode-tag-text{white-space:nowrap;}',
-      '.room-count{font-size:10px;}',
-      '.count-full{color:#ff6b6b;}',
-      '.count-ok{color:#7ff9e0;}',
-      '.tag{font-size:8px;padding:4px 6px;border:2px solid;white-space:nowrap;}',
-      '.tag-open{color:#7ff9e0;border-color:#7ff9e0;}',
-      '.tag-full{color:#ff6b6b;border-color:#ff6b6b;}',
-      '.tag-playing{color:#ff9e2c;border-color:#ff9e2c;}',
-      '.room-empty{text-align:center;color:#9aa3bf;padding:22px 8px;}',
-      '.room-empty p{margin:6px 0;font-size:10px;}',
-      '.room-empty-sub{color:#646b8a;font-size:8px;}',
-      // lobby (in-room)
-      '.menu-lobby.hidden,.menu-browser.hidden,.hidden{display:none !important;}',
-      '.lobby-card{display:flex;flex-direction:column;gap:16px;}',
-      '.lobby-room-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}',
-      '.lobby-room-title{font-size:13px;color:#ff9e2c;display:flex;align-items:center;gap:8px;flex:1;min-width:0;}',
-      '.lobby-room-title span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
-      '.lobby-room-mode{font-size:9px;color:#7ff9e0;display:inline-flex;align-items:center;gap:6px;border:2px solid #3a3f5c;padding:5px 8px;}',
-      '.lobby-room-count{font-size:10px;color:#7ff9e0;}',
-      '.lobby-players-head{font-size:9px;color:#9aa3bf;letter-spacing:1px;}',
-      '.lobby-player-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:12px;}',
-      '.player-card{position:relative;background:#10121f;border:3px solid #3a3f5c;box-shadow:3px 3px 0 #0a0b14;padding:10px 8px;display:flex;flex-direction:column;align-items:center;gap:6px;}',
-      '.player-card-me{border-color:#ff9e2c;}',
-      '.player-card-ready{border-color:#7ff9e0;}',
-      '.player-card-me.player-card-ready{border-color:#7ff9e0;box-shadow:3px 3px 0 #0a0b14,0 0 0 2px #ff9e2c inset;}',
-      '.player-badges{position:absolute;top:6px;left:6px;right:6px;display:flex;justify-content:space-between;}',
-      '.badge{display:inline-flex;width:18px;height:18px;align-items:center;justify-content:center;border:2px solid;background:#10121f;}',
-      '.badge-host{color:#ff9e2c;border-color:#ff9e2c;}',
-      '.badge-ready{color:#7ff9e0;border-color:#7ff9e0;}',
-      '.badge-wait{color:#646b8a;border-color:#3a3f5c;}',
-      '.player-canvas-wrap{margin-top:14px;}',
-      '.lobby-char-canvas{image-rendering:pixelated;width:72px;height:84px;}',
-      '.player-name{font-size:8px;text-align:center;line-height:1.4;word-break:break-word;color:#cfd5e8;}',
-      '.player-name-me{color:#ff9e2c;}',
-      '.lobby-controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center;}',
-      '.lobby-controls .pixbtn{min-width:160px;}',
-      '.lobby-hint{flex-basis:100%;text-align:center;font-size:8px;color:#9aa3bf;line-height:1.6;}',
-      '.lobby-back{align-self:flex-start;}',
-      // top-right corner: language + sign-in (subtle)
+      // chained W.I.P. arena
+      '.wip-arena{position:relative;overflow:hidden;background:#10121f;border:4px solid #3a3f5c;box-shadow:6px 6px 0 #0a0b14;padding:26px 18px;margin:0 0 22px;text-align:center;}',
+      '.wip-inner{position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;gap:10px;}',
+      '.wip-badge{width:54px;height:54px;display:flex;align-items:center;justify-content:center;color:#ffe34d;background:#1a1d2e;border:3px solid #ffe34d;box-shadow:3px 3px 0 #0a0b14;animation:wip-sway 3.2s ease-in-out infinite;}',
+      '.wip-title{margin:4px 0 0;font-size:16px;color:#cfd5e8;letter-spacing:2px;text-shadow:3px 3px 0 #0a0b14;}',
+      '.wip-stamp{font-size:30px;color:#ff4d5e;letter-spacing:4px;border:4px solid #ff4d5e;padding:4px 14px;transform:rotate(-7deg);text-shadow:3px 3px 0 #0a0b14;box-shadow:4px 4px 0 #0a0b14;background:#1a1d2e;}',
+      '.wip-desc{max-width:480px;font-size:9px;line-height:1.8;color:#9aa3bf;margin:6px 0 0;}',
+      // two crossing chains drawn in CSS (chunky metallic links)
+      '.wip-chain{position:absolute;left:-20%;width:140%;height:26px;top:50%;z-index:1;opacity:.85;',
+      '  background:repeating-linear-gradient(90deg,#2e3457 0 5px,#565c84 5px 9px,#8a90b8 9px 13px,#565c84 13px 17px,#2e3457 17px 22px);',
+      '  border-top:3px solid #0a0b14;border-bottom:3px solid #0a0b14;}',
+      '.wip-chain-a{transform:translateY(-50%) rotate(11deg);}',
+      '.wip-chain-b{transform:translateY(-50%) rotate(-11deg);}',
+      '@keyframes wip-sway{0%,100%{transform:rotate(-5deg);}50%{transform:rotate(5deg);}}',
+      // top-right corner
       '.menu-corner{position:absolute;top:12px;right:14px;z-index:30;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}',
-      '.ctrl-sec{margin-bottom:16px;}',
-      '.ctrl-h{font-size:11px;color:#ff9e2c;margin:0 0 8px;text-shadow:2px 2px 0 #000;}',
-      '.ctrl-row{display:flex;gap:10px;align-items:baseline;font-size:9px;margin:6px 0;}',
-      '.ctrl-k{flex:0 0 132px;color:#7ff9e0;}',
-      '.ctrl-v{flex:1 1 auto;color:#cfd4e8;line-height:1.5;}',
-      '.ctrl-note{font-size:9px;color:#9aa3bf;line-height:1.7;margin:4px 0;}',
       '.corner-btn{font-size:9px;padding:6px 10px;color:#9aa3bf;}',
       '.corner-lang-label,.signin-label{letter-spacing:1px;}',
       '.signin-btn.signed-in{color:#7ff9e0;border-color:#7ff9e0;}',
-      // mode selector (create-room)
-      '.mode-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;}',
-      '.mode-card{font-family:inherit;background:#10121f;border:3px solid #3a3f5c;box-shadow:3px 3px 0 #0a0b14;color:#9aa3bf;padding:12px 8px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:8px;border-radius:0;}',
-      '.mode-card:hover{border-color:#7ff9e0;color:#e8ecf5;}',
-      '.mode-card-on{border-color:#ff9e2c;color:#ff9e2c;background:#15182a;}',
-      '.mode-card-icon{display:inline-flex;}',
-      '.mode-card-name{font-size:9px;text-align:center;line-height:1.4;}',
-      '.mode-desc{font-size:7px;color:#646b8a;line-height:1.7;margin-top:8px;min-height:14px;}',
-      // footer
-      '.menu-footer{margin-top:30px;text-align:center;font-size:8px;line-height:1.9;color:#646b8a;}',
+      // about
+      '.about-p{font-size:9px;color:#cfd4e8;line-height:1.9;margin:0 0 10px;}',
+      '.about-egg-wrap{margin-top:8px;display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center;}',
+      '.about-egg-lead{font-size:8px;color:#646b8a;}',
+      '.about-egg{border-color:#2b5fff;color:#2b5fff;}',
+      '.about-egg:hover{background:#2b5fff;color:#fff;border-color:#1a1d2e;}',
+      // footer (clickable! the old pointer-events:none bug is gone)
+      '.menu-footer{margin-top:18px;text-align:center;font-size:8px;line-height:1.9;color:#646b8a;pointer-events:auto;}',
       '.footer-line{margin-bottom:12px;}',
-      '.menu-oss{display:inline-flex;align-items:center;gap:6px;color:#7ff9e0;',
-      '  text-decoration:none;border:2px solid #2a3350;background:#11131f;padding:6px 11px;',
-      '  font-size:8px;letter-spacing:1px;}',
+      '.menu-oss{display:inline-flex;align-items:center;gap:6px;color:#7ff9e0;text-decoration:none;border:2px solid #2a3350;background:#11131f;padding:6px 11px;font-size:8px;letter-spacing:1px;cursor:pointer;}',
       '.menu-oss:hover{background:#7ff9e0;color:#11131f;border-color:#7ff9e0;}',
       '.footer-links{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}',
+      '.accent-mint{color:#7ff9e0;}',
+      '.accent-blue{color:#2b5fff;}',
+      // account / gdpr
       '.gdpr-row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0 2px;}',
       '.gdpr-row .pixbtn-ghost{font-size:8px;padding:9px 11px;}',
       '.consent-row{display:flex;align-items:flex-start;gap:9px;margin:10px 0 2px;cursor:pointer;}',
@@ -1682,11 +719,6 @@ const Menu = (function () {
       '.privacy-body{max-height:54vh;overflow-y:auto;padding-right:6px;}',
       '.privacy-h{font-size:10px;color:#ff9e2c;margin:12px 0 4px;text-shadow:1px 1px 0 #000;}',
       '.privacy-p{font-size:9px;color:#cfd4e8;line-height:1.8;margin:0 0 4px;}',
-      '.sp-hint{font-size:9px;color:#9aa3bf;text-align:center;margin:0 0 12px;line-height:1.7;}',
-      '.sp-modes{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;}',
-      '.sp-mode{min-width:150px;justify-content:center;}',
-      '.accent-mint{color:#7ff9e0;}',
-      '.accent-blue{color:#2b5fff;}',
       // modal
       '.modal-overlay{position:fixed;inset:0;background:rgba(8,9,16,.82);display:flex;align-items:center;justify-content:center;z-index:9000;padding:16px;}',
       '.pixmodal{font-family:"Press Start 2P",monospace;background:#181b2c;border:4px solid #7ff9e0;box-shadow:8px 8px 0 #0a0b14;width:100%;max-width:400px;color:#e8ecf5;max-height:90vh;overflow-y:auto;}',
@@ -1702,7 +734,7 @@ const Menu = (function () {
       '.form-err{font-size:8px;color:#ff6b6b;line-height:1.6;min-height:10px;}',
       '.modal-lead{font-size:9px;line-height:1.7;color:#cfd5e8;display:flex;align-items:center;gap:6px;}',
       '.modal-actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px;}',
-      // account
+      // account tabs
       '.tab-row{display:flex;gap:0;border:3px solid #3a3f5c;box-shadow:3px 3px 0 #0a0b14;}',
       '.tab-btn{flex:1;font-family:inherit;font-size:10px;background:#10121f;color:#9aa3bf;border:none;padding:10px;cursor:pointer;}',
       '.tab-btn+.tab-btn{border-left:3px solid #3a3f5c;}',
@@ -1731,9 +763,8 @@ const Menu = (function () {
       '.toast-warn{background:#ff9e2c;}',
       '.toast-danger{background:#ff6b6b;color:#1a1d2e;}',
       // responsive
-      '@media (max-width:560px){.title-main{font-size:22px;}.title-sub{font-size:16px;}.menu-actions .pixbtn{min-width:140px;}.room-row{grid-template-columns:1fr auto auto;}.room-mode{display:none;}.mode-tag-text{display:none;}}'
+      '@media (max-width:560px){.title-main{font-size:22px;}.title-sub{font-size:16px;}.menu-actions .pixbtn{min-width:140px;}.wip-stamp{font-size:22px;}}'
     ].join('\n');
-
     const style = el('style', { id: 'menu-styles' });
     style.appendChild(document.createTextNode(css));
     (document.head || document.documentElement).appendChild(style);
@@ -1744,15 +775,10 @@ const Menu = (function () {
     show: show,
     hide: hide,
     showLanguagePopup: showLanguagePopup,
-    showControls: showControls,
-    // helpers exposed for other modules / debugging
-    refresh: requestRooms,
-    leaveRoom: leaveRoom,
     openSignIn: openAccountModal,
-    isInRoom: function () { return !!currentRoom; },
-    getCurrentRoom: function () { return currentRoom; }
+    showAbout: showAbout,
+    toast: toast
   };
-
   return Menu;
 })();
 

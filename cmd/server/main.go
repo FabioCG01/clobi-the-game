@@ -1,6 +1,6 @@
-// Command server is the entry point for TUX SMASH ROYALE: a single static Go
-// binary that serves the web client, the REST account API, and the WebSocket
-// game transport.
+// Command server is the entry point for Clobi's Arena: a single static Go
+// binary that serves the web client (character creator, texture paint tool, and
+// the open-source marketplace) plus the REST account/character API.
 //
 // Configuration comes entirely from the environment so the same binary runs
 // unchanged inside the project's Docker image and on a developer's machine:

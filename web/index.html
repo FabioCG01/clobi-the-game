@@ -27,13 +27,6 @@
   <div id="screen-editor" class="screen"></div>
 
   <!-- ============================================================= -->
-  <!-- SCREEN: GAME  (canvas drawn by render.js, driven by game.js)  -->
-  <!-- ============================================================= -->
-  <div id="screen-game" class="screen">
-    <canvas id="game-canvas" width="960" height="600"></canvas>
-  </div>
-
-  <!-- ============================================================= -->
   <!-- ACTIVATE WINDOWS GAG OVERLAY (populated by gag.js)            -->
   <!-- Always on top, outside the screens, ignores pointer events.   -->
   <!-- ============================================================= -->
@@ -47,7 +40,6 @@
   <!-- ============================================================= -->
   <!-- SCRIPTS — exact dependency load order. Each assigns ONE global -->
   <!-- ============================================================= -->
-  <script src="js/protocol.js"></script>
   <script src="js/i18n.js"></script>
   <!-- Editable character art data (colours, hairstyles, beards, parts).
        Add or tweak entries here to mod the look — no other code changes needed. -->
@@ -57,10 +49,6 @@
   <script src="js/gag.js"></script>
   <script src="js/sound.js"></script>
   <script src="js/store.js"></script>
-  <script src="js/net.js"></script>
-  <script src="js/input.js"></script>
-  <script src="js/render.js"></script>
-  <script src="js/game.js"></script>
   <script src="js/editor.js"></script>
   <script src="js/menu.js"></script>
   <script src="js/main.js"></script>
