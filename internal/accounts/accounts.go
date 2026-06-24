@@ -149,6 +149,10 @@ func (s *Store) migrateDefaults() {
 // Close releases the database file.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the underlying bbolt handle so sibling stores (e.g. the marketplace)
+// can share the single database file instead of opening their own.
+func (s *Store) DB() *bolt.DB { return s.db }
+
 // key normalizes a username for case-insensitive lookups.
 func key(username string) string { return strings.ToLower(strings.TrimSpace(username)) }
 

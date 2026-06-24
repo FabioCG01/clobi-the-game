@@ -19,12 +19,14 @@ import (
 	"time"
 
 	"clobi/internal/accounts"
+	"clobi/internal/market"
 	"clobi/internal/protocol"
 )
 
 // server bundles the long-lived dependencies shared across handlers.
 type server struct {
 	acc    *accounts.Store
+	mkt    *market.Store
 	webDir string
 }
 
@@ -40,6 +42,10 @@ func Run(addr, webDir, dataDir string) error {
 	if err != nil {
 		return err
 	}
+	mkt, err := market.NewStore(acc.DB())
+	if err != nil {
+		return err
+	}
 
 	absWeb, err := filepath.Abs(webDir)
 	if err != nil {
@@ -48,6 +54,7 @@ func Run(addr, webDir, dataDir string) error {
 
 	s := &server{
 		acc:    acc,
+		mkt:    mkt,
 		webDir: absWeb,
 	}
 
@@ -59,6 +66,7 @@ func Run(addr, webDir, dataDir string) error {
 	mux.HandleFunc("/api/admin/default", s.handleAdminDefault)
 	mux.HandleFunc("/api/account/export", s.handleExport)
 	mux.HandleFunc("/api/account", s.handleAccount)
+	mux.HandleFunc("/api/market/", s.handleMarket)
 	mux.HandleFunc("/", s.handleStatic)
 
 	srv := &http.Server{
@@ -248,6 +256,250 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ---- REST: marketplace ----
+
+// optUser returns the requester's username + admin flag if a valid token is
+// present, or ("", false) for anonymous requests.
+func (s *server) optUser(r *http.Request) (string, bool) {
+	u, ok := s.authUser(r)
+	if !ok {
+		return "", false
+	}
+	return u, s.acc.IsAdmin(u)
+}
+
+// handleMarket dispatches every /api/market/* endpoint.
+func (s *server) handleMarket(w http.ResponseWriter, r *http.Request) {
+	action := strings.TrimPrefix(r.URL.Path, "/api/market/")
+	switch action {
+	case "list":
+		s.mktList(w, r)
+	case "item":
+		s.mktItem(w, r)
+	case "publish":
+		s.mktPublish(w, r)
+	case "rate":
+		s.mktRate(w, r)
+	case "comment":
+		s.mktComment(w, r)
+	case "report":
+		s.mktReportLike(w, r, "report")
+	case "unreport":
+		s.mktReportLike(w, r, "unreport")
+	case "vouch":
+		s.mktReportLike(w, r, "vouch")
+	case "unvouch":
+		s.mktReportLike(w, r, "unvouch")
+	case "download":
+		s.mktDownload(w, r)
+	case "delete":
+		s.mktDelete(w, r)
+	case "admin/ban":
+		s.mktAdmin(w, r, "ban")
+	case "admin/revoke":
+		s.mktAdmin(w, r, "revoke")
+	default:
+		writeError(w, http.StatusNotFound, "unknown market endpoint")
+	}
+}
+
+func (s *server) mktList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, isAdmin := s.optUser(r)
+	q := r.URL.Query()
+	opts := market.ListOpts{Q: q.Get("q"), Sort: q.Get("sort"), Kind: q.Get("kind"), Slot: q.Get("slot")}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": s.mkt.List(opts, user, isAdmin)})
+}
+
+func (s *server) mktItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user, isAdmin := s.optUser(r)
+	it, ok := s.mkt.Get(r.URL.Query().Get("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"item": s.mkt.ViewOne(it, user, isAdmin)})
+}
+
+func (s *server) mktPublish(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "sign in to publish")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var in market.Item
+	if err := decodeJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	it, err := s.mkt.Publish(user, in)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"id": it.ID, "flagged": it.Flagged})
+}
+
+type mktBody struct {
+	ID       string  `json:"id"`
+	Stars    float64 `json:"stars"`
+	Text     string  `json:"text"`
+	ParentID string  `json:"parentId"`
+	Reason   string  `json:"reason"`
+}
+
+func (s *server) mktRate(w http.ResponseWriter, r *http.Request) {
+	user, body, ok := s.mktAuthBody(w, r)
+	if !ok {
+		return
+	}
+	if _, err := s.mkt.Rate(body.ID, user, body.Stars); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.mktReturn(w, r, body.ID, user)
+}
+
+func (s *server) mktComment(w http.ResponseWriter, r *http.Request) {
+	user, body, ok := s.mktAuthBody(w, r)
+	if !ok {
+		return
+	}
+	if _, err := s.mkt.Comment(body.ID, user, body.Text, body.ParentID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.mktReturn(w, r, body.ID, user)
+}
+
+func (s *server) mktReportLike(w http.ResponseWriter, r *http.Request, kind string) {
+	user, body, ok := s.mktAuthBody(w, r)
+	if !ok {
+		return
+	}
+	var err error
+	switch kind {
+	case "report":
+		_, err = s.mkt.Report(body.ID, user, body.Reason)
+	case "unreport":
+		_, err = s.mkt.CancelReport(body.ID, user)
+	case "vouch":
+		_, err = s.mkt.Vouch(body.ID, user)
+	case "unvouch":
+		_, err = s.mkt.CancelVouch(body.ID, user)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.mktReturn(w, r, body.ID, user)
+}
+
+func (s *server) mktDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body mktBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if _, err := s.mkt.Download(body.ID); err != nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	user, _ := s.optUser(r)
+	s.mktReturn(w, r, body.ID, user)
+}
+
+func (s *server) mktDelete(w http.ResponseWriter, r *http.Request) {
+	user, body, ok := s.mktAuthBody(w, r)
+	if !ok {
+		return
+	}
+	if err := s.mkt.Delete(body.ID, user, s.acc.IsAdmin(user)); err != nil {
+		writeError(w, statusFor(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *server) mktAdmin(w http.ResponseWriter, r *http.Request, kind string) {
+	user, body, ok := s.mktAuthBody(w, r)
+	if !ok {
+		return
+	}
+	if !s.acc.IsAdmin(user) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return
+	}
+	var err error
+	if kind == "ban" {
+		_, err = s.mkt.AdminBan(body.ID)
+	} else {
+		_, err = s.mkt.AdminRevoke(body.ID)
+	}
+	if err != nil {
+		writeError(w, statusFor(err), err.Error())
+		return
+	}
+	s.mktReturn(w, r, body.ID, user)
+}
+
+// mktAuthBody requires POST + a valid token and decodes the common body.
+func (s *server) mktAuthBody(w http.ResponseWriter, r *http.Request) (string, mktBody, bool) {
+	var body mktBody
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return "", body, false
+	}
+	user, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "sign in first")
+		return "", body, false
+	}
+	if err := decodeJSON(r, &body); err != nil || body.ID == "" {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return "", body, false
+	}
+	return user, body, true
+}
+
+// mktReturn re-reads the item and returns its fresh view (so the client updates).
+func (s *server) mktReturn(w http.ResponseWriter, r *http.Request, id, user string) {
+	it, ok := s.mkt.Get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"item": s.mkt.ViewOne(it, user, s.acc.IsAdmin(user))})
+}
+
+func statusFor(err error) int {
+	switch {
+	case errors.Is(err, market.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, market.ErrForbidden):
+		return http.StatusForbidden
+	case errors.Is(err, market.ErrBadInput):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // authUser extracts and verifies a Bearer token from the Authorization header.
