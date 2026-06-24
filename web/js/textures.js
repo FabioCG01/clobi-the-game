@@ -41,6 +41,7 @@ var Textures = (function () {
     shoes:     { tint: 'feet',       tux: false, hum: true },
     hair:      { tint: 'hairColor',  tux: false, hum: true },
     beard:     { tint: 'beardColor', tux: false, hum: true },
+    mouth:     { tint: 'mouthColor', tux: false, hum: true },
     eyes:      { tint: 'irisColor',  tux: false, hum: true },
     cape:      { tint: 'capeColor',  tux: true,  hum: true },
     hat:       { tint: null,         tux: true,  hum: true },
@@ -250,7 +251,7 @@ var Textures = (function () {
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
       if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard', slot: 'beard' });
       var mcol = (typeof ch.mouthColor === 'string' && /^#/.test(ch.mouthColor)) ? ch.mouthColor : darken(skin, 0.85);
-      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth' });               // mouth color (default = darker skin)
+      var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth', slot: 'mouth' });   // mouth color (default = darker skin)
       var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' });
       L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });                                        // sclera (fixed)
       var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes', slot: 'eyes' }); // iris color

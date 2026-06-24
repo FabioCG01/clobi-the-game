@@ -22,7 +22,7 @@
   var items = [], filters = { q: '', sort: 'new', kind: '', slot: '' }, searchTimer = null;
   var registered = {}; // texId -> true (already registered with Textures)
 
-  var SLOT_LABELS = { body: 'Body', belly: 'Belly', feet: 'Feet', shirt: 'Shirt', pants: 'Pants', shoes: 'Shoes', hair: 'Hair', beard: 'Beard', eyes: 'Eyes', cape: 'Cape', hat: 'Hat', accessory: 'Accessory' };
+  var SLOT_LABELS = { body: 'Body', belly: 'Belly', feet: 'Feet', shirt: 'Shirt', pants: 'Pants', shoes: 'Shoes', hair: 'Hair', beard: 'Beard', mouth: 'Mouth', eyes: 'Eyes', cape: 'Cape', hat: 'Hat', accessory: 'Accessory' };
 
   // ---- SVG star ----------------------------------------------------------
   function starSvg(cls) {

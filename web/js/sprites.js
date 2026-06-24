@@ -47,7 +47,7 @@ var Sprites = (function () {
   }
 
   // Paintable slots a custom texture may occupy (mirrors Textures.PAINT_SLOTS).
-  var TEX_SLOTS = ['body', 'belly', 'feet', 'shirt', 'pants', 'shoes', 'hair', 'beard', 'eyes', 'cape', 'hat', 'accessory'];
+  var TEX_SLOTS = ['body', 'belly', 'feet', 'shirt', 'pants', 'shoes', 'hair', 'beard', 'mouth', 'eyes', 'cape', 'hat', 'accessory'];
   function sanitizeTex(tex) {
     if (!tex || typeof tex !== 'object') return {};
     var out = {};
