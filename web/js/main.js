@@ -53,6 +53,21 @@ var App = (function () {
     return defaultCharacter();
   }
 
+  // Register the player's locally-painted textures with the renderer so any
+  // worn custom cosmetics show up. Resolves once all are registered.
+  function registerLocalTextures() {
+    if (!hasStore() || !Store.listLocalTextures || typeof Textures === 'undefined' || !Textures.registerCustomPNG) {
+      return Promise.resolve();
+    }
+    var list = Store.listLocalTextures();
+    return Promise.all(list.map(function (rec) {
+      if (rec && rec.id && rec.png) {
+        return Textures.registerCustomPNG({ id: rec.id, slot: rec.slot, glowColor: rec.glowColor, tintHint: rec.tintHint }, rec.png);
+      }
+      return null;
+    }));
+  }
+
   // ---- screen manager ----------------------------------------------------
   // Toggles the .active class on the #screen-* containers. Each module owns its
   // own DOM inside those containers; this only flips which one is shown.
@@ -107,11 +122,15 @@ var App = (function () {
       try { I18n.init(); } catch (e) { /* default 'en' */ }
     }
 
-    // 2) Preload the image-based character textures. Non-blocking: renderers
-    //    fall back to a placeholder until ready, then we refresh the screen.
+    // 2) Preload the image-based character textures, then register any locally
+    //    painted custom textures so worn cosmetics render. Non-blocking.
     if (typeof Textures !== 'undefined' && Textures.load) {
-      try { Textures.load('assets/tex/').then(function () { refreshUI(); }).catch(function () {}); }
-      catch (e) { /* ignore */ }
+      try {
+        Textures.load('assets/tex/')
+          .then(function () { return registerLocalTextures(); })
+          .then(function () { refreshUI(); })
+          .catch(function () {});
+      } catch (e) { /* ignore */ }
     }
 
     // 3) Restore display name + character from local storage (defaults otherwise).

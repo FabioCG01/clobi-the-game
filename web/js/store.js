@@ -27,6 +27,7 @@ var Store = (function () {
   var KEY_TOKEN = 'clobi.token';
   var KEY_USER = 'clobi.username';
   var KEY_ADMIN = 'clobi.isAdmin';
+  var KEY_TEX = 'clobi.textures';   // local library of painted textures (id -> record)
   var COOKIE_NICK = 'clobi_nick';
 
   // ---- low-level localStorage helpers (degrade gracefully if unavailable) ----
@@ -171,6 +172,33 @@ var Store = (function () {
     setCharacter: function (c) {
       writeCharacter(c);
       return c;
+    },
+
+    // -------- local texture library (painted cosmetics) --------
+    // Each record: {id, slot, title, glowColor, tintHint, createdAt, remixOf, png}.
+    getLocalTextures: function () {
+      var raw = lsGet(KEY_TEX);
+      if (!raw) return {};
+      try { var o = JSON.parse(raw); return (o && typeof o === 'object') ? o : {}; }
+      catch (e) { return {}; }
+    },
+    getLocalTexture: function (id) {
+      return this.getLocalTextures()[id] || null;
+    },
+    listLocalTextures: function () {
+      var all = this.getLocalTextures();
+      return Object.keys(all).map(function (k) { return all[k]; });
+    },
+    saveLocalTexture: function (record) {
+      if (!record || !record.id) return record;
+      var all = this.getLocalTextures();
+      all[record.id] = record;
+      lsSet(KEY_TEX, JSON.stringify(all));
+      return record;
+    },
+    removeLocalTexture: function (id) {
+      var all = this.getLocalTextures();
+      if (all[id]) { delete all[id]; lsSet(KEY_TEX, JSON.stringify(all)); }
     },
 
     // -------- account session state --------

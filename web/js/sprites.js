@@ -42,8 +42,20 @@ var Sprites = (function () {
       pants: CLOBI.pants || '#33405c', capeColor: '#ff5a3c', irisColor: '#222a3a', mouthColor: '',
       hair: (CLOBI.hair != null ? CLOBI.hair : 3), beard: (CLOBI.beard != null ? CLOBI.beard : 3),
       shirtStyle: CLOBI.shirtStyle || 0, pantsStyle: CLOBI.pantsStyle || 0, shoeStyle: CLOBI.shoeStyle || 0,
-      hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}
+      hat: 0, eyes: 0, eyebrows: 0, mouth: 0, accessory: 0, cape: 0, tf: {}, tex: {}
     };
+  }
+
+  // Paintable slots a custom texture may occupy (mirrors Textures.PAINT_SLOTS).
+  var TEX_SLOTS = ['body', 'belly', 'feet', 'shirt', 'pants', 'shoes', 'hair', 'beard', 'eyes', 'cape', 'hat', 'accessory'];
+  function sanitizeTex(tex) {
+    if (!tex || typeof tex !== 'object') return {};
+    var out = {};
+    for (var i = 0; i < TEX_SLOTS.length; i++) {
+      var k = TEX_SLOTS[i], v = tex[k];
+      if (typeof v === 'string' && v) out[k] = v;
+    }
+    return out;
   }
 
   // ---- per-object transform sanitiser (move/resize/rotate). Visual only. ----
@@ -120,7 +132,7 @@ var Sprites = (function () {
       shirtStyle: idx(c.shirtStyle, 'shirt', 0), pantsStyle: idx(c.pantsStyle, 'pants', 0),
       shoeStyle: idx(c.shoeStyle, 'shoes', 0),
       hat: idx(c.hat, 'hat', 0), eyes: idx(c.eyes, 'eyes', 0), eyebrows: idx(c.eyebrows, 'eyebrows', 0), mouth: idx(c.mouth, 'mouth', 0),
-      accessory: idx(c.accessory, 'accessory', 0), cape: idx(c.cape, 'cape', 0), tf: sanitizeTf(c.tf)
+      accessory: idx(c.accessory, 'accessory', 0), cape: idx(c.cape, 'cape', 0), tf: sanitizeTf(c.tf), tex: sanitizeTex(c.tex)
     };
   }
 

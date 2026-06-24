@@ -22,6 +22,31 @@ var Textures = (function () {
   var warpCache = {};        // sig|g|fat -> canvas(WW,GH)
   var bboxCache = {}, idataCache = {};   // for editor hit-testing
 
+  // ---- custom (user-painted) textures -------------------------------------
+  // A custom texture is a GW×GH packed image: R = grayscale value (tinted at
+  // wear-time like a built-in mask), G = glow intensity, A = alpha. The glow
+  // colour is per-texture metadata. Stored by id; tinted canvases are cached.
+  var customTex = {};        // id -> {id, slot, data:Uint8ClampedArray(GW*GH*4), glowColor, tintHint}
+  var customCache = {};      // id|hex -> canvas(GW,GH)
+
+  // Which character colour field tints a custom texture in each paint slot, and
+  // which body type(s) the slot applies to. tint:null => use the texture's own
+  // tintHint (a fixed colour, for slots with no natural wearer colour).
+  var PAINT_SLOTS = {
+    body:      { tint: 'body',       tux: true,  hum: false },
+    belly:     { tint: 'belly',      tux: true,  hum: false },
+    feet:      { tint: 'feet',       tux: true,  hum: false },
+    shirt:     { tint: 'belly',      tux: false, hum: true },
+    pants:     { tint: 'pants',      tux: false, hum: true },
+    shoes:     { tint: 'feet',       tux: false, hum: true },
+    hair:      { tint: 'hairColor',  tux: false, hum: true },
+    beard:     { tint: 'beardColor', tux: false, hum: true },
+    eyes:      { tint: 'irisColor',  tux: false, hum: true },
+    cape:      { tint: 'capeColor',  tux: true,  hum: true },
+    hat:       { tint: null,         tux: true,  hum: true },
+    accessory: { tint: null,         tux: true,  hum: true }
+  };
+
   function onReady(cb) { if (ready) cb(); else readyCbs.push(cb); }
 
   // ---- loading ------------------------------------------------------------
@@ -85,6 +110,98 @@ var Textures = (function () {
     tintCache[key] = out; return out;
   }
 
+  // ---- custom texture decode / register / render --------------------------
+  // Register a custom texture from packed pixel data. `pixels` may be a
+  // Uint8ClampedArray (GW*GH*4, R=value G=glow B=0 A=alpha) or an ImageData.
+  function registerCustomPixels(meta, pixels) {
+    if (!meta || !meta.id) return;
+    var data = pixels && pixels.data ? pixels.data : pixels;
+    customTex[meta.id] = {
+      id: meta.id, slot: meta.slot || '',
+      glowColor: meta.glowColor || '#7ff9e0', tintHint: meta.tintHint || '#cccccc',
+      data: data
+    };
+    // invalidate any tinted caches for this id, plus composited canon/warp
+    // caches that reference it (their sig embeds ch.tex, which holds the id) —
+    // so a live-repainted texture re-renders instead of showing a stale copy.
+    Object.keys(customCache).forEach(function (k) { if (k.indexOf(meta.id + '|') === 0) delete customCache[k]; });
+    Object.keys(canonCache).forEach(function (k) { if (k.indexOf(meta.id) >= 0) delete canonCache[k]; });
+    Object.keys(warpCache).forEach(function (k) { if (k.indexOf(meta.id) >= 0) delete warpCache[k]; });
+  }
+
+  // Register a custom texture from a packed PNG data URL (async).
+  function registerCustomPNG(meta, dataUrl) {
+    return new Promise(function (res) {
+      if (!meta || !meta.id || !dataUrl) { res(false); return; }
+      var img = new Image();
+      img.onload = function () {
+        var c = newCanvas(GW, GH), cx = c.getContext('2d');
+        cx.imageSmoothingEnabled = false; cx.drawImage(img, 0, 0, GW, GH);
+        registerCustomPixels(meta, cx.getImageData(0, 0, GW, GH));
+        res(true);
+      };
+      img.onerror = function () { res(false); };
+      img.src = dataUrl;
+    });
+  }
+
+  function hasCustom(id) { return !!(id && customTex[id]); }
+  function customMeta(id) { return customTex[id] || null; }
+
+  // Build (and cache) the rendered canvas for a custom texture tinted by hex.
+  // value channel is multiplied by the tint; glow pixels are blended toward the
+  // glow colour with a chunky 1px pixelated halo.
+  function customCanvas(id, hex) {
+    var ct = customTex[id]; if (!ct) return null;
+    var key = id + '|' + (hex || ct.tintHint || 'RAW');
+    if (customCache[key]) return customCache[key];
+    var rgb = hexToRgb(hex || ct.tintHint || '#cccccc');
+    var gc = hexToRgb(ct.glowColor || '#7ff9e0');
+    var src = ct.data, n = GW * GH;
+    // First pass: base tinted colour + collect glow field.
+    var out = newCanvas(GW, GH), octx = out.getContext('2d');
+    var img = octx.createImageData(GW, GH), d = img.data;
+    var glow = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      var p = i * 4;
+      var v = src[p] / 255, g = src[p + 1] / 255, a = src[p + 3] / 255;
+      glow[i] = g;
+      d[p] = Math.round(rgb[0] * v);
+      d[p + 1] = Math.round(rgb[1] * v);
+      d[p + 2] = Math.round(rgb[2] * v);
+      d[p + 3] = Math.round(a * 255);
+    }
+    // Pixelated glow halo: dilate the glow field by 1px at reduced strength.
+    for (var y = 0; y < GH; y++) {
+      for (var x = 0; x < GW; x++) {
+        var idx = y * GW + x, gg = glow[idx];
+        // neighbour max for a chunky 1px bloom
+        var halo = 0;
+        if (x > 0) halo = Math.max(halo, glow[idx - 1]);
+        if (x < GW - 1) halo = Math.max(halo, glow[idx + 1]);
+        if (y > 0) halo = Math.max(halo, glow[idx - GW]);
+        if (y < GH - 1) halo = Math.max(halo, glow[idx + GW]);
+        var emit = Math.max(gg, halo * 0.45);
+        if (emit <= 0) continue;
+        var p2 = idx * 4;
+        d[p2] = Math.round(d[p2] * (1 - emit) + gc[0] * emit);
+        d[p2 + 1] = Math.round(d[p2 + 1] * (1 - emit) + gc[1] * emit);
+        d[p2 + 2] = Math.round(d[p2 + 2] * (1 - emit) + gc[2] * emit);
+        d[p2 + 3] = Math.max(d[p2 + 3], Math.round(emit * 255));
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    customCache[key] = out; return out;
+  }
+
+  // The wear-time tint colour for a custom texture in a given slot.
+  function customTintFor(ch, slot, id) {
+    var def = PAINT_SLOTS[slot];
+    var ct = customTex[id];
+    if (def && def.tint && ch && typeof ch[def.tint] === 'string' && /^#/.test(ch[def.tint])) return ch[def.tint];
+    return (ct && ct.tintHint) || '#cccccc';
+  }
+
   // ---- character colour/style resolution ----------------------------------
   function cat(g) { return (manifest && manifest.catalog[g]) || []; }
   function styleFile(g, idx, which) {
@@ -103,49 +220,70 @@ var Textures = (function () {
   var ANCHOR_A = { head: [16, 12], hair: [16, 4], beard: [16, 11], eyes: [16, 7], eyebrows: [16, 6], mouth: [16, 11], accessory: [16, 16], hat: [16, 3] };
   function anchorFor(key) { var a = ANCHOR_A[key] || [16, 18]; return { x: a[0] * GW / 32, y: a[1] * GH / 36 }; }
 
-  // Build the ordered list of {file, hex, key?} layers for a character.
+  // Build the ordered list of {f|custom, c, key?, slot?, dy?} layers for a
+  // character. `slot` tags a layer that a user-painted custom texture may replace.
   function layersFor(ch) {
     var L = [];
+    var tux = (ch.bodyType !== 'humanoid');
     var skin = col(ch, 'skin', '#f3c69a'), hcol = col(ch, 'hairColor', '#b07a43');
     var capeF = (ch.cape | 0) ? styleFile('cape', ch.cape) : null;
-    if (capeF) L.push({ f: capeF, c: col(ch, 'capeColor', '#ff5a3c') });
+    if (capeF) L.push({ f: capeF, c: col(ch, 'capeColor', '#ff5a3c'), slot: 'cape' });
 
-    if (ch.bodyType === 'humanoid') {
+    if (!tux) {
       var hb = styleFile('hair', ch.hair, 'back');
-      if (hb) L.push({ f: hb, c: hcol, key: 'hair' });
+      if (hb) L.push({ f: hb, c: hcol, key: 'hair', slot: 'hair' });
       L.push({ f: manifest.base.humanoidBody, c: skin });                          // skeleton (fixed)
-      L.push({ f: styleFile('pants', ch.pantsStyle), c: col(ch, 'pants', '#3a4a66') });
-      L.push({ f: styleFile('shirt', ch.shirtStyle), c: col(ch, 'belly', '#fdfdfd') });
-      L.push({ f: styleFile('shoes', ch.shoeStyle), c: col(ch, 'feet', '#5a3a22') });
+      L.push({ f: styleFile('pants', ch.pantsStyle), c: col(ch, 'pants', '#3a4a66'), slot: 'pants' });
+      L.push({ f: styleFile('shirt', ch.shirtStyle), c: col(ch, 'belly', '#fdfdfd'), slot: 'shirt' });
+      L.push({ f: styleFile('shoes', ch.shoeStyle), c: col(ch, 'feet', '#5a3a22'), slot: 'shoes' });
       L.push({ f: manifest.base.humanoidHead, c: skin, key: 'head' });             // resizable
       var hf = styleFile('hair', ch.hair, 'front');
-      if (hf) L.push({ f: hf, c: hcol, key: 'hair' });
+      if (hf) L.push({ f: hf, c: hcol, key: 'hair', slot: 'hair' });
       var bd = (ch.beard | 0) ? styleFile('beard', ch.beard) : null;
-      if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard' });
+      if (bd) L.push({ f: bd, c: col(ch, 'beardColor', '#7a4a1f'), key: 'beard', slot: 'beard' });
       var mcol = (typeof ch.mouthColor === 'string' && /^#/.test(ch.mouthColor)) ? ch.mouthColor : darken(skin, 0.85);
       var mo = styleFile('mouth', ch.mouth); if (mo) L.push({ f: mo, c: mcol, key: 'mouth' });               // mouth colour (default = darker skin)
       var br = styleFile('eyebrows', ch.eyebrows); if (br) L.push({ f: br, c: darken(hcol, 0.78), key: 'eyebrows' });
       L.push({ f: styleFile('eyes', ch.eyes), c: null, key: 'eyes' });                                        // sclera (fixed)
-      var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes' }); // iris colour
+      var iris = styleFile('eyes', ch.eyes, 'iris'); if (iris) L.push({ f: iris, c: col(ch, 'irisColor', '#222a3a'), key: 'eyes', slot: 'eyes' }); // iris colour
     } else {
-      L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c') });
-      L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd') });
-      L.push({ f: manifest.base.tuxFeet, c: col(ch, 'feet', '#ff9e2c') });
+      L.push({ f: manifest.base.tuxBody, c: col(ch, 'body', '#11131c'), slot: 'body' });
+      L.push({ f: manifest.base.tuxBelly, c: col(ch, 'belly', '#fdfdfd'), slot: 'belly' });
+      L.push({ f: manifest.base.tuxFeet, c: col(ch, 'feet', '#ff9e2c'), slot: 'feet' });
       L.push({ f: manifest.base.tuxBeak, c: col(ch, 'feet', '#ff9e2c') });
       L.push({ f: styleFile('eyes', ch.eyes), c: null, dy: 5 });
     }
-    var tux = (ch.bodyType !== 'humanoid');
     var accF = (ch.accessory | 0) ? styleFile('accessory', ch.accessory) : null;
-    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: tux ? undefined : 'accessory' });
+    if (accF) L.push({ f: accF, c: null, dy: tux ? 6 : 0, key: tux ? undefined : 'accessory', slot: 'accessory' });
     var hatF = (ch.hat | 0) ? styleFile('hat', ch.hat) : null;
-    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 2 : 0, key: tux ? undefined : 'hat' });
+    if (hatF) L.push({ f: hatF, c: null, dy: tux ? 2 : 0, key: tux ? undefined : 'hat', slot: 'hat' });
+
+    // ---- custom (user-painted) texture injection ----
+    if (ch.tex) {
+      // (a) replace any built-in layer whose slot carries a custom texture
+      L.forEach(function (ly) {
+        var id = ly.slot && ch.tex[ly.slot];
+        if (id && hasCustom(id)) { ly.custom = id; ly.c = customTintFor(ch, ly.slot, id); }
+      });
+      // (b) append custom layers for slots with no built-in layer (e.g. a custom
+      //     hat when no built-in hat is selected)
+      var present = {}; L.forEach(function (ly) { if (ly.slot) present[ly.slot] = true; });
+      Object.keys(ch.tex).forEach(function (slot) {
+        var id = ch.tex[slot];
+        if (!id || !hasCustom(id) || present[slot]) return;
+        var def = PAINT_SLOTS[slot]; if (!def) return;
+        if (tux && !def.tux) return; if (!tux && !def.hum) return;
+        var transformable = (!tux && (slot === 'hat' || slot === 'accessory' || slot === 'hair' || slot === 'beard' || slot === 'eyes'));
+        L.push({ custom: id, c: customTintFor(ch, slot, id), slot: slot, key: transformable ? slot : undefined });
+      });
+    }
     return L;
   }
 
   function sig(ch) {
     return [ch.bodyType, ch.body, ch.belly, ch.feet, ch.skin, ch.hairColor, ch.beardColor,
       ch.pants, ch.capeColor, ch.irisColor, ch.mouthColor, ch.hair, ch.beard, ch.hat, ch.eyes, ch.eyebrows, ch.mouth, ch.accessory, ch.cape,
-      ch.shirtStyle, ch.pantsStyle, ch.shoeStyle, JSON.stringify(ch.tf || {})].join(',');
+      ch.shirtStyle, ch.pantsStyle, ch.shoeStyle, JSON.stringify(ch.tf || {}), JSON.stringify(ch.tex || {})].join(',');
   }
 
   function canon(ch) {
@@ -155,7 +293,7 @@ var Textures = (function () {
     cx.imageSmoothingEnabled = false;
     var tf = ch.tf || {};
     layersFor(ch).forEach(function (ly) {
-      var t = tint(ly.f, ly.c);
+      var t = ly.custom ? customCanvas(ly.custom, ly.c) : tint(ly.f, ly.c);
       if (!t) return;
       var T = ly.key ? tf[ly.key] : null;
       if (T && (T.x || T.y || (T.s && T.s !== 1) || T.r)) {
@@ -232,6 +370,17 @@ var Textures = (function () {
     return true;
   }
 
+  // drawCanon draws the UNWARPED canonical character (GW×GH) at (x,y) scaled by
+  // s. The paint studio uses this so painting maps 1:1 to texture space (no
+  // gender/fat warp to invert). Returns false until textures are ready.
+  function drawCanon(ctx, ch, x, y, s) {
+    if (!ready || !manifest) return false;
+    var c = canon(ch);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(c, x, y, GW * s, GH * s);
+    return true;
+  }
+
   function hexToRgb(h) {
     if (!h || h[0] !== '#') return [128, 128, 128];
     h = h.slice(1);
@@ -299,7 +448,12 @@ var Textures = (function () {
     isReady: function () { return ready; },
     catalog: function (g) { return g ? cat(g) : (manifest && manifest.catalog); },
     grid: function () { return { w: GW, h: GH }; },
-    partAt: partAt, partBox: partBox
+    partAt: partAt, partBox: partBox, drawCanon: drawCanon,
+    // custom (user-painted) textures
+    registerCustom: registerCustomPixels,
+    registerCustomPNG: registerCustomPNG,
+    hasCustom: hasCustom, customMeta: customMeta, customCanvas: customCanvas,
+    paintSlots: function () { return PAINT_SLOTS; }
   };
 })();
 window.Textures = Textures;
