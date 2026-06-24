@@ -169,18 +169,20 @@ func (s *server) handleCharacter(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleDefaultCharacter (GET, public) returns the look new players start with:
-// the admin-set default if one exists, otherwise the built-in Clobi.
+// handleDefaultCharacter (GET, public) returns the looks new players start with:
+// the admin-set default per body-type slot (tux / male / female) if set, else
+// the built-ins. Response shape: {"tux":{...},"male":{...},"female":{...}}.
 func (s *server) handleDefaultCharacter(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.acc.DefaultCharacter(""))
+	writeJSON(w, http.StatusOK, s.acc.AllDefaults(""))
 }
 
-// handleAdminDefault (POST, admin only) sets the global default character that
-// loads automatically for everyone who has not customised their own.
+// handleAdminDefault (POST, admin only) sets the default character for the body
+// type slot of the posted character (derived from its bodyType/gender), loaded
+// automatically for everyone who has not customised their own.
 func (s *server) handleAdminDefault(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

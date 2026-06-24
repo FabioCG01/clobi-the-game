@@ -15,6 +15,25 @@
   function presetsFor(n) { var s = S(); var p = (s && s.PARTS && s.PARTS.presets) || {}; return Array.isArray(p[n]) ? p[n] : ['#888888']; }
   function sanitize(c) { var s = S(); return (s && s.sanitize) ? s.sanitize(c) : (c || {}); }
   function defaultCharacter() { var s = S(); return (s && s.defaultCharacter) ? s.defaultCharacter() : { bodyType: 'tux' }; }
+
+  // Admin-set per-slot default looks (tux/male/female), fetched from the server.
+  var adminDefaults = null;
+  function fetchDefaults() {
+    if (!(window.Store && Store.getDefaultCharacters)) return;
+    Store.getDefaultCharacters().then(function (all) { if (all && typeof all === 'object') adminDefaults = all; }).catch(function () {});
+  }
+  function slotOf(c) { if (!c) return 'male'; if (c.bodyType === 'tux') return 'tux'; return c.gender === 'female' ? 'female' : 'male'; }
+  function slotLabel(slot) { return slot === 'tux' ? t('editor.tux', 'Tux') : (slot === 'female' ? t('editor.female', 'Female') : t('editor.male', 'Male')); }
+  // The effective default for the CURRENT character's slot: the admin default if
+  // loaded, else the local Sprites default coerced to the right body/gender.
+  function defaultForCurrent() {
+    var slot = slotOf(character);
+    if (adminDefaults && adminDefaults[slot] && adminDefaults[slot].bodyType) return adminDefaults[slot];
+    var d = defaultCharacter();
+    if (slot === 'tux') { d.bodyType = 'tux'; }
+    else { d.bodyType = 'humanoid'; d.gender = (slot === 'female') ? 'female' : 'male'; if (slot === 'female') d.beard = 0; }
+    return d;
+  }
   function clone(c) { var o = {}; for (var k in c) if (Object.prototype.hasOwnProperty.call(c, k)) o[k] = c[k]; return o; }
   function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
   function clampN(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -257,21 +276,27 @@
     row.appendChild(mini(t('editor.savePreset', 'Save'), onSavePreset));
     row.appendChild(mini(t('editor.delete', 'Delete'), onDelPreset));
     panelEl.appendChild(row);
-    // Admin only: publish this exact look as everyone's default.
+    // Admin only: publish this exact look as the default for THIS body type.
     if (window.Store && Store.isAdmin && Store.isAdmin()) {
+      var slot = slotOf(character);
       var ac = el('div', 'ed2-card');
       ac.appendChild(el('div', 'ed2-cardlbl', t('editor.admin', 'Admin')));
-      ac.appendChild(el('div', 'ed2-note', t('editor.adminDefaultHint', 'Publish this exact look (including transforms) as the default character that loads for everyone.')));
-      ac.appendChild(mini(t('editor.setDefault', 'Set as global default'), onSetGlobalDefault));
+      ac.appendChild(el('div', 'ed2-note', t('editor.adminDefaultHint', 'Publish this exact look (including transforms) as the default that loads for everyone — for this body type only.') + ' (' + slotLabel(slot) + ')'));
+      ac.appendChild(mini(t('editor.setDefault', 'Set as global default') + ' — ' + slotLabel(slot), onSetGlobalDefault));
       panelEl.appendChild(ac);
     }
   }
   function onSetGlobalDefault() {
     if (!(window.Store && Store.setDefaultRemote)) return;
     var payload = sanitize(character); payload.name = '';
+    var slot = slotOf(character);
     setStatus('editor.savingDefault', 'Publishing default...');
     Store.setDefaultRemote(payload)
-      .then(function () { setStatus('editor.defaultSet', 'Done — this is now the default for everyone.'); })
+      .then(function () {
+        if (!adminDefaults) adminDefaults = {};
+        adminDefaults[slot] = sanitize(payload);
+        setStatus('editor.defaultSet', 'Done — this is now the ' + slotLabel(slot) + ' default for everyone.');
+      })
       .catch(function (e) { setStatus(null, (e && e.message) || 'Failed to set default.'); });
   }
   function mini(label, fn) { var b = el('button', 'ed2-mini', label); b.type = 'button'; b.addEventListener('click', fn); return b; }
@@ -379,7 +404,7 @@
 
   // ---- actions ----
   function onRandom() { var s = S(); var keep = character ? character.name : ''; character = sanitize(s && s.randomCharacter ? s.randomCharacter() : {}); if (!character.name) character.name = keep; tfSel = null; buildTabs(); commitNow(); setStatus('editor.randomized', 'Randomized.'); }
-  function onReset() { var keep = character ? character.name : ''; character = sanitize(defaultCharacter()); if (keep) character.name = keep; tfSel = null; buildTabs(); commitNow(); setStatus('editor.resetDone', 'Reset to default.'); }
+  function onReset() { var keep = character ? character.name : ''; character = sanitize(defaultForCurrent()); if (keep) character.name = keep; tfSel = null; buildTabs(); commitNow(); setStatus('editor.resetDone', 'Reset to default.'); }
   function onSave() {
     var nm = (nameInput && nameInput.value != null) ? nameInput.value.trim() : (character.name || ''); character.name = nm;
     var saved = sanitize(character); saved.name = nm; character = clone(saved); var payload = clone(saved);
@@ -397,6 +422,7 @@
   // ---- public -------------------------------------------------------------
   function show() {
     if (!built) build();
+    fetchDefaults();
     var src = (window.App && App.character) ? App.character : null;
     character = sanitize(src || defaultCharacter());
     if (!character.name && window.App && App.nickname) character.name = String(App.nickname).slice(0, 16);

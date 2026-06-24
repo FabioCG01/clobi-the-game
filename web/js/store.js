@@ -214,17 +214,32 @@ var Store = (function () {
       return lsGet(KEY_ADMIN) === '1';
     },
 
-    // GET the global default character (admin-set, else built-in). Public; used
-    // to start guests / brand-new players with the admin's chosen look.
-    getDefaultCharacter: function () {
-      return request('GET', '/api/default-character', null, false)
-        .then(function (data) {
-          return (data && typeof data === 'object' && data.bodyType) ? data : null;
-        })
-        .catch(function () { return null; });
+    // The default-look slot a character belongs to (tux / male / female).
+    defaultSlotFor: function (bodyType, gender) {
+      if (bodyType === 'tux') return 'tux';
+      return (gender === 'female') ? 'female' : 'male';
     },
 
-    // Admin only: set the global default character (full look incl. transforms).
+    // GET every per-slot default look (admin-set, else built-in). Public.
+    // Resolves with { tux:{...}, male:{...}, female:{...} } (or {} on error).
+    getDefaultCharacters: function () {
+      return request('GET', '/api/default-character', null, false)
+        .then(function (data) { return (data && typeof data === 'object') ? data : {}; })
+        .catch(function () { return {}; });
+    },
+
+    // GET the default look for one body-type slot. Resolves with the character
+    // or null. Used to start guests / brand-new players with the admin's look.
+    getDefaultCharacter: function (bodyType, gender) {
+      var slot = this.defaultSlotFor(bodyType, gender);
+      return this.getDefaultCharacters().then(function (all) {
+        var c = all && all[slot];
+        return (c && typeof c === 'object' && c.bodyType) ? c : null;
+      });
+    },
+
+    // Admin only: set the default look for the posted character's slot (the
+    // server derives the slot from its bodyType/gender). Full look incl. transforms.
     setDefaultRemote: function (character) {
       return request('POST', '/api/admin/default', character, true);
     },

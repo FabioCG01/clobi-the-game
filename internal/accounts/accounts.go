@@ -45,8 +45,36 @@ var (
 var (
 	bAccounts    = []byte("accounts")
 	bSettings    = []byte("settings")
-	kDefaultChar = []byte("defaultCharacter")
+	kDefaultChar = []byte("defaultCharacter") // legacy single-default key (migrated to slots)
 )
+
+// DefaultSlots are the three independent default-look slots. A "tux" has no
+// gender split; humanoids split into "male" and "female".
+var DefaultSlots = []string{"tux", "male", "female"}
+
+// slotFor maps a character to its default slot.
+func slotFor(c protocol.Character) string {
+	if c.BodyType == "tux" {
+		return "tux"
+	}
+	if c.Gender == "female" {
+		return "female"
+	}
+	return "male"
+}
+
+// validSlot normalises an arbitrary slot string to one of DefaultSlots.
+func validSlot(slot string) string {
+	switch slot {
+	case "tux", "male", "female":
+		return slot
+	default:
+		return "male"
+	}
+}
+
+// defaultKey is the settings-bucket key holding the default for a slot.
+func defaultKey(slot string) []byte { return []byte("defaultCharacter:" + validSlot(slot)) }
 
 // account is the stored record for one user (JSON-encoded in the accounts bucket).
 type account struct {
@@ -89,8 +117,33 @@ func NewStore(dataDir, adminUser string) (*Store, error) {
 		return nil, err
 	}
 	s.migrateJSON(filepath.Join(dataDir, "accounts.json"))
+	s.migrateDefaults()
 	s.ensureAdmin()
 	return s, nil
+}
+
+// migrateDefaults upgrades the legacy single "defaultCharacter" setting to the
+// per-slot scheme: it copies the old value into the slot matching its body
+// type/gender (only if that slot is still empty), then removes the legacy key.
+func (s *Store) migrateDefaults() {
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bSettings)
+		v := b.Get(kDefaultChar)
+		if v == nil {
+			return nil
+		}
+		var c protocol.Character
+		if json.Unmarshal(v, &c) == nil {
+			slot := slotFor(c)
+			if b.Get(defaultKey(slot)) == nil {
+				c.Name = ""
+				if data, err := json.Marshal(c); err == nil {
+					_ = b.Put(defaultKey(slot), data)
+				}
+			}
+		}
+		return b.Delete(kDefaultChar)
+	})
 }
 
 // Close releases the database file.
@@ -166,35 +219,58 @@ func (s *Store) VerifyToken(token string) (string, bool) {
 
 // ---- default character (admin-controlled, loaded for everyone) ----
 
-// builtinDefault is the fallback look when the admin has not set a default: a
-// male humanoid "Clobi" — light-brown ponytail, full beard, white shirt + tie.
-func builtinDefault(name string) protocol.Character {
-	return protocol.Character{
+// builtinFor is the fallback look for a slot when the admin has not set one:
+//   - "tux":    the classic black-and-white penguin with orange feet.
+//   - "male":   a male humanoid "Clobi" — light-brown ponytail, full beard.
+//   - "female": the same humanoid, female silhouette, no beard.
+func builtinFor(slot, name string) protocol.Character {
+	if slot == "tux" {
+		return protocol.Character{
+			Name: name, BodyType: "tux", Gender: "male",
+			Body: "#11131c", Belly: "#fdfdfd", Feet: "#ff9e2c", Skin: "#f3c69a",
+			HairColor: "#b07a43", BeardColor: "#7a4a1f", Pants: "#33405c",
+			CapeColor: "#ff5a3c", IrisColor: "#222a3a", MouthColor: "",
+		}
+	}
+	c := protocol.Character{
 		Name: name, BodyType: "humanoid", Gender: "male",
 		Body: "#11131c", Belly: "#fdfdfd", Feet: "#5a3a22", Skin: "#f3c69a",
 		HairColor: "#b07a43", BeardColor: "#7a4a1f", Pants: "#33405c",
 		CapeColor: "#ff5a3c", IrisColor: "#222a3a", MouthColor: "",
 		Fat: 0, Hair: 3, Beard: 3, ShirtStyle: 5, PantsStyle: 0, ShoeStyle: 0,
-		Hat: 0, Eyes: 0, Eyebrows: 0, Mouth: 0, Accessory: 0, Cape: 0,
 	}
+	if slot == "female" {
+		c.Gender = "female"
+		c.Beard = 0 // no beard on the female default
+	}
+	return c
 }
 
-// DefaultCharacter returns the effective default look (admin-set if present,
-// else the built-in Clobi), with the given name applied.
-func (s *Store) DefaultCharacter(name string) protocol.Character {
-	if c, ok := s.GetDefaultCharacter(); ok {
+// DefaultCharacter returns the effective default look for a slot (admin-set if
+// present, else the built-in), with the given name applied.
+func (s *Store) DefaultCharacter(slot, name string) protocol.Character {
+	if c, ok := s.GetDefaultCharacter(slot); ok {
 		c.Name = name
 		return c
 	}
-	return builtinDefault(name)
+	return builtinFor(validSlot(slot), name)
 }
 
-// GetDefaultCharacter returns the admin-set default character, if one is stored.
-func (s *Store) GetDefaultCharacter() (protocol.Character, bool) {
+// AllDefaults returns the effective default look for every slot, keyed by slot.
+func (s *Store) AllDefaults(name string) map[string]protocol.Character {
+	out := make(map[string]protocol.Character, len(DefaultSlots))
+	for _, slot := range DefaultSlots {
+		out[slot] = s.DefaultCharacter(slot, name)
+	}
+	return out
+}
+
+// GetDefaultCharacter returns the admin-set default for a slot, if one is stored.
+func (s *Store) GetDefaultCharacter(slot string) (protocol.Character, bool) {
 	var c protocol.Character
 	found := false
 	_ = s.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket(bSettings).Get(kDefaultChar)
+		v := tx.Bucket(bSettings).Get(defaultKey(slot))
 		if v != nil && json.Unmarshal(v, &c) == nil {
 			found = true
 		}
@@ -203,15 +279,17 @@ func (s *Store) GetDefaultCharacter() (protocol.Character, bool) {
 	return c, found
 }
 
-// SetDefaultCharacter stores the character that loads by default for everyone.
+// SetDefaultCharacter stores a character as the default for its own slot (the
+// slot is derived from the character's body type / gender).
 func (s *Store) SetDefaultCharacter(c protocol.Character) error {
+	slot := slotFor(c)
 	c.Name = "" // a shared default carries no personal name
 	data, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bSettings).Put(kDefaultChar, data)
+		return tx.Bucket(bSettings).Put(defaultKey(slot), data)
 	})
 }
 
@@ -230,7 +308,7 @@ func (s *Store) Register(username, password string) (string, protocol.Character,
 	if err != nil {
 		return "", protocol.Character{}, err
 	}
-	ch := s.DefaultCharacter(uname)
+	ch := s.DefaultCharacter("male", uname)
 	k := key(uname)
 	now := nowStr()
 	err = s.db.Update(func(tx *bolt.Tx) error {
