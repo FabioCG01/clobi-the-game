@@ -40,11 +40,13 @@ var (
 	ErrBadPassword  = errors.New("password must be at least 4 characters")
 	ErrUnknownUser  = errors.New("unknown user")
 	ErrInvalidToken = errors.New("invalid token")
+	ErrBadInput     = errors.New("invalid input")
 )
 
 var (
 	bAccounts    = []byte("accounts")
 	bSettings    = []byte("settings")
+	bSessions    = []byte("sessions")        // token -> canonical username (durable)
 	kDefaultChar = []byte("defaultCharacter") // legacy single-default key (migrated to slots)
 )
 
@@ -77,13 +79,20 @@ func validSlot(slot string) string {
 func defaultKey(slot string) []byte { return []byte("defaultCharacter:" + validSlot(slot)) }
 
 // account is the stored record for one user (JSON-encoded in the accounts bucket).
+//
+// Textures and Presets are the user's creative library, stored server-side so it
+// follows them across devices. They are kept as opaque JSON (the exact shape is
+// owned by the JS client): Textures maps a texture id to its record (a painted
+// cosmetic, PNG included); Presets is the JSON array of saved character looks.
 type account struct {
-	Username  string             `json:"username"`
-	Hash      string             `json:"hash"`
-	Character protocol.Character `json:"character"`
-	IsAdmin   bool               `json:"isAdmin"`
-	CreatedAt string             `json:"createdAt"`
-	UpdatedAt string             `json:"updatedAt"`
+	Username  string                     `json:"username"`
+	Hash      string                     `json:"hash"`
+	Character protocol.Character         `json:"character"`
+	IsAdmin   bool                       `json:"isAdmin"`
+	CreatedAt string                     `json:"createdAt"`
+	UpdatedAt string                     `json:"updatedAt"`
+	Textures  map[string]json.RawMessage `json:"textures,omitempty"`
+	Presets   json.RawMessage            `json:"presets,omitempty"`
 }
 
 // Store is a concurrency-safe account + settings store backed by bbolt.
@@ -110,7 +119,10 @@ func NewStore(dataDir, adminUser string) (*Store, error) {
 		if _, e := tx.CreateBucketIfNotExists(bAccounts); e != nil {
 			return e
 		}
-		_, e := tx.CreateBucketIfNotExists(bSettings)
+		if _, e := tx.CreateBucketIfNotExists(bSettings); e != nil {
+			return e
+		}
+		_, e := tx.CreateBucketIfNotExists(bSessions)
 		return e
 	}); err != nil {
 		_ = db.Close()
@@ -118,8 +130,27 @@ func NewStore(dataDir, adminUser string) (*Store, error) {
 	}
 	s.migrateJSON(filepath.Join(dataDir, "accounts.json"))
 	s.migrateDefaults()
+	s.loadSessions()
 	s.ensureAdmin()
 	return s, nil
+}
+
+// loadSessions repopulates the in-memory token map from the durable sessions
+// bucket so that logins survive a server restart / redeploy (otherwise every
+// client would silently fall back to a stale, rejected token).
+func (s *Store) loadSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bSessions)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(token, uname []byte) error {
+			s.tokens[string(token)] = string(uname)
+			return nil
+		})
+	})
 }
 
 // migrateDefaults upgrades the legacy single "defaultCharacter" setting to the
@@ -196,18 +227,35 @@ func (s *Store) newSession(uname string) (string, error) {
 	s.mu.Lock()
 	s.tokens[token] = uname
 	s.mu.Unlock()
+	// Persist so the session survives a restart. A failure here is non-fatal:
+	// the in-memory token still works until the next restart.
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bSessions).Put([]byte(token), []byte(uname))
+	})
 	return token, nil
 }
 
 func (s *Store) revokeUser(username string) {
 	u := strings.TrimSpace(username)
+	var dead []string
 	s.mu.Lock()
 	for t, who := range s.tokens {
 		if strings.EqualFold(who, u) {
+			dead = append(dead, t)
 			delete(s.tokens, t)
 		}
 	}
 	s.mu.Unlock()
+	if len(dead) == 0 {
+		return
+	}
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bSessions)
+		for _, t := range dead {
+			_ = b.Delete([]byte(t))
+		}
+		return nil
+	})
 }
 
 // VerifyToken resolves a session token to its canonical username.
@@ -388,6 +436,137 @@ func (s *Store) SetCharacter(username string, c protocol.Character) error {
 	})
 }
 
+// ---- creative library (painted textures + character presets) ----
+
+// GetLibrary returns the user's stored texture library and presets. The texture
+// map is never nil; presets may be nil when the user has none.
+func (s *Store) GetLibrary(username string) (map[string]json.RawMessage, json.RawMessage, bool) {
+	tex := map[string]json.RawMessage{}
+	var pre json.RawMessage
+	found := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, key(username))
+		if !ok {
+			return nil
+		}
+		found = true
+		for k, v := range a.Textures {
+			tex[k] = v
+		}
+		pre = a.Presets
+		return nil
+	})
+	return tex, pre, found
+}
+
+// SaveTexture stores (or replaces) one texture record in the user's library.
+func (s *Store) SaveTexture(username, id string, rec json.RawMessage) error {
+	if strings.TrimSpace(id) == "" || len(rec) == 0 {
+		return ErrBadInput
+	}
+	k := key(username)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, k)
+		if !ok {
+			return ErrUnknownUser
+		}
+		if a.Textures == nil {
+			a.Textures = map[string]json.RawMessage{}
+		}
+		a.Textures[id] = rec
+		a.UpdatedAt = nowStr()
+		return s.putAccount(tx, k, a)
+	})
+}
+
+// DeleteTexture removes one texture from the user's library (no error if absent).
+func (s *Store) DeleteTexture(username, id string) error {
+	k := key(username)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, k)
+		if !ok {
+			return ErrUnknownUser
+		}
+		if a.Textures != nil {
+			delete(a.Textures, id)
+		}
+		a.UpdatedAt = nowStr()
+		return s.putAccount(tx, k, a)
+	})
+}
+
+// SetPresets replaces the user's saved character presets (opaque JSON array).
+func (s *Store) SetPresets(username string, raw json.RawMessage) error {
+	k := key(username)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, k)
+		if !ok {
+			return ErrUnknownUser
+		}
+		a.Presets = raw
+		a.UpdatedAt = nowStr()
+		return s.putAccount(tx, k, a)
+	})
+}
+
+// MergeLibrary folds anonymous/guest work into the account WITHOUT clobbering
+// what is already there: texture ids not yet present are added; presets passed in
+// are appended after the existing ones (so nothing the user already saved is
+// lost). It returns the resulting library so the client can refresh its cache.
+func (s *Store) MergeLibrary(username string, tex map[string]json.RawMessage, pre json.RawMessage) (map[string]json.RawMessage, json.RawMessage, error) {
+	k := key(username)
+	var outTex map[string]json.RawMessage
+	var outPre json.RawMessage
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		a, ok := s.getAccount(tx, k)
+		if !ok {
+			return ErrUnknownUser
+		}
+		if a.Textures == nil {
+			a.Textures = map[string]json.RawMessage{}
+		}
+		for id, rec := range tex {
+			if id == "" || len(rec) == 0 {
+				continue
+			}
+			if _, exists := a.Textures[id]; !exists {
+				a.Textures[id] = rec
+			}
+		}
+		a.Presets = appendPresets(a.Presets, pre)
+		a.UpdatedAt = nowStr()
+		outTex = a.Textures
+		outPre = a.Presets
+		return s.putAccount(tx, k, a)
+	})
+	return outTex, outPre, err
+}
+
+// appendPresets concatenates two JSON preset arrays, tolerating nils/garbage.
+func appendPresets(existing, incoming json.RawMessage) json.RawMessage {
+	var a, b []json.RawMessage
+	if len(existing) > 0 {
+		_ = json.Unmarshal(existing, &a)
+	}
+	if len(incoming) > 0 {
+		_ = json.Unmarshal(incoming, &b)
+	}
+	if len(b) == 0 {
+		if existing != nil {
+			return existing
+		}
+	}
+	merged := append(a, b...)
+	if merged == nil {
+		return nil
+	}
+	out, err := json.Marshal(merged)
+	if err != nil {
+		return existing
+	}
+	return out
+}
+
 // IsAdmin reports whether the user may set the global default character.
 func (s *Store) IsAdmin(username string) bool {
 	admin := false
@@ -414,13 +593,19 @@ func (s *Store) ExportAccount(username string) (map[string]interface{}, bool) {
 			return nil
 		}
 		ok = true
+		textures := a.Textures
+		if textures == nil {
+			textures = map[string]json.RawMessage{}
+		}
 		out = map[string]interface{}{
 			"username":  a.Username,
 			"character": a.Character,
+			"textures":  textures,
+			"presets":   a.Presets,
 			"isAdmin":   a.IsAdmin,
 			"createdAt": a.CreatedAt,
 			"updatedAt": a.UpdatedAt,
-			"note":      "This is all personal data we store about your account. Your password is kept only as a one-way bcrypt hash and is never exported. No email, IP address, or tracking data is collected.",
+			"note":      "This is all personal data we store about your account: your username, character, painted textures and saved presets. Your password is kept only as a one-way bcrypt hash and is never exported. No email, IP address, or tracking data is collected.",
 		}
 		return nil
 	})

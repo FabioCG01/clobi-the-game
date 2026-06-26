@@ -273,6 +273,7 @@ const Menu = (function () {
   function show() {
     build();
     wireI18n();
+    wireAuthExpiry();
     syncFromApp();
     refreshAccountUi();
 
@@ -289,6 +290,18 @@ const Menu = (function () {
     if (i18nWired || typeof I18n === 'undefined' || !I18n.onChange) return;
     I18n.onChange(function () { rebuildStaticText(); });
     i18nWired = true;
+  }
+
+  // A stale token was dropped by Store (e.g. after a server restart): reflect the
+  // signed-out state and let the player know so nothing fails silently.
+  let authWired = false;
+  function wireAuthExpiry() {
+    if (authWired || typeof window === 'undefined') return;
+    window.addEventListener('clobi:auth-expired', function () {
+      refreshAccountUi();
+      toast(t('account.sessionExpired', 'Your session expired — please sign in again.'), 'warn');
+    });
+    authWired = true;
   }
 
   // ---- App / Store sync --------------------------------------------------
@@ -506,7 +519,12 @@ const Menu = (function () {
       if (typeof action !== 'function') { errLine.textContent = t('account.error', 'Accounts unavailable.'); return; }
       setBusy(true);
       Promise.resolve(action.call(Store, u, p))
-        .then(function (res) { syncCharacterFromStore(res); refreshAccountUi(); closeAnyModal(); })
+        .then(function (res) {
+          syncCharacterFromStore(res);
+          // The account's painted cosmetics are now in the cache — register them.
+          if (typeof App !== 'undefined' && App.refreshTextures) { try { App.refreshTextures(); } catch (e) { /* ignore */ } }
+          refreshAccountUi(); closeAnyModal();
+        })
         .catch(function (err) { setBusy(false); errLine.textContent = humanizeAuthError(err); });
     }
     submitBtn.addEventListener('click', doSubmit);

@@ -10,6 +10,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -66,6 +67,11 @@ func Run(addr, webDir, dataDir string) error {
 	mux.HandleFunc("/api/admin/default", s.handleAdminDefault)
 	mux.HandleFunc("/api/account/export", s.handleExport)
 	mux.HandleFunc("/api/account", s.handleAccount)
+	mux.HandleFunc("/api/library", s.handleLibrary)
+	mux.HandleFunc("/api/library/texture", s.handleLibraryTexture)
+	mux.HandleFunc("/api/library/texture-delete", s.handleLibraryTextureDelete)
+	mux.HandleFunc("/api/library/presets", s.handleLibraryPresets)
+	mux.HandleFunc("/api/library/migrate", s.handleLibraryMigrate)
 	mux.HandleFunc("/api/market/", s.handleMarket)
 	mux.HandleFunc("/", s.handleStatic)
 
@@ -256,6 +262,139 @@ func (s *server) handleAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ---- REST: creative library (textures + presets), per account ----
+
+// libraryResponse is the shape returned by GET /api/library and the migrate
+// endpoint: the user's whole creative library so the client can hydrate its cache.
+type libraryResponse struct {
+	Textures map[string]json.RawMessage `json:"textures"`
+	Presets  json.RawMessage            `json:"presets"`
+}
+
+// handleLibrary (GET, auth) returns the signed-in user's textures + presets.
+func (s *server) handleLibrary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	tex, pre, _ := s.acc.GetLibrary(username)
+	writeJSON(w, http.StatusOK, libraryResponse{Textures: tex, Presets: pre})
+}
+
+// handleLibraryTexture (POST, auth) saves one painted texture record. The body
+// is the full record {id,slot,title,glowColor,tintHint,createdAt,remixOf,png}.
+func (s *server) handleLibraryTexture(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.libAuth(w, r)
+	if !ok {
+		return
+	}
+	var rec struct {
+		ID string `json:"id"`
+	}
+	raw, err := readBody(r, 8<<20) // textures carry a base64 PNG; allow headroom
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if json.Unmarshal(raw, &rec) != nil || rec.ID == "" {
+		writeError(w, http.StatusBadRequest, "texture needs an id")
+		return
+	}
+	if err := s.acc.SaveTexture(username, rec.ID, json.RawMessage(raw)); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save texture")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": rec.ID})
+}
+
+// handleLibraryTextureDelete (POST, auth) removes one texture by id.
+func (s *server) handleLibraryTextureDelete(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.libAuth(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := decodeJSON(r, &body); err != nil || body.ID == "" {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := s.acc.DeleteTexture(username, body.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not delete texture")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleLibraryPresets (PUT, auth) replaces the user's saved character presets.
+func (s *server) handleLibraryPresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return
+	}
+	raw, err := readBody(r, 2<<20)
+	if err != nil || !json.Valid(raw) {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if err := s.acc.SetPresets(username, json.RawMessage(raw)); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save presets")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleLibraryMigrate (POST, auth) folds anonymous/guest work (textures +
+// presets created before signing in) into the account without clobbering what is
+// already stored, then returns the merged library.
+func (s *server) handleLibraryMigrate(w http.ResponseWriter, r *http.Request) {
+	username, ok := s.libAuth(w, r)
+	if !ok {
+		return
+	}
+	raw, err := readBody(r, 16<<20) // a whole guest library of PNGs
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	var in libraryResponse
+	if json.Unmarshal(raw, &in) != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	tex, pre, err := s.acc.MergeLibrary(username, in.Textures, in.Presets)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not merge library")
+		return
+	}
+	writeJSON(w, http.StatusOK, libraryResponse{Textures: tex, Presets: pre})
+}
+
+// libAuth requires POST + a valid token for the write-style library endpoints.
+func (s *server) libAuth(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return "", false
+	}
+	username, ok := s.authUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid token")
+		return "", false
+	}
+	return username, true
 }
 
 // ---- REST: marketplace ----
@@ -608,6 +747,12 @@ func contentTypeFor(full string) string {
 func decodeJSON(r *http.Request, dst interface{}) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
 	return dec.Decode(dst)
+}
+
+// readBody reads a request body up to max bytes (for endpoints that carry larger
+// payloads than the default 1 MiB, e.g. base64-encoded PNG textures).
+func readBody(r *http.Request, max int64) ([]byte, error) {
+	return io.ReadAll(http.MaxBytesReader(nil, r.Body, max))
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {

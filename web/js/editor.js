@@ -43,7 +43,6 @@
   // transformable parts (humanoid): label + which sliders apply.
   var TF_OBJ = { head: ['Head', 's'], hair: ['Hair', 'xysr'], eyebrows: ['Brows', 'xysr'], eyes: ['Eyes', 'xysr'], mouth: ['Mouth', 'xysr'], beard: ['Beard', 'xysr'], hat: ['Hat', 'xysr'], accessory: ['Acc.', 'xysr'] };
   var TF_ORDER = ['head', 'hair', 'eyebrows', 'eyes', 'mouth', 'beard', 'hat', 'accessory'];
-  var PRESETS_KEY = 'clobi.presets';
 
   var root, built = false, canvas, ctx, box, nameInput, tabbarEl, panelEl, hintEl, bodyToggleEl, zoomSlider, adjBody, presetSel;
   var character = null, facing = 1, zoom = 1.0, animFrame = 0, rafId = null;
@@ -270,9 +269,9 @@
   }
   function refreshAdjSliders() { if (activeTab !== 'adjust' || !adjBody) return; Array.prototype.forEach.call(adjBody.querySelectorAll('input[data-prop]'), function (sl) { sl.value = String(getTf(tfSel)[sl.dataset.prop]); }); }
 
-  // ---- presets ----
-  function readPresets() { try { return JSON.parse(window.localStorage.getItem(PRESETS_KEY)) || []; } catch (e) { return []; } }
-  function writePresets(a) { try { window.localStorage.setItem(PRESETS_KEY, JSON.stringify(a)); } catch (e) { } }
+  // ---- presets (stored via Store: local cache + synced to the account) ----
+  function readPresets() { return (window.Store && Store.listPresets) ? Store.listPresets() : []; }
+  function writePresets(a) { if (window.Store && Store.savePresets) Store.savePresets(a); }
   function buildSaves() {
     panelEl.appendChild(el('div', 'ed2-cardlbl', t('editor.presets', 'Presets')));
     presetSel = el('select', 'ed2-select'); refreshPresets(); panelEl.appendChild(presetSel);

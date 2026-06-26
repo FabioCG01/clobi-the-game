@@ -28,6 +28,7 @@ var Store = (function () {
   var KEY_USER = 'clobi.username';
   var KEY_ADMIN = 'clobi.isAdmin';
   var KEY_TEX = 'clobi.textures';   // local library of painted textures (id -> record)
+  var KEY_PRESETS = 'clobi.presets'; // local library of saved character presets (array)
   var COOKIE_NICK = 'clobi_nick';
 
   // ---- low-level localStorage helpers (degrade gracefully if unavailable) ----
@@ -120,6 +121,10 @@ var Store = (function () {
           try { data = JSON.parse(text); } catch (e) { data = null; }
         }
         if (!res.ok) {
+          // A stale token (e.g. after a server restart) means the client only
+          // *looks* signed in. Drop the dead session so the UI reflects reality
+          // and the user is prompted to sign in again instead of silent failures.
+          if (res.status === 401 && useAuth) clearSession();
           var message = (data && (data.error || data.message)) || ('HTTP ' + res.status);
           var err = new Error(message);
           err.status = res.status;
@@ -131,8 +136,69 @@ var Store = (function () {
     });
   }
 
+  // Drop the session token (keeps the local library cache so worn cosmetics
+  // still show until the next sign-in re-syncs them). Fires a one-off event so
+  // the UI can refresh its "Sign in" button and tell the user.
+  var _clearing = false;
+  function clearSession() {
+    if (_clearing) return; // guard re-entrancy when many requests 401 at once
+    _clearing = true;
+    lsRemove(KEY_TOKEN); lsRemove(KEY_USER); lsRemove(KEY_ADMIN);
+    try { if (window.dispatchEvent) window.dispatchEvent(new Event('clobi:auth-expired')); } catch (e) { /* ignore */ }
+    setTimeout(function () { _clearing = false; }, 0);
+  }
+
   // Extract the {item} envelope returned by most marketplace mutations.
   function it(d) { return d && d.item; }
+  function noop() { }
+
+  // ---- creative library cache (textures + presets) -----------------------
+  // localStorage is a write-through cache; when signed in the server is the
+  // source of truth and follows the player across devices.
+  function readTexturesLocal() {
+    var raw = lsGet(KEY_TEX);
+    if (!raw) return {};
+    try { var o = JSON.parse(raw); return (o && typeof o === 'object') ? o : {}; }
+    catch (e) { return {}; }
+  }
+  function writeTexturesLocal(map) {
+    try { lsSet(KEY_TEX, JSON.stringify(map || {})); } catch (e) { /* quota */ }
+  }
+  function readPresetsLocal() {
+    var raw = lsGet(KEY_PRESETS);
+    if (!raw) return [];
+    try { var a = JSON.parse(raw); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function writePresetsLocal(arr) {
+    try { lsSet(KEY_PRESETS, JSON.stringify(Array.isArray(arr) ? arr : [])); } catch (e) { /* quota */ }
+  }
+
+  function loggedIn() { return !!lsGet(KEY_TOKEN); }
+
+  // Pull the account library into the local cache (used at boot when already
+  // signed in). Server wins, so the cache mirrors the account exactly.
+  function pullLibrary() {
+    if (!loggedIn()) return Promise.resolve(null);
+    return request('GET', '/api/library', null, true).then(function (d) {
+      if (d && d.textures && typeof d.textures === 'object') writeTexturesLocal(d.textures);
+      if (d && Object.prototype.hasOwnProperty.call(d, 'presets')) writePresetsLocal(d.presets || []);
+      return d;
+    }).catch(function () { return null; });
+  }
+
+  // Fold whatever the player made while signed out into their account WITHOUT
+  // clobbering existing work, then mirror the merged result into the cache.
+  // Runs right after register/login so guest creations are never lost.
+  function migrateLibrary() {
+    if (!loggedIn()) return Promise.resolve(null);
+    var payload = { textures: readTexturesLocal(), presets: readPresetsLocal() };
+    return request('POST', '/api/library/migrate', payload, true).then(function (d) {
+      if (d && d.textures && typeof d.textures === 'object') writeTexturesLocal(d.textures);
+      if (d && Object.prototype.hasOwnProperty.call(d, 'presets')) writePresetsLocal(d.presets || []);
+      return d;
+    }).catch(function () { return null; });
+  }
 
   // Persist the session returned by register/login and surface the character.
   function adoptSession(username, data) {
@@ -177,32 +243,44 @@ var Store = (function () {
       return c;
     },
 
-    // -------- local texture library (painted cosmetics) --------
+    // -------- creative library: painted textures (per device + account) --------
     // Each record: {id, slot, title, glowColor, tintHint, createdAt, remixOf, png}.
-    getLocalTextures: function () {
-      var raw = lsGet(KEY_TEX);
-      if (!raw) return {};
-      try { var o = JSON.parse(raw); return (o && typeof o === 'object') ? o : {}; }
-      catch (e) { return {}; }
-    },
+    // localStorage is a write-through cache; when signed in every change is also
+    // pushed to the account so it shows up on every device.
+    getLocalTextures: function () { return readTexturesLocal(); },
     getLocalTexture: function (id) {
-      return this.getLocalTextures()[id] || null;
+      return readTexturesLocal()[id] || null;
     },
     listLocalTextures: function () {
-      var all = this.getLocalTextures();
+      var all = readTexturesLocal();
       return Object.keys(all).map(function (k) { return all[k]; });
     },
     saveLocalTexture: function (record) {
       if (!record || !record.id) return record;
-      var all = this.getLocalTextures();
+      var all = readTexturesLocal();
       all[record.id] = record;
-      lsSet(KEY_TEX, JSON.stringify(all));
+      writeTexturesLocal(all);
+      if (loggedIn()) request('POST', '/api/library/texture', record, true).catch(noop);
       return record;
     },
     removeLocalTexture: function (id) {
-      var all = this.getLocalTextures();
-      if (all[id]) { delete all[id]; lsSet(KEY_TEX, JSON.stringify(all)); }
+      var all = readTexturesLocal();
+      if (all[id]) { delete all[id]; writeTexturesLocal(all); }
+      if (loggedIn()) request('POST', '/api/library/texture-delete', { id: id }, true).catch(noop);
     },
+
+    // -------- creative library: character presets (per device + account) --------
+    listPresets: function () { return readPresetsLocal(); },
+    savePresets: function (arr) {
+      arr = Array.isArray(arr) ? arr : [];
+      writePresetsLocal(arr);
+      if (loggedIn()) request('PUT', '/api/library/presets', arr, true).catch(noop);
+      return arr;
+    },
+
+    // Pull the whole account library (textures + presets) into the local cache.
+    // Called at boot when already signed in so a fresh device is hydrated.
+    syncLibrary: function () { return pullLibrary(); },
 
     // -------- account session state --------
     getToken: function () {
@@ -223,7 +301,9 @@ var Store = (function () {
       return request('POST', '/api/register',
         { username: username, password: password }, false)
         .then(function (data) {
-          return adoptSession(username, data);
+          var ch = adoptSession(username, data);
+          // Carry anonymous work into the brand-new account, then settle on it.
+          return migrateLibrary().then(function () { return ch; });
         });
     },
 
@@ -231,7 +311,9 @@ var Store = (function () {
       return request('POST', '/api/login',
         { username: username, password: password }, false)
         .then(function (data) {
-          return adoptSession(username, data);
+          var ch = adoptSession(username, data);
+          // Merge any guest work made on this device, then mirror the account.
+          return migrateLibrary().then(function () { return ch; });
         });
     },
 
@@ -239,6 +321,10 @@ var Store = (function () {
       lsRemove(KEY_TOKEN);
       lsRemove(KEY_USER);
       lsRemove(KEY_ADMIN);
+      // The library lives safely on the account now; drop the local cache so it
+      // can't bleed into the next person who signs in on this device.
+      lsRemove(KEY_TEX);
+      lsRemove(KEY_PRESETS);
     },
 
     isAdmin: function () {

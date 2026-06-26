@@ -122,11 +122,14 @@ var App = (function () {
       try { I18n.init(); } catch (e) { /* default 'en' */ }
     }
 
-    // 2) Preload the image-based character textures, then register any locally
-    //    painted custom textures so worn cosmetics render. Non-blocking.
+    // 2) Preload the image-based character textures. If signed in, first pull the
+    //    account's creative library into the local cache so a fresh device is
+    //    hydrated; then register any painted custom textures so worn cosmetics
+    //    render. Non-blocking.
     if (typeof Textures !== 'undefined' && Textures.load) {
       try {
         Textures.load('assets/tex/')
+          .then(function () { return (hasStore() && Store.syncLibrary) ? Store.syncLibrary() : null; })
           .then(function () { return registerLocalTextures(); })
           .then(function () { refreshUI(); })
           .catch(function () {});
@@ -181,10 +184,17 @@ var App = (function () {
     }
   }
 
+  // Re-register painted textures from the (freshly synced) cache and re-render.
+  // Called after sign-in so the account's cosmetics show up immediately.
+  function refreshTextures() {
+    return registerLocalTextures().then(function () { refreshUI(); });
+  }
+
   // ---- public object -----------------------------------------------------
   var api = {
     showScreen: showScreen,
     updateCharacter: updateCharacter,
+    refreshTextures: refreshTextures,
     boot: boot
   };
 
