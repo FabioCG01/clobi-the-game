@@ -5,11 +5,12 @@
 // Configuration comes entirely from the environment so the same binary runs
 // unchanged inside the project's Docker image and on a developer's machine:
 //
-//	PORT      TCP port to listen on        (default 1337)
-//	WEB_DIR   static web client directory  (default web)
-//	DATA_DIR  account/data directory       (default data)
+//	PORT          TCP port to listen on            (default 1337)
+//	WEB_DIR       static web client directory      (default web)
+//	DATABASE_URL  PostgreSQL connection URL        (required)
+//	ADMIN_USER    username granted admin rights    (default fabiocg)
 //
-// A tribute to Clobi: Linux, open source, vim, and a militant distaste for
+// A tribute to Clobi: Linux, open source, vim, and a healthy distaste for
 // Windows pop-ups.
 package main
 
@@ -23,12 +24,15 @@ import (
 func main() {
 	port := envOr("PORT", "1337")
 	webDir := envOr("WEB_DIR", "web")
-	dataDir := envOr("DATA_DIR", "data")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is required (e.g. postgres://clobi:pw@127.0.0.1:5432/clobi?sslmode=disable)")
+	}
 
 	addr := ":" + port
 
-	log.Printf("TUX SMASH ROYALE listening on %s (web=%q data=%q)", addr, webDir, dataDir)
-	if err := server.Run(addr, webDir, dataDir); err != nil {
+	log.Printf("TUX SMASH ROYALE listening on %s (web=%q, postgres)", addr, webDir)
+	if err := server.Run(addr, webDir, dsn); err != nil {
 		log.Fatalf("server stopped: %v", err)
 	}
 }

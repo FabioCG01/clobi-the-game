@@ -1,34 +1,34 @@
 // Package accounts is the account + settings store for TUX SMASH ROYALE.
 //
-// Storage is a proper embedded database: bbolt (go.etcd.io/bbolt), the pure-Go,
-// ACID, single-file transactional key/value engine that powers etcd and Consul.
-// It keeps the project a single static binary (no cgo, no external DB service),
-// while giving real transactions, crash safety and a file we can lock down on
-// the data volume (0600). There is no SQL, so there is no injection surface;
-// passwords are only ever stored as bcrypt hashes.
+// Storage is PostgreSQL (via the pure-Go pgx driver through database/sql, so the
+// server stays a single static binary). Everything a player owns lives on the
+// server and follows them across devices: the account (username + bcrypt hash +
+// character), the creative library (painted textures + character presets),
+// durable bearer-token sessions, and the admin-controlled default looks.
 //
-// Two buckets:
-//   "accounts" : lower(username) -> JSON account{username,hash,character,isAdmin,timestamps}
-//   "settings" : "defaultCharacter" -> JSON Character set by the admin (loaded for everyone)
+// Tables (see internal/pgdb for the schema):
+//   accounts(username, display, hash, is_admin, character jsonb, skin jsonb, presets jsonb, …)
+//   textures(username, tex_id, record jsonb)        -- per-user painted cosmetics
+//                                                      (3D era: doubles as the cloud skin library)
+//   sessions(token, username)                        -- durable login tokens
+//   settings(key, value jsonb)                       -- default looks + default skin
 //
-// Session tokens are random bearer tokens kept only in memory (not personal data
-// at rest). A one-time migration imports any legacy accounts.json on first boot.
+// Session tokens are also cached in memory so per-request auth is a map lookup
+// (the sessions table is the durable backing, reloaded on boot).
 package accounts
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
+	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"clobi/internal/protocol"
 
-	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -43,16 +43,13 @@ var (
 	ErrBadInput     = errors.New("invalid input")
 )
 
-var (
-	bAccounts    = []byte("accounts")
-	bSettings    = []byte("settings")
-	bSessions    = []byte("sessions")        // token -> canonical username (durable)
-	kDefaultChar = []byte("defaultCharacter") // legacy single-default key (migrated to slots)
-)
-
 // DefaultSlots are the three independent default-look slots. A "tux" has no
 // gender split; humanoids split into "male" and "female".
 var DefaultSlots = []string{"tux", "male", "female"}
+
+// globalKey is the settings key for the single look every brand-new player
+// starts with (the "first character"), independent of body-type slot.
+const globalKey = "globalDefaultCharacter"
 
 // slotFor maps a character to its default slot.
 func slotFor(c protocol.Character) string {
@@ -75,119 +72,57 @@ func validSlot(slot string) string {
 	}
 }
 
-// defaultKey is the settings-bucket key holding the default for a slot.
-func defaultKey(slot string) []byte { return []byte("defaultCharacter:" + validSlot(slot)) }
+// defaultKey is the settings key holding the default look for a slot.
+func defaultKey(slot string) string { return "defaultCharacter:" + validSlot(slot) }
 
-// account is the stored record for one user (JSON-encoded in the accounts bucket).
-//
-// Textures and Presets are the user's creative library, stored server-side so it
-// follows them across devices. They are kept as opaque JSON (the exact shape is
-// owned by the JS client): Textures maps a texture id to its record (a painted
-// cosmetic, PNG included); Presets is the JSON array of saved character looks.
-type account struct {
-	Username  string                     `json:"username"`
-	Hash      string                     `json:"hash"`
-	Character protocol.Character         `json:"character"`
-	IsAdmin   bool                       `json:"isAdmin"`
-	CreatedAt string                     `json:"createdAt"`
-	UpdatedAt string                     `json:"updatedAt"`
-	Textures  map[string]json.RawMessage `json:"textures,omitempty"`
-	Presets   json.RawMessage            `json:"presets,omitempty"`
-}
-
-// Store is a concurrency-safe account + settings store backed by bbolt.
+// Store is a concurrency-safe account + settings store backed by Postgres.
 type Store struct {
-	db     *bolt.DB
-	mu     sync.Mutex        // guards tokens only (bbolt has its own locking)
-	tokens map[string]string // token -> canonical username (in-memory only)
-	admin  string            // lowercase admin username (gets isAdmin on touch)
+	db     *sql.DB
+	mu     sync.RWMutex      // guards the in-memory token cache
+	tokens map[string]string // token -> canonical username (cache over sessions table)
+	admin  string            // lowercase admin username (gets is_admin on touch)
 }
 
-// NewStore opens (creating if needed) the bbolt database under dataDir, ensures
-// the buckets exist, migrates any legacy accounts.json once, and marks adminUser
-// as an admin. The DB file is created mode 0600.
-func NewStore(dataDir, adminUser string) (*Store, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, err
-	}
-	db, err := bolt.Open(filepath.Join(dataDir, "clobi.db"), 0o600, &bolt.Options{Timeout: 5 * time.Second})
-	if err != nil {
-		return nil, err
-	}
+// NewStore wraps an open *sql.DB (schema already migrated by pgdb.Open), loads
+// the session cache, and flags adminUser as an admin if that account exists.
+func NewStore(db *sql.DB, adminUser string) (*Store, error) {
 	s := &Store{db: db, tokens: make(map[string]string), admin: key(adminUser)}
-	if err := db.Update(func(tx *bolt.Tx) error {
-		if _, e := tx.CreateBucketIfNotExists(bAccounts); e != nil {
-			return e
-		}
-		if _, e := tx.CreateBucketIfNotExists(bSettings); e != nil {
-			return e
-		}
-		_, e := tx.CreateBucketIfNotExists(bSessions)
-		return e
-	}); err != nil {
-		_ = db.Close()
+	if err := s.loadSessions(); err != nil {
 		return nil, err
 	}
-	s.migrateJSON(filepath.Join(dataDir, "accounts.json"))
-	s.migrateDefaults()
-	s.loadSessions()
 	s.ensureAdmin()
 	return s, nil
 }
 
-// loadSessions repopulates the in-memory token map from the durable sessions
-// bucket so that logins survive a server restart / redeploy (otherwise every
-// client would silently fall back to a stale, rejected token).
-func (s *Store) loadSessions() {
+// loadSessions repopulates the in-memory token cache from the durable sessions
+// table so logins survive a restart / redeploy.
+func (s *Store) loadSessions() error {
+	rows, err := s.db.Query(`SELECT token, username FROM sessions`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bSessions)
-		if b == nil {
-			return nil
+	for rows.Next() {
+		var token, uname string
+		if err := rows.Scan(&token, &uname); err != nil {
+			return err
 		}
-		return b.ForEach(func(token, uname []byte) error {
-			s.tokens[string(token)] = string(uname)
-			return nil
-		})
-	})
+		s.tokens[token] = uname
+	}
+	return rows.Err()
 }
 
-// migrateDefaults upgrades the legacy single "defaultCharacter" setting to the
-// per-slot scheme: it copies the old value into the slot matching its body
-// type/gender (only if that slot is still empty), then removes the legacy key.
-func (s *Store) migrateDefaults() {
-	_ = s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bSettings)
-		v := b.Get(kDefaultChar)
-		if v == nil {
-			return nil
-		}
-		var c protocol.Character
-		if json.Unmarshal(v, &c) == nil {
-			slot := slotFor(c)
-			if b.Get(defaultKey(slot)) == nil {
-				c.Name = ""
-				if data, err := json.Marshal(c); err == nil {
-					_ = b.Put(defaultKey(slot), data)
-				}
-			}
-		}
-		return b.Delete(kDefaultChar)
-	})
-}
-
-// Close releases the database file.
+// Close releases the database pool.
 func (s *Store) Close() error { return s.db.Close() }
 
-// DB exposes the underlying bbolt handle so sibling stores (e.g. the marketplace)
-// can share the single database file instead of opening their own.
-func (s *Store) DB() *bolt.DB { return s.db }
+// DB exposes the pool so sibling stores (the marketplace) share one connection
+// pool instead of opening their own.
+func (s *Store) DB() *sql.DB { return s.db }
 
 // key normalizes a username for case-insensitive lookups.
 func key(username string) string { return strings.ToLower(strings.TrimSpace(username)) }
-
-func nowStr() string { return time.Now().UTC().Format(time.RFC3339) }
 
 func newToken() (string, error) {
 	b := make([]byte, 32)
@@ -197,65 +132,33 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func (s *Store) getAccount(tx *bolt.Tx, k string) (account, bool) {
-	v := tx.Bucket(bAccounts).Get([]byte(k))
-	if v == nil {
-		return account{}, false
-	}
-	var a account
-	if json.Unmarshal(v, &a) != nil {
-		return account{}, false
-	}
-	return a, true
-}
-
-func (s *Store) putAccount(tx *bolt.Tx, k string, a account) error {
-	data, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	return tx.Bucket(bAccounts).Put([]byte(k), data)
-}
-
-// ---- tokens (in-memory sessions) ----
+// ---- tokens / sessions ----
 
 func (s *Store) newSession(uname string) (string, error) {
 	token, err := newToken()
 	if err != nil {
 		return "", err
 	}
+	if _, err := s.db.Exec(
+		`INSERT INTO sessions(token, username) VALUES ($1, $2)`, token, uname); err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	s.tokens[token] = uname
 	s.mu.Unlock()
-	// Persist so the session survives a restart. A failure here is non-fatal:
-	// the in-memory token still works until the next restart.
-	_ = s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bSessions).Put([]byte(token), []byte(uname))
-	})
 	return token, nil
 }
 
 func (s *Store) revokeUser(username string) {
-	u := strings.TrimSpace(username)
-	var dead []string
+	u := key(username)
+	_, _ = s.db.Exec(`DELETE FROM sessions WHERE lower(username) = $1`, u)
 	s.mu.Lock()
 	for t, who := range s.tokens {
-		if strings.EqualFold(who, u) {
-			dead = append(dead, t)
+		if key(who) == u {
 			delete(s.tokens, t)
 		}
 	}
 	s.mu.Unlock()
-	if len(dead) == 0 {
-		return
-	}
-	_ = s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bSessions)
-		for _, t := range dead {
-			_ = b.Delete([]byte(t))
-		}
-		return nil
-	})
 }
 
 // VerifyToken resolves a session token to its canonical username.
@@ -263,18 +166,15 @@ func (s *Store) VerifyToken(token string) (string, bool) {
 	if token == "" {
 		return "", false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	uname, ok := s.tokens[token]
+	s.mu.RUnlock()
 	return uname, ok
 }
 
-// ---- default character (admin-controlled, loaded for everyone) ----
+// ---- default looks (admin-controlled) ----
 
-// builtinFor is the fallback look for a slot when the admin has not set one:
-//   - "tux":    the classic black-and-white penguin with orange feet.
-//   - "male":   a male humanoid "Clobi" — light-brown ponytail, full beard.
-//   - "female": the same humanoid, female silhouette, no beard.
+// builtinFor is the fallback look for a slot when the admin has not set one.
 func builtinFor(slot, name string) protocol.Character {
 	if slot == "tux" {
 		return protocol.Character{
@@ -293,59 +193,105 @@ func builtinFor(slot, name string) protocol.Character {
 	}
 	if slot == "female" {
 		c.Gender = "female"
-		c.Beard = 0 // no beard on the female default
+		c.Beard = 0
 	}
 	return c
+}
+
+// getSetting reads a Character stored under a settings key.
+func (s *Store) getSetting(k string) (protocol.Character, bool) {
+	var raw []byte
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = $1`, k).Scan(&raw)
+	if err != nil {
+		return protocol.Character{}, false
+	}
+	var c protocol.Character
+	if json.Unmarshal(raw, &c) != nil {
+		return protocol.Character{}, false
+	}
+	return c, true
+}
+
+// setSetting stores a Character under a settings key (upsert).
+func (s *Store) setSetting(k string, c protocol.Character) error {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO settings(key, value) VALUES ($1, $2::jsonb)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, k, string(data))
+	return err
 }
 
 // DefaultCharacter returns the effective default look for a slot (admin-set if
 // present, else the built-in), with the given name applied.
 func (s *Store) DefaultCharacter(slot, name string) protocol.Character {
-	if c, ok := s.GetDefaultCharacter(slot); ok {
+	if c, ok := s.getSetting(defaultKey(slot)); ok {
 		c.Name = name
 		return c
 	}
 	return builtinFor(validSlot(slot), name)
 }
 
-// AllDefaults returns the effective default look for every slot, keyed by slot.
+// GetDefaultCharacter returns the admin-set default for a slot, if one is stored.
+func (s *Store) GetDefaultCharacter(slot string) (protocol.Character, bool) {
+	return s.getSetting(defaultKey(slot))
+}
+
+// SetDefaultCharacter stores a character as the default for its own slot.
+func (s *Store) SetDefaultCharacter(c protocol.Character) error {
+	c.Name = ""
+	return s.setSetting(defaultKey(slotFor(c)), c)
+}
+
+// GetGlobalDefault returns the single look new players start with, if set.
+func (s *Store) GetGlobalDefault() (protocol.Character, bool) {
+	return s.getSetting(globalKey)
+}
+
+// SetGlobalDefault stores the look every brand-new player starts with. It also
+// writes the matching body-type slot default, so "the default for male
+// characters" and "the first character new users see" stay in sync.
+func (s *Store) SetGlobalDefault(c protocol.Character) error {
+	c.Name = ""
+	if err := s.setSetting(globalKey, c); err != nil {
+		return err
+	}
+	return s.setSetting(defaultKey(slotFor(c)), c)
+}
+
+// AllDefaults returns the effective default look for every slot, keyed by slot,
+// plus a "global" entry (the first-character look) when the admin has set one.
 func (s *Store) AllDefaults(name string) map[string]protocol.Character {
-	out := make(map[string]protocol.Character, len(DefaultSlots))
+	out := make(map[string]protocol.Character, len(DefaultSlots)+1)
 	for _, slot := range DefaultSlots {
 		out[slot] = s.DefaultCharacter(slot, name)
+	}
+	if g, ok := s.GetGlobalDefault(); ok {
+		g.Name = name
+		out["global"] = g
 	}
 	return out
 }
 
-// GetDefaultCharacter returns the admin-set default for a slot, if one is stored.
-func (s *Store) GetDefaultCharacter(slot string) (protocol.Character, bool) {
-	var c protocol.Character
-	found := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket(bSettings).Get(defaultKey(slot))
-		if v != nil && json.Unmarshal(v, &c) == nil {
-			found = true
-		}
-		return nil
-	})
-	return c, found
-}
-
-// SetDefaultCharacter stores a character as the default for its own slot (the
-// slot is derived from the character's body type / gender).
-func (s *Store) SetDefaultCharacter(c protocol.Character) error {
-	slot := slotFor(c)
-	c.Name = "" // a shared default carries no personal name
-	data, err := json.Marshal(c)
-	if err != nil {
-		return err
+// registerDefault is the look a brand-new account is created with: the global
+// default if the admin set one, else the male built-in.
+func (s *Store) registerDefault(name string) protocol.Character {
+	if g, ok := s.GetGlobalDefault(); ok {
+		g.Name = name
+		return g
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bSettings).Put(defaultKey(slot), data)
-	})
+	return s.DefaultCharacter("male", name)
 }
 
 // ---- accounts ----
+
+func (s *Store) accountExists(k string) bool {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM accounts WHERE username = $1`, k).Scan(&one)
+	return err == nil
+}
 
 // Register creates a new account and returns a session token + its character.
 func (s *Store) Register(username, password string) (string, protocol.Character, error) {
@@ -360,20 +306,23 @@ func (s *Store) Register(username, password string) (string, protocol.Character,
 	if err != nil {
 		return "", protocol.Character{}, err
 	}
-	ch := s.DefaultCharacter("male", uname)
 	k := key(uname)
-	now := nowStr()
-	err = s.db.Update(func(tx *bolt.Tx) error {
-		if _, ok := s.getAccount(tx, k); ok {
-			return ErrUserExists
-		}
-		return s.putAccount(tx, k, account{
-			Username: uname, Hash: string(hash), Character: ch,
-			IsAdmin: k == s.admin && s.admin != "", CreatedAt: now, UpdatedAt: now,
-		})
-	})
+	ch := s.registerDefault(uname)
+	chJSON, err := json.Marshal(ch)
 	if err != nil {
 		return "", protocol.Character{}, err
+	}
+	isAdmin := k == s.admin && s.admin != ""
+	res, err := s.db.Exec(
+		`INSERT INTO accounts(username, display, hash, is_admin, character)
+		 VALUES ($1, $2, $3, $4, $5::jsonb)
+		 ON CONFLICT (username) DO NOTHING`,
+		k, uname, string(hash), isAdmin, string(chJSON))
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", protocol.Character{}, ErrUserExists
 	}
 	token, err := s.newSession(uname)
 	if err != nil {
@@ -384,79 +333,180 @@ func (s *Store) Register(username, password string) (string, protocol.Character,
 
 // Login verifies credentials and returns a session token + the stored character.
 func (s *Store) Login(username, password string) (string, protocol.Character, error) {
-	var acc account
-	ok := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		acc, ok = s.getAccount(tx, key(username))
-		return nil
-	})
-	if !ok {
+	var (
+		display string
+		hash    string
+		chRaw   []byte
+	)
+	err := s.db.QueryRow(
+		`SELECT display, hash, character FROM accounts WHERE username = $1`, key(username)).
+		Scan(&display, &hash, &chRaw)
+	if err == sql.ErrNoRows {
 		// Throwaway compare to blunt username-enumeration timing leaks.
 		_ = bcrypt.CompareHashAndPassword(
 			[]byte("$2a$10$3euPcmQFCiblsZeEu5s7p.9OVHgeHWFDk9nhMqZ0m/3pd/lhwZgES"),
 			[]byte(password))
 		return "", protocol.Character{}, ErrBadCreds
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(acc.Hash), []byte(password)); err != nil {
-		return "", protocol.Character{}, ErrBadCreds
-	}
-	token, err := s.newSession(acc.Username)
 	if err != nil {
 		return "", protocol.Character{}, err
 	}
-	return token, acc.Character, nil
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return "", protocol.Character{}, ErrBadCreds
+	}
+	var ch protocol.Character
+	_ = json.Unmarshal(chRaw, &ch)
+	token, err := s.newSession(display)
+	if err != nil {
+		return "", protocol.Character{}, err
+	}
+	return token, ch, nil
 }
 
 // GetCharacter returns the stored character for a username.
 func (s *Store) GetCharacter(username string) (protocol.Character, bool) {
+	var chRaw []byte
+	err := s.db.QueryRow(`SELECT character FROM accounts WHERE username = $1`, key(username)).Scan(&chRaw)
+	if err != nil {
+		return protocol.Character{}, false
+	}
 	var ch protocol.Character
-	found := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, key(username))
-		if ok {
-			ch, found = a.Character, true
-		}
-		return nil
-	})
-	return ch, found
+	if json.Unmarshal(chRaw, &ch) != nil {
+		return protocol.Character{}, false
+	}
+	return ch, true
 }
 
-// SetCharacter persists a new character for a username (preserves all fields,
-// including per-object transforms).
+// SetCharacter persists a new character for a username (all fields, incl. transforms).
 func (s *Store) SetCharacter(username string, c protocol.Character) error {
-	k := key(username)
-	return s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, k)
-		if !ok {
-			return ErrUnknownUser
-		}
-		a.Character = c
-		a.UpdatedAt = nowStr()
-		return s.putAccount(tx, k, a)
-	})
+	data, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		`UPDATE accounts SET character = $2::jsonb, updated_at = now() WHERE username = $1`,
+		key(username), string(data))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUnknownUser
+	}
+	return nil
 }
 
-// ---- creative library (painted textures + character presets) ----
+// ---- 3D skins (Minecraft-compatible, stored as jsonb) ----
+
+// defaultSkinKey is the settings key for the admin-set default skin: the look
+// every visitor wears until they save a skin of their own. It lives alongside
+// the legacy Character default keys in the same settings table; the parallel
+// skin-typed helpers below never touch those.
+const defaultSkinKey = "defaultSkin"
+
+// GetSkin returns the user's saved 3D skin, if they have one.
+func (s *Store) GetSkin(username string) (protocol.Skin, bool) {
+	var raw []byte
+	err := s.db.QueryRow(`SELECT skin FROM accounts WHERE username = $1`, key(username)).Scan(&raw)
+	if err != nil || len(raw) == 0 {
+		return protocol.Skin{}, false // no row, or skin column still NULL
+	}
+	var sk protocol.Skin
+	if json.Unmarshal(raw, &sk) != nil || sk.PNG == "" {
+		return protocol.Skin{}, false
+	}
+	return sk, true
+}
+
+// SetSkin validates (via the shared protocol validator, which also normalizes
+// model/name in place) and persists the user's 3D skin.
+func (s *Store) SetSkin(username string, sk protocol.Skin) error {
+	if err := protocol.ValidateSkin(&sk); err != nil {
+		return fmt.Errorf("%w: %v", ErrBadInput, err)
+	}
+	data, err := json.Marshal(sk)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(
+		`UPDATE accounts SET skin = $2::jsonb, updated_at = now() WHERE username = $1`,
+		key(username), string(data))
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUnknownUser
+	}
+	return nil
+}
+
+// getSkinSetting reads a Skin stored under a settings key. It deliberately
+// mirrors getSetting (which is Character-typed) instead of reusing it, so the
+// legacy character defaults keep working untouched.
+func (s *Store) getSkinSetting(k string) (protocol.Skin, bool) {
+	var raw []byte
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = $1`, k).Scan(&raw)
+	if err != nil {
+		return protocol.Skin{}, false
+	}
+	var sk protocol.Skin
+	if json.Unmarshal(raw, &sk) != nil || sk.PNG == "" {
+		return protocol.Skin{}, false
+	}
+	return sk, true
+}
+
+// setSkinSetting stores a Skin under a settings key (upsert).
+func (s *Store) setSkinSetting(k string, sk protocol.Skin) error {
+	data, err := json.Marshal(sk)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO settings(key, value) VALUES ($1, $2::jsonb)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, k, string(data))
+	return err
+}
+
+// GetDefaultSkin returns the admin-set default skin, if one is stored.
+func (s *Store) GetDefaultSkin() (protocol.Skin, bool) {
+	return s.getSkinSetting(defaultSkinKey)
+}
+
+// SetDefaultSkin validates and stores the default skin every new visitor wears.
+func (s *Store) SetDefaultSkin(sk protocol.Skin) error {
+	if err := protocol.ValidateSkin(&sk); err != nil {
+		return fmt.Errorf("%w: %v", ErrBadInput, err)
+	}
+	return s.setSkinSetting(defaultSkinKey, sk)
+}
+
+// ---- creative library (painted textures + presets) ----
 
 // GetLibrary returns the user's stored texture library and presets. The texture
 // map is never nil; presets may be nil when the user has none.
 func (s *Store) GetLibrary(username string) (map[string]json.RawMessage, json.RawMessage, bool) {
+	k := key(username)
+	if !s.accountExists(k) {
+		return map[string]json.RawMessage{}, nil, false
+	}
 	tex := map[string]json.RawMessage{}
+	rows, err := s.db.Query(`SELECT tex_id, record FROM textures WHERE username = $1`, k)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			var rec []byte
+			if rows.Scan(&id, &rec) == nil {
+				tex[id] = json.RawMessage(append([]byte(nil), rec...))
+			}
+		}
+	}
 	var pre json.RawMessage
-	found := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, key(username))
-		if !ok {
-			return nil
-		}
-		found = true
-		for k, v := range a.Textures {
-			tex[k] = v
-		}
-		pre = a.Presets
-		return nil
-	})
-	return tex, pre, found
+	var preRaw []byte
+	if err := s.db.QueryRow(`SELECT presets FROM accounts WHERE username = $1`, k).Scan(&preRaw); err == nil && preRaw != nil {
+		pre = json.RawMessage(preRaw)
+	}
+	return tex, pre, true
 }
 
 // SaveTexture stores (or replaces) one texture record in the user's library.
@@ -465,81 +515,94 @@ func (s *Store) SaveTexture(username, id string, rec json.RawMessage) error {
 		return ErrBadInput
 	}
 	k := key(username)
-	return s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, k)
-		if !ok {
-			return ErrUnknownUser
-		}
-		if a.Textures == nil {
-			a.Textures = map[string]json.RawMessage{}
-		}
-		a.Textures[id] = rec
-		a.UpdatedAt = nowStr()
-		return s.putAccount(tx, k, a)
-	})
+	if !s.accountExists(k) {
+		return ErrUnknownUser
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO textures(username, tex_id, record) VALUES ($1, $2, $3::jsonb)
+		 ON CONFLICT (username, tex_id) DO UPDATE SET record = EXCLUDED.record`,
+		k, id, string(rec))
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.Exec(`UPDATE accounts SET updated_at = now() WHERE username = $1`, k)
+	return nil
 }
 
 // DeleteTexture removes one texture from the user's library (no error if absent).
 func (s *Store) DeleteTexture(username, id string) error {
 	k := key(username)
-	return s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, k)
-		if !ok {
-			return ErrUnknownUser
-		}
-		if a.Textures != nil {
-			delete(a.Textures, id)
-		}
-		a.UpdatedAt = nowStr()
-		return s.putAccount(tx, k, a)
-	})
+	if !s.accountExists(k) {
+		return ErrUnknownUser
+	}
+	_, err := s.db.Exec(`DELETE FROM textures WHERE username = $1 AND tex_id = $2`, k, id)
+	return err
 }
 
 // SetPresets replaces the user's saved character presets (opaque JSON array).
 func (s *Store) SetPresets(username string, raw json.RawMessage) error {
 	k := key(username)
-	return s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, k)
-		if !ok {
-			return ErrUnknownUser
-		}
-		a.Presets = raw
-		a.UpdatedAt = nowStr()
-		return s.putAccount(tx, k, a)
-	})
+	var arg interface{}
+	if len(raw) == 0 {
+		arg = nil
+	} else {
+		arg = string(raw)
+	}
+	res, err := s.db.Exec(
+		`UPDATE accounts SET presets = $2::jsonb, updated_at = now() WHERE username = $1`, k, arg)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUnknownUser
+	}
+	return nil
 }
 
 // MergeLibrary folds anonymous/guest work into the account WITHOUT clobbering
 // what is already there: texture ids not yet present are added; presets passed in
-// are appended after the existing ones (so nothing the user already saved is
-// lost). It returns the resulting library so the client can refresh its cache.
+// are appended after the existing ones. Returns the resulting library.
 func (s *Store) MergeLibrary(username string, tex map[string]json.RawMessage, pre json.RawMessage) (map[string]json.RawMessage, json.RawMessage, error) {
 	k := key(username)
-	var outTex map[string]json.RawMessage
-	var outPre json.RawMessage
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, k)
-		if !ok {
-			return ErrUnknownUser
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	var existingPre []byte
+	if err := tx.QueryRow(`SELECT presets FROM accounts WHERE username = $1`, k).Scan(&existingPre); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil, ErrUnknownUser
 		}
-		if a.Textures == nil {
-			a.Textures = map[string]json.RawMessage{}
+		return nil, nil, err
+	}
+	for id, rec := range tex {
+		if id == "" || len(rec) == 0 {
+			continue
 		}
-		for id, rec := range tex {
-			if id == "" || len(rec) == 0 {
-				continue
-			}
-			if _, exists := a.Textures[id]; !exists {
-				a.Textures[id] = rec
-			}
+		if _, err := tx.Exec(
+			`INSERT INTO textures(username, tex_id, record) VALUES ($1, $2, $3::jsonb)
+			 ON CONFLICT (username, tex_id) DO NOTHING`, k, id, string(rec)); err != nil {
+			return nil, nil, err
 		}
-		a.Presets = appendPresets(a.Presets, pre)
-		a.UpdatedAt = nowStr()
-		outTex = a.Textures
-		outPre = a.Presets
-		return s.putAccount(tx, k, a)
-	})
-	return outTex, outPre, err
+	}
+	merged := appendPresets(existingPre, pre)
+	var preArg interface{}
+	if len(merged) == 0 {
+		preArg = nil
+	} else {
+		preArg = string(merged)
+	}
+	if _, err := tx.Exec(
+		`UPDATE accounts SET presets = $2::jsonb, updated_at = now() WHERE username = $1`, k, preArg); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	outTex, outPre, _ := s.GetLibrary(username)
+	return outTex, outPre, nil
 }
 
 // appendPresets concatenates two JSON preset arrays, tolerating nils/garbage.
@@ -552,14 +615,12 @@ func appendPresets(existing, incoming json.RawMessage) json.RawMessage {
 		_ = json.Unmarshal(incoming, &b)
 	}
 	if len(b) == 0 {
-		if existing != nil {
+		if len(existing) > 0 {
 			return existing
 		}
-	}
-	merged := append(a, b...)
-	if merged == nil {
 		return nil
 	}
+	merged := append(a, b...)
 	out, err := json.Marshal(merged)
 	if err != nil {
 		return existing
@@ -569,63 +630,89 @@ func appendPresets(existing, incoming json.RawMessage) json.RawMessage {
 
 // IsAdmin reports whether the user may set the global default character.
 func (s *Store) IsAdmin(username string) bool {
-	admin := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		if a, ok := s.getAccount(tx, key(username)); ok {
-			admin = a.IsAdmin
-		}
-		return nil
-	})
+	var admin bool
+	err := s.db.QueryRow(`SELECT is_admin FROM accounts WHERE username = $1`, key(username)).Scan(&admin)
+	if err != nil {
+		return false
+	}
 	return admin
 }
 
 // ---- GDPR: access + erasure ----
 
-// ExportAccount returns every piece of personal data held for the user, for the
-// GDPR right of access / data portability. The password hash is intentionally
-// excluded (a one-way bcrypt hash is not exported).
+// ExportAccount returns every piece of personal data held for the user (GDPR
+// access / portability). The password hash is intentionally excluded.
 func (s *Store) ExportAccount(username string) (map[string]interface{}, bool) {
-	var out map[string]interface{}
-	ok := false
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		a, found := s.getAccount(tx, key(username))
-		if !found {
-			return nil
+	k := key(username)
+	var (
+		display   string
+		isAdmin   bool
+		chRaw     []byte
+		skRaw     []byte
+		preRaw    []byte
+		createdAt sql.NullTime
+		updatedAt sql.NullTime
+	)
+	err := s.db.QueryRow(
+		`SELECT display, is_admin, character, skin, presets, created_at, updated_at
+		 FROM accounts WHERE username = $1`, k).
+		Scan(&display, &isAdmin, &chRaw, &skRaw, &preRaw, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, false
+	}
+	var ch protocol.Character
+	_ = json.Unmarshal(chRaw, &ch)
+	textures, presets, _ := s.GetLibrary(username)
+	var pre interface{}
+	if len(presets) > 0 {
+		pre = presets
+	}
+	out := map[string]interface{}{
+		"username":  display,
+		"character": ch,
+		"textures":  textures,
+		"presets":   pre,
+		"isAdmin":   isAdmin,
+		"createdAt": timeStr(createdAt),
+		"updatedAt": timeStr(updatedAt),
+		"note":      "This is all personal data we store about your account: your username, character, 3D skin, painted textures and saved presets. Your password is kept only as a one-way bcrypt hash and is never exported. No email, IP address, or tracking data is collected.",
+	}
+	if len(skRaw) > 0 {
+		var sk protocol.Skin
+		if json.Unmarshal(skRaw, &sk) == nil && sk.PNG != "" {
+			out["skin"] = sk
 		}
-		ok = true
-		textures := a.Textures
-		if textures == nil {
-			textures = map[string]json.RawMessage{}
-		}
-		out = map[string]interface{}{
-			"username":  a.Username,
-			"character": a.Character,
-			"textures":  textures,
-			"presets":   a.Presets,
-			"isAdmin":   a.IsAdmin,
-			"createdAt": a.CreatedAt,
-			"updatedAt": a.UpdatedAt,
-			"note":      "This is all personal data we store about your account: your username, character, painted textures and saved presets. Your password is kept only as a one-way bcrypt hash and is never exported. No email, IP address, or tracking data is collected.",
-		}
-		return nil
-	})
-	return out, ok
+	}
+	return out, true
+}
+
+func timeStr(t sql.NullTime) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
 }
 
 // DeleteAccount erases the account and all its data, and revokes its sessions
-// (GDPR right to erasure).
+// (textures + sessions cascade via foreign keys).
 func (s *Store) DeleteAccount(username string) error {
 	k := key(username)
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		if _, ok := s.getAccount(tx, k); !ok {
-			return ErrUnknownUser
-		}
-		return tx.Bucket(bAccounts).Delete([]byte(k))
-	})
-	if err == nil {
-		s.revokeUser(username)
+	res, err := s.db.Exec(`DELETE FROM accounts WHERE username = $1`, k)
+	if err != nil {
+		return err
 	}
-	return err
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrUnknownUser
+	}
+	// Drop cached tokens for the deleted user (sessions rows are gone via cascade).
+	s.mu.Lock()
+	for t, who := range s.tokens {
+		if key(who) == k {
+			delete(s.tokens, t)
+		}
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // ---- maintenance ----
@@ -635,48 +722,5 @@ func (s *Store) ensureAdmin() {
 	if s.admin == "" {
 		return
 	}
-	_ = s.db.Update(func(tx *bolt.Tx) error {
-		a, ok := s.getAccount(tx, s.admin)
-		if ok && !a.IsAdmin {
-			a.IsAdmin = true
-			return s.putAccount(tx, s.admin, a)
-		}
-		return nil
-	})
-}
-
-// migrateJSON imports a legacy accounts.json exactly once (when the accounts
-// bucket is still empty), then renames the file so it is not re-imported and no
-// stale copy of the data lingers on disk.
-func (s *Store) migrateJSON(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var model struct {
-		Accounts map[string]struct {
-			Username  string             `json:"username"`
-			Hash      string             `json:"hash"`
-			Character protocol.Character `json:"character"`
-		} `json:"accounts"`
-	}
-	if json.Unmarshal(data, &model) != nil || len(model.Accounts) == 0 {
-		_ = os.Rename(path, path+".imported")
-		return
-	}
-	_ = s.db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket(bAccounts).Stats().KeyN > 0 {
-			return nil // already populated; don't clobber
-		}
-		now := nowStr()
-		for k, old := range model.Accounts {
-			lk := key(k)
-			_ = s.putAccount(tx, lk, account{
-				Username: old.Username, Hash: old.Hash, Character: old.Character,
-				IsAdmin: lk == s.admin && s.admin != "", CreatedAt: now, UpdatedAt: now,
-			})
-		}
-		return nil
-	})
-	_ = os.Rename(path, path+".imported")
+	_, _ = s.db.Exec(`UPDATE accounts SET is_admin = true WHERE username = $1`, s.admin)
 }

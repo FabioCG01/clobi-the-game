@@ -7,3 +7,6 @@ npm-debug.log*
 # Runtime data — keep the directory, ignore its generated contents.
 data/*
 !data/.gitkeep
+
+# Built binaries
+bin/

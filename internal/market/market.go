@@ -1,30 +1,35 @@
 // Package market is the open-source cosmetic marketplace store for Clobi's Arena.
 //
-// Everything published is ALWAYS FREE. Users publish either a painted texture or
-// a whole character (with the custom textures it wears bundled in, so it renders
-// for everyone). Items can be rated (half-stars), commented on (with threaded
-// replies), reported, and "false-report" vouched. A Reddit-style net score drives
-// soft moderation: at +5 net reports an item is auto-censored (its pixels are
+// Everything published is ALWAYS FREE. The 3D era trades exactly ONE kind of
+// good: complete Minecraft-compatible 3D skins (kind "skin" — a 64×64/64×32 PNG
+// data URL plus its classic/slim arm model). The legacy 2D economy (painted
+// textures, whole characters) is discarded: publishing those kinds is rejected,
+// and legacy rows still in the database stay invisible to List.
+//
+// Items can be rated (half-stars), commented on (with threaded replies),
+// reported, and "false-report" vouched. A Reddit-style net score drives soft
+// moderation: at +5 net reports an item is auto-censored (its pixels are
 // withheld from everyone but its author and admins) until an admin bans it or
 // revokes the reports; at -5 net the community-cleared reports reset automatically.
 //
-// Storage is one bbolt bucket shared with the account store (single DB file).
+// Storage is the shared PostgreSQL pool: one row per item, with hot columns
+// (author/kind/slot/created_ts/…) for filtering and the full item as jsonb.
 package market
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/png"
 	"sort"
 	"strings"
 	"time"
 
 	"clobi/internal/protocol"
-
-	bolt "go.etcd.io/bbolt"
 )
 
 // CensorThreshold is the net (reports - vouches) score at which an item is
@@ -37,8 +42,6 @@ var (
 	ErrBadInput  = errors.New("invalid item")
 	ErrCensored  = errors.New("item is censored")
 )
-
-var bItems = []byte("market_items")
 
 // TextureLite is a custom texture bundled with a published character so the
 // character renders for others. Mirrors the client's local texture record.
@@ -59,11 +62,14 @@ type Comment struct {
 	CreatedTS int64  `json:"createdTs"`
 }
 
-// Item is a published marketplace entry (texture or character).
+// Item is a published marketplace entry. The only publishable kind is "skin";
+// "texture" and "character" fields remain so legacy rows still unmarshal (they
+// are hidden from listings and can no longer be published).
 type Item struct {
 	ID        string                 `json:"id"`
-	Kind      string                 `json:"kind"`  // "texture" | "character"
-	Slot      string                 `json:"slot"`  // texture slot
+	Kind      string                 `json:"kind"`            // "skin" | legacy: "texture"/"character"
+	Slot      string                 `json:"slot"`            // legacy texture slot ("" for skins)
+	Model     string                 `json:"model,omitempty"` // skins: "classic" | "slim"
 	Title     string                 `json:"title"`
 	Tags      []string               `json:"tags"`
 	Author    string                 `json:"author"`
@@ -71,9 +77,9 @@ type Item struct {
 	CreatedTS int64                  `json:"createdTs"`
 	GlowColor string                 `json:"glowColor,omitempty"`
 	TintHint  string                 `json:"tintHint,omitempty"`
-	PNG       string                 `json:"png,omitempty"`       // texture pixels
-	Character *protocol.Character    `json:"character,omitempty"` // kind=character
-	Bundle    map[string]TextureLite `json:"bundle,omitempty"`    // texId -> texture (for characters)
+	PNG       string                 `json:"png,omitempty"`       // skin pixels (data URL)
+	Character *protocol.Character    `json:"character,omitempty"` // legacy kind=character
+	Bundle    map[string]TextureLite `json:"bundle,omitempty"`    // legacy texId -> texture
 	RemixOf   string                 `json:"remixOf,omitempty"`
 	Downloads int                    `json:"downloads"`
 	Ratings   map[string]float64     `json:"ratings"` // user -> 0.5..5
@@ -84,21 +90,25 @@ type Item struct {
 	Flagged   bool                   `json:"flagged"` // auto NSFW heuristic flag
 }
 
-// Store is the marketplace persistence layer (bbolt).
-type Store struct{ db *bolt.DB }
+// querier is the subset of *sql.DB / *sql.Tx the store needs.
+type querier interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
 
-// NewStore creates the marketplace bucket in the shared bbolt database.
-func NewStore(db *bolt.DB) (*Store, error) {
-	if err := db.Update(func(tx *bolt.Tx) error {
-		_, e := tx.CreateBucketIfNotExists(bItems)
-		return e
-	}); err != nil {
-		return nil, err
+// Store is the marketplace persistence layer (PostgreSQL).
+type Store struct{ db *sql.DB }
+
+// NewStore returns a marketplace store over the shared pool (schema is created
+// by pgdb.Open).
+func NewStore(db *sql.DB) (*Store, error) {
+	if db == nil {
+		return nil, errors.New("market: nil db")
 	}
 	return &Store{db: db}, nil
 }
 
-func now() string { return time.Now().UTC().Format(time.RFC3339) }
+func now() string  { return time.Now().UTC().Format(time.RFC3339) }
 func nowTS() int64 { return time.Now().UTC().Unix() }
 
 func newID() string {
@@ -109,47 +119,63 @@ func newID() string {
 	return "m" + hex.EncodeToString(b)
 }
 
-func (s *Store) get(tx *bolt.Tx, id string) (Item, bool) {
-	v := tx.Bucket(bItems).Get([]byte(id))
-	if v == nil {
-		return Item{}, false
-	}
+func scanItem(raw []byte) (Item, bool) {
 	var it Item
-	if json.Unmarshal(v, &it) != nil {
+	if json.Unmarshal(raw, &it) != nil {
 		return Item{}, false
 	}
 	return it, true
 }
 
-func (s *Store) put(tx *bolt.Tx, it Item) error {
+func (s *Store) getQ(q querier, id string) (Item, bool) {
+	var raw []byte
+	if err := q.QueryRow(`SELECT body FROM market_items WHERE id = $1`, id).Scan(&raw); err != nil {
+		return Item{}, false
+	}
+	return scanItem(raw)
+}
+
+func put(q querier, it Item) error {
 	data, err := json.Marshal(it)
 	if err != nil {
 		return err
 	}
-	return tx.Bucket(bItems).Put([]byte(it.ID), data)
+	_, err = q.Exec(
+		`INSERT INTO market_items(id, author, kind, slot, created_ts, downloads, banned, flagged, body)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+		 ON CONFLICT (id) DO UPDATE SET
+		   author=EXCLUDED.author, kind=EXCLUDED.kind, slot=EXCLUDED.slot,
+		   created_ts=EXCLUDED.created_ts, downloads=EXCLUDED.downloads,
+		   banned=EXCLUDED.banned, flagged=EXCLUDED.flagged, body=EXCLUDED.body`,
+		it.ID, it.Author, it.Kind, it.Slot, it.CreatedTS, it.Downloads, it.Banned, it.Flagged, string(data))
+	return err
 }
 
 // ---- publish ------------------------------------------------------------
 
-// Publish stores a new item authored by `author`. It assigns id/timestamps,
-// initialises the moderation maps, and runs the best-effort NSFW heuristic.
+// Publish stores a new item authored by `author`. Only kind "skin" is accepted
+// — the legacy 2D kinds ("texture"/"character") are rejected with ErrBadInput.
+// The skin pixels + model are checked with the shared protocol validator
+// (valid PNG, ≤32 KiB, exactly 64×64 or 64×32, model classic|slim).
 func (s *Store) Publish(author string, in Item) (Item, error) {
 	in.Kind = strings.ToLower(strings.TrimSpace(in.Kind))
-	if in.Kind != "texture" && in.Kind != "character" {
+	// Tolerate a missing kind (the client only publishes skins now); every
+	// explicit non-skin kind is refused — the 2D economy is discarded.
+	if in.Kind == "" {
+		in.Kind = "skin"
+	}
+	if in.Kind != "skin" {
 		return Item{}, ErrBadInput
 	}
-	if in.Kind == "texture" && strings.TrimSpace(in.PNG) == "" {
-		return Item{}, ErrBadInput
-	}
-	if in.Kind == "character" && in.Character == nil {
-		return Item{}, ErrBadInput
+	sk := protocol.Skin{Name: in.Title, Model: in.Model, PNG: in.PNG}
+	if err := protocol.ValidateSkin(&sk); err != nil {
+		return Item{}, fmt.Errorf("%w: %v", ErrBadInput, err)
 	}
 	it := Item{
-		ID: newID(), Kind: in.Kind, Slot: in.Slot,
+		ID: newID(), Kind: "skin", Model: sk.Model,
 		Title: clip(in.Title, 48), Tags: cleanTags(in.Tags),
 		Author: author, CreatedAt: now(), CreatedTS: nowTS(),
-		GlowColor: in.GlowColor, TintHint: in.TintHint, PNG: in.PNG,
-		Character: in.Character, Bundle: in.Bundle, RemixOf: in.RemixOf,
+		PNG: in.PNG, RemixOf: clip(in.RemixOf, 64),
 		Ratings: map[string]float64{}, Comments: []Comment{},
 		Reports: map[string]string{}, Vouches: map[string]bool{},
 	}
@@ -157,8 +183,7 @@ func (s *Store) Publish(author string, in Item) (Item, error) {
 		it.Title = "Untitled"
 	}
 	it.Flagged = looksNSFW(it)
-	err := s.db.Update(func(tx *bolt.Tx) error { return s.put(tx, it) })
-	if err != nil {
+	if err := put(s.db, it); err != nil {
 		return Item{}, err
 	}
 	return it, nil
@@ -166,30 +191,41 @@ func (s *Store) Publish(author string, in Item) (Item, error) {
 
 // ---- mutations ----------------------------------------------------------
 
-// update loads an item, applies fn, and saves it back atomically.
+// update loads an item FOR UPDATE, applies fn, and saves it back atomically.
 func (s *Store) update(id string, fn func(*Item) error) (Item, error) {
 	var out Item
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		it, ok := s.get(tx, id)
-		if !ok {
-			return ErrNotFound
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Item{}, err
+	}
+	defer tx.Rollback()
+
+	var raw []byte
+	if err := tx.QueryRow(`SELECT body FROM market_items WHERE id = $1 FOR UPDATE`, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return Item{}, ErrNotFound
 		}
-		if err := fn(&it); err != nil {
-			return err
-		}
-		out = it
-		return s.put(tx, it)
-	})
-	return out, err
+		return Item{}, err
+	}
+	it, ok := scanItem(raw)
+	if !ok {
+		return Item{}, ErrNotFound
+	}
+	if err := fn(&it); err != nil {
+		return Item{}, err
+	}
+	if err := put(tx, it); err != nil {
+		return Item{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Item{}, err
+	}
+	out = it
+	return out, nil
 }
 
 // Get returns a single item.
-func (s *Store) Get(id string) (Item, bool) {
-	var it Item
-	var ok bool
-	_ = s.db.View(func(tx *bolt.Tx) error { it, ok = s.get(tx, id); return nil })
-	return it, ok
-}
+func (s *Store) Get(id string) (Item, bool) { return s.getQ(s.db, id) }
 
 // Rate sets a user's rating (0.5..5, half-steps). 0 removes it.
 func (s *Store) Rate(id, user string, stars float64) (Item, error) {
@@ -228,15 +264,14 @@ func (s *Store) Comment(id, user, text, parentID string) (Item, error) {
 	})
 }
 
-// Report flags an item; CancelReport removes the user's report. A "false-report"
-// Vouch counter-votes; CancelVouch removes it. After each, community auto-clear
-// is applied (net <= -CensorThreshold resets the dispute).
+// Report flags an item; CancelReport removes the user's report. Vouch counter-
+// votes "false report"; CancelVouch removes it. Community auto-clear applies.
 func (s *Store) Report(id, user, reason string) (Item, error) {
 	return s.update(id, func(it *Item) error {
 		if it.Reports == nil {
 			it.Reports = map[string]string{}
 		}
-		delete(it.Vouches, user) // a report and a vouch are mutually exclusive
+		delete(it.Vouches, user)
 		it.Reports[user] = clip(strings.TrimSpace(reason), 200)
 		autoClear(it)
 		return nil
@@ -270,20 +305,25 @@ func (s *Store) Download(id string) (Item, error) {
 
 // Delete removes an item; only its author or an admin may do so.
 func (s *Store) Delete(id, user string, isAdmin bool) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		it, ok := s.get(tx, id)
-		if !ok {
-			return ErrNotFound
-		}
-		if !isAdmin && !strings.EqualFold(it.Author, user) {
-			return ErrForbidden
-		}
-		return tx.Bucket(bItems).Delete([]byte(id))
-	})
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	it, ok := s.getQ(tx, id)
+	if !ok {
+		return ErrNotFound
+	}
+	if !isAdmin && !strings.EqualFold(it.Author, user) {
+		return ErrForbidden
+	}
+	if _, err := tx.Exec(`DELETE FROM market_items WHERE id = $1`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// AdminBan permanently takes an item down. AdminRevoke clears the whole dispute
-// (reports + vouches + flag) and un-bans it.
+// AdminBan permanently takes an item down. AdminRevoke clears the dispute.
 func (s *Store) AdminBan(id string) (Item, error) {
 	return s.update(id, func(it *Item) error { it.Banned = true; return nil })
 }
@@ -297,8 +337,7 @@ func (s *Store) AdminRevoke(id string) (Item, error) {
 	})
 }
 
-// autoClear resets a dispute when the community vouches outweigh reports by the
-// threshold ("all reports get revoked").
+// autoClear resets a dispute when vouches outweigh reports by the threshold.
 func autoClear(it *Item) {
 	if score(it) <= -CensorThreshold {
 		it.Reports = map[string]string{}
@@ -310,47 +349,76 @@ func autoClear(it *Item) {
 
 // ListOpts controls search / sort / filter.
 type ListOpts struct {
-	Q    string // search title / author / tags
-	Sort string // new|old|rating_hi|rating_lo|dl_hi|dl_lo
-	Kind string // ""|texture|character
-	Slot string // ""|<slot>
+	Q     string // search title / author / tags
+	Sort  string // new|old|rating_hi|rating_lo|dl_hi|dl_lo
+	Kind  string // ""|skin (legacy kinds match nothing)
+	Slot  string // legacy, ""|<slot>
+	Model string // ""|classic|slim (skins)
 }
 
-// List returns item views matching the options, ordered by Sort.
+// List returns item views matching the options, ordered by Sort. Only skins
+// are ever listed: legacy "texture"/"character" rows stay in the database but
+// are invisible here (asking for a legacy Kind yields an empty list).
 func (s *Store) List(opts ListOpts, user string, isAdmin bool) []map[string]interface{} {
+	views := []map[string]interface{}{}
+	if k := strings.ToLower(strings.TrimSpace(opts.Kind)); k != "" && k != "skin" {
+		return views // the 2D economy is retired — legacy kinds list as empty
+	}
+	where := []string{"kind = 'skin'"}
+	args := []interface{}{}
+	if opts.Slot != "" {
+		args = append(args, opts.Slot)
+		where = append(where, "slot = $"+itoa(len(args)))
+	}
+	q := `SELECT body FROM market_items WHERE ` + strings.Join(where, " AND ")
 	var items []Item
-	_ = s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bItems).ForEach(func(k, v []byte) error {
-			var it Item
-			if json.Unmarshal(v, &it) == nil {
-				items = append(items, it)
+	rows, err := s.db.Query(q, args...)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var raw []byte
+			if rows.Scan(&raw) == nil {
+				if it, ok := scanItem(raw); ok {
+					items = append(items, it)
+				}
 			}
-			return nil
-		})
-	})
-	q := strings.ToLower(strings.TrimSpace(opts.Q))
+		}
+	}
+	search := strings.ToLower(strings.TrimSpace(opts.Q))
+	model := strings.ToLower(strings.TrimSpace(opts.Model))
 	out := items[:0]
 	for _, it := range items {
 		if it.Banned && !isAdmin {
 			continue // banned items vanish for everyone but admins
 		}
-		if opts.Kind != "" && it.Kind != opts.Kind {
-			continue
+		if model != "" && !strings.EqualFold(it.Model, model) {
+			continue // classic/slim filter
 		}
-		if opts.Slot != "" && it.Slot != opts.Slot {
-			continue
-		}
-		if q != "" && !matches(it, q) {
+		if search != "" && !matches(it, search) {
 			continue
 		}
 		out = append(out, it)
 	}
 	sortItems(out, opts.Sort)
-	views := make([]map[string]interface{}, 0, len(out))
 	for _, it := range out {
 		views = append(views, view(it, user, isAdmin))
 	}
 	return views
+}
+
+// itoa is a tiny helper for building positional placeholders.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [12]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }
 
 func matches(it Item, q string) bool {
@@ -392,7 +460,7 @@ func (s *Store) ViewOne(it Item, user string, isAdmin bool) map[string]interface
 	return view(it, user, isAdmin)
 }
 
-func score(it *Item) int   { return len(it.Reports) - len(it.Vouches) }
+func score(it *Item) int    { return len(it.Reports) - len(it.Vouches) }
 func censored(it Item) bool { return it.Banned || it.Flagged || (len(it.Reports)-len(it.Vouches)) >= CensorThreshold }
 
 func avg(it Item) float64 {
@@ -413,7 +481,7 @@ func view(it Item, user string, isAdmin bool) map[string]interface{} {
 	mine := strings.EqualFold(it.Author, user)
 	canSee := !cz || isAdmin || mine
 	m := map[string]interface{}{
-		"id": it.ID, "kind": it.Kind, "slot": it.Slot, "title": it.Title,
+		"id": it.ID, "kind": it.Kind, "slot": it.Slot, "model": it.Model, "title": it.Title,
 		"tags": it.Tags, "author": it.Author, "createdAt": it.CreatedAt, "createdTs": it.CreatedTS,
 		"glowColor": it.GlowColor, "tintHint": it.TintHint, "remixOf": it.RemixOf,
 		"downloads": it.Downloads, "comments": it.Comments,
@@ -474,12 +542,13 @@ func cleanTags(tags []string) []string {
 
 // ---- best-effort NSFW guard ---------------------------------------------
 //
-// This is deliberately humble: from a grayscale texture alone you cannot
-// reliably detect intent, so the REAL safety net is the community report/vouch
-// system. We do two cheap things at publish time: (1) a wordlist scan of the
-// title/tags, and (2) a crude phallic-silhouette heuristic on the alpha mask
-// (a tall, narrow painted stalk with two low blobs). A hit only FLAGS the item
-// (auto-censored pending review), which an admin can revoke.
+// Deliberately humble: the REAL safety net is the community report/vouch system.
+// At publish time we do two cheap things: (1) a wordlist scan of title/tags, and
+// (2) for LEGACY textures only, a crude phallic-silhouette heuristic on the
+// alpha mask. Skins never run the shape heuristic — a skin's base layer is
+// opaque, so its silhouette is always the full 64×64 sheet and says nothing
+// about content. A hit only FLAGS the item (auto-censored pending review),
+// which an admin can revoke.
 
 var nsfwWords = []string{
 	"penis", "dick", "cock", "phallus", "boob", "tit", "nipple", "vagina",
@@ -493,7 +562,7 @@ func looksNSFW(it Item) bool {
 			return true
 		}
 	}
-	if it.Kind == "texture" {
+	if it.Kind == "texture" { // legacy textures only — NEVER for kind "skin"
 		if mask, w, h, ok := decodeAlpha(it.PNG); ok {
 			return phallicShape(mask, w, h)
 		}
@@ -532,10 +601,8 @@ func decodeAlpha(dataURL string) ([]bool, int, int, bool) {
 }
 
 // phallicShape is a conservative heuristic: a tall narrow vertical column of
-// painted pixels (the "shaft") whose width is a small fraction of its height,
-// with two painted blobs flanking its base. Tuned to avoid most false positives.
+// painted pixels (the "shaft") with two painted blobs flanking its base.
 func phallicShape(mask []bool, w, h int) bool {
-	// Per-row painted span around the horizontal centre third.
 	rowFilled := make([]int, h)
 	rowMinX := make([]int, h)
 	rowMaxX := make([]int, h)
@@ -559,8 +626,6 @@ func phallicShape(mask []bool, w, h int) bool {
 	if total < 12 {
 		return false
 	}
-	// Find the tallest contiguous run of narrow rows (width <= 35% of grid) that
-	// are also painted — the candidate shaft.
 	narrow := func(y int) bool {
 		if rowFilled[y] == 0 {
 			return false
@@ -579,11 +644,10 @@ func phallicShape(mask []bool, w, h int) bool {
 			run = 0
 		}
 	}
-	tallShaft := best >= h*40/100 // shaft spans >=40% of the height
+	tallShaft := best >= h*40/100
 	if !tallShaft {
 		return false
 	}
-	// Two low blobs: in the bottom third, a row noticeably wider than the shaft.
 	wideBase := false
 	for y := h * 66 / 100; y < h; y++ {
 		span := rowMaxX[y] - rowMinX[y] + 1

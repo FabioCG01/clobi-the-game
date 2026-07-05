@@ -7,8 +7,38 @@ services:
     ports:
       - "1337:1337"
     volumes:
+      # Migration source: the legacy bbolt database (data/clobi.db) read once by
+      # /app/migrate, e.g.:  docker compose run --rm clobi /app/migrate /app/data/clobi.db
       - ./data:/app/data
       # Live-serve the client from the repo so web/ edits show on refresh (no rebuild).
       - ./web:/app/web:ro
     environment:
       PORT: "1337"
+      # Postgres lives on the compose-internal network only; the password below
+      # never leaves this stack (clobi-db publishes no ports).
+      DATABASE_URL: "postgres://clobi:cw4Xk9vRq2TzM7pGdY5nBh6L@clobi-db:5432/clobi?sslmode=disable"
+    depends_on:
+      clobi-db:
+        condition: service_healthy
+
+  clobi-db:
+    image: postgres:16-alpine
+    container_name: clobi-db
+    restart: unless-stopped
+    # No published ports on purpose: the database is reachable only from the
+    # clobi service over the compose-internal network.
+    environment:
+      POSTGRES_USER: clobi
+      POSTGRES_PASSWORD: cw4Xk9vRq2TzM7pGdY5nBh6L
+      POSTGRES_DB: clobi
+    volumes:
+      - clobi-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clobi -d clobi"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  clobi-pgdata:
