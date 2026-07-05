@@ -4,7 +4,7 @@
 > (and the odd humanoid) get built, painted, and shared. Built as a respectful — and slightly
 > unhinged — **tribute to Clobi**, the legendary IT teacher who taught a generation Linux, open
 > source, `vim`, and LibreOffice; ran on a steady supply of Fisherman's Friend menthol lozenges; and
-> was *militantly* anti-Microsoft. This is the comedy he deserves, not a sentimental love letter.
+> was *militantly* anti-Microsoft.
 
 The whole thing is **one statically-linked Go binary** in a single Docker container. The backend is
 pure Go standard library plus two tiny dependencies (`go.etcd.io/bbolt` for the embedded database and
