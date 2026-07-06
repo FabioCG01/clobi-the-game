@@ -216,6 +216,34 @@ var Physics = (function () {
 
     var damp, target;
 
+    // Part III §13(b): a SECOND, separate point-sample near the very bottom
+    // of the AABB (not the center) — internal to step(), not part of the
+    // public body shape (body.inWater/headInWater stay pinned exactly as
+    // before). Used only by the two targeted checks below.
+    var feetInWater = isLiquidAt(world, body.pos.x, body.pos.y + 0.05, body.pos.z);
+
+    // Branch-ordering fix (contract §13(b), belt-and-suspenders check): read
+    // straight, this file's dispatch below is `if (fly) {...} else if
+    // (body.inWater) {...} else {walk/fall, with the normal on-ground jump
+    // impulse}`. `body.inWater` is a single point-sample at the body's
+    // vertical CENTER (pos.y + height*0.5) — in water only ~1 block deep,
+    // that center sample can be true at the SAME time `body.onGround` is
+    // ALSO genuinely true (feet resting on the solid floor under the water,
+    // center still inside the single submerged block above it). Because the
+    // swim branch is an `else if`, it used to run INSTEAD of the walking
+    // branch whenever body.inWater was true — so a player standing on solid
+    // ground in ankle-deep water, holding jump, never reached the on-ground
+    // jump impulse at all; found broken exactly as the contract suspected,
+    // confirmed by tracing this dispatch. Fixed by forcing dispatch into the
+    // walking branch whenever body.onGround is genuinely true, regardless of
+    // body.inWater — a grounded player always gets the ordinary jump
+    // impulse, water or not (matches vanilla Minecraft's own feel: jumping
+    // in ankle-deep water works exactly like jumping on dry land). Swimming
+    // while NOT grounded (the normal deep-water case) is completely
+    // unaffected — this only changes which branch runs when onGround is
+    // ALSO true.
+    var groundedDispatch = mode !== 'fly' && body.onGround;
+
     if (mode === 'fly') {
       // ---- creative flight: no gravity, snappy, instant vertical ----
       target = (input.sprint && fwd > 0) ? FLY_SPRINT_SPEED : FLY_SPEED;
@@ -229,7 +257,7 @@ var Physics = (function () {
       if (input.jump) vy += FLY_VERT_SPEED * mult;
       if (input.sneak) vy -= FLY_VERT_SPEED * mult;
       body.vel.y = vy; // instant stop when neither is held
-    } else if (body.inWater) {
+    } else if (body.inWater && !groundedDispatch) {
       // ---- swimming ----
       target = WATER_SPEED * mult * wishMag;
       damp = Math.exp(-FRICTION_WATER * dt);
@@ -244,7 +272,8 @@ var Physics = (function () {
       }
       if (body.vel.y < -MAX_SINK) body.vel.y = -MAX_SINK;
     } else {
-      // ---- walking / falling ----
+      // ---- walking / falling (also: grounded-in-shallow-water, per the
+      // groundedDispatch fix above) ----
       if (input.sneak) target = SNEAK_SPEED;
       else if (input.sprint && fwd > 0) target = SPRINT_SPEED; // sprint only forward
       else target = WALK_SPEED;
@@ -262,6 +291,32 @@ var Physics = (function () {
       if (input.jump && body.onGround) {
         body.vel.y = JUMP_V;
         body.onGround = false;
+      }
+
+      // Part III §13(b), primary fix: the exact stranded window the
+      // contract describes. This `else` branch only runs when body.inWater
+      // is false (center has cleared the water) or the player just got the
+      // groundedDispatch jump impulse above. The remaining gap is: center
+      // cleared the water, but the player hasn't landed on solid ground
+      // EITHER (onGround false — feet still mid-transition through the
+      // water-solid boundary), and they're holding jump. A single frame's
+      // worth of reduced-fraction SWIM_ACCEL impulse (not a sustained force
+      // — this is a plain per-frame velocity nudge like every other term in
+      // this branch, so it naturally only ever applies for the one/two
+      // frames feetInWater&&!onGround is actually true) nudges them the
+      // last inch out instead of letting gravity win that frame. Guarded on
+      // !body.inWater so it can never fire while the swim branch above is
+      // already handling vertical motion, and deep-water swimming (2+
+      // blocks) never reaches this branch at all since body.inWater stays
+      // true throughout a real swim-up — completely unaffected. The cap is
+      // only applied to the assist's OWN contribution (only clamps when the
+      // pre-assist velocity was already below the cap) — it must never pull
+      // a genuinely stronger upward velocity DOWN to SWIM_UP_SPEED, which
+      // would perversely cancel most of a same-frame/adjacent-frame on-
+      // ground jump impulse (JUMP_V=9.0) the moment the body leaves the
+      // ground into this still-feetInWater window right after jumping.
+      if (feetInWater && !body.inWater && !body.onGround && input.jump && body.vel.y < SWIM_UP_SPEED) {
+        body.vel.y = Math.min(body.vel.y + SWIM_ACCEL * 0.5 * dt, SWIM_UP_SPEED);
       }
     }
 

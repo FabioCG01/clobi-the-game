@@ -8,7 +8,11 @@
 // the rect's own `vflip` flag.
 //
 // Public API (contract §5.8):
-//   PlayerModel.init(gl)                    build program + geometry for a ctx
+//   PlayerModel.init(gl, opts?)             build program + geometry for a ctx
+//                                           opts.atlasTex: optional Part III
+//                                           addition (see below), fully
+//                                           backward compatible with the
+//                                           existing PlayerModel.init(gl) call.
 //   PlayerModel.draw(gl, opts)              one fully-posed player
 //   PlayerModel.drawFirstPersonArm(gl, o)   right arm view-model
 //   PlayerModel.preview(skin, opts)         synchronous thumbnail -> 2d canvas
@@ -27,6 +31,42 @@
 //   WebGL2 canvas; every caller renders on demand then blits synchronously.
 //
 // Depends on: M3 (math), GLX (program/uniform helpers), Skins (NET + texture).
+//
+// ---- Part III (ARCHITECTURE-COMBAT.md §9, §5.5): held items + armor ----
+//
+// Held items (§9):
+//   PlayerModel.heldItemMesh(gl, heldId, kind) -> {vao, tex} | null
+//       Memoized per (gl context, kind, heldId). kind==='block' builds a
+//       small inflated-cube (top + 2 sides visible, matching the HUD
+//       fake-iso icon convention) textured from the SAME atlas texture
+//       already used for world rendering -- no new upload. That atlas
+//       texture reference is supplied once via PlayerModel.init(gl,
+//       {atlasTex}) (an additive, optional second init() argument; omitting
+//       it is safe and simply means block-kind held items silently draw
+//       nothing, matching the empty-hand-safe default everywhere else in
+//       this module). kind==='item' builds a thin extruded flat-prop quad
+//       textured from Items.icon(id)'s 40x40 canvas (guarded, typeof
+//       Items !== 'undefined'), uploaded once and memoized.
+//   PlayerModel.drawFirstPersonArm(gl, o)   EXTENDED: o.heldId/o.heldKind
+//       (either may be null/undefined -> empty hand, unchanged bare-arm
+//       behaviour) draw the held mesh parented to the same hand transform
+//       the arm already computes, so swing/bob carries the item for free.
+//   PlayerModel.draw(gl, opts)              EXTENDED: opts.heldId/
+//       opts.heldKind, same empty-hand-safe default, for third-person
+//       rendering (own view + every RemotePlayers.draw call once a sibling
+//       module threads per-player held state through the network layer).
+//
+// Armor (§5.5):
+//   PlayerModel.draw(gl, opts)              EXTENDED: opts.armor:
+//       {helmet, chest, legs, boots} (item id strings or null per slot).
+//       For each non-null slot, draws an extra box inflated +1.0 model
+//       units beyond the base skin layer (more than the skin's own overlay
+//       inflation), textured with a small procedurally generated flat-
+//       color-per-tier texture (leather/iron/diamond) -- NOT skin-sheet
+//       geometry, independent geometry+texture owned by this module.
+//       helmet -> head box, chestplate -> body + shoulders-of-arms,
+//       leggings -> upper 2/3 of the leg boxes, boots -> lower 1/3.
+//       Missing/null opts.armor is a no-op, matching every other new field.
 
 var PlayerModel = (function () {
   // ---- constants -----------------------------------------------------------
@@ -38,6 +78,27 @@ var PlayerModel = (function () {
   var UV_EPS = 0.02;            // texel inset against seam bleed (px units)
   var LIGHT_DIR = norm3(-0.45, 0.85, 0.55);   // fixed key light (world space)
   var ARM_LIGHT_DIR = norm3(0.35, 0.8, 0.55); // view-space light for the arm
+
+  // ---- Part III: held-item + armor constants --------------------------------
+  var HELD_BLOCK_SIZE = 6;      // held block cube half-extent*2 (model units)
+  var HELD_ITEM_W = 6;          // held item flat-prop width (model units)
+  var HELD_ITEM_H = 9;          // held item flat-prop height (model units)
+  var HELD_ITEM_T = 1;          // held item flat-prop thickness (model units,
+                                 // "~1 model-unit thick" per contract §9)
+  var ARMOR_INFLATE = 1.0;      // armor layer inflation beyond the base skin
+                                 // (more than the skin overlay's own 0.25/0.5)
+  var ARMOR_TIERS = {
+    leather: [0x8B, 0x6D, 0x4A],
+    iron:    [0xD8, 0xD8, 0xD8],
+    diamond: [0x7F, 0xE8, 0xE0]
+  };
+  // item-id tier suffix -> ARMOR_TIERS key ("helmet_iron" -> "iron", etc.)
+  function tierOfItemId(id) {
+    if (typeof id !== 'string') return 'iron';
+    var us = id.lastIndexOf('_');
+    var tier = us >= 0 ? id.slice(us + 1) : id;
+    return ARMOR_TIERS[tier] ? tier : 'iron';
+  }
 
   function norm3(x, y, z) {
     var l = Math.sqrt(x * x + y * y + z * z) || 1;
@@ -161,8 +222,89 @@ var PlayerModel = (function () {
     return _geoCache;
   }
 
+  // ---- Part III: standalone single-box CPU geometry -------------------------
+  // Used for held-item meshes and armor plates -- none of these belong to the
+  // Skins.NET six-part rig (which unwraps a 64x64 skin sheet via pushBox()/
+  // pushFace() above), so they get their own tiny one-box vertex buffers.
+  // UVs here are already-normalised 0..1 quads (Blocks.tileUV() returns
+  // 0..1 atlas coordinates directly; the flat per-tier armor colour and the
+  // Items.icon() canvas are each sampled as a plain whole-texture [0,0,1,1]
+  // quad), so no 64-px-sheet math is needed for this geometry family.
+  function pushFaceUV(v, n, p0, p1, p2, p3, uv0, uv1, uv2, uv3) {
+    var corners = [p0, p1, p2, p0, p2, p3];
+    var uvs = [uv0, uv1, uv2, uv0, uv2, uv3];
+    for (var i = 0; i < 6; i++) {
+      v.push(corners[i][0], corners[i][1], corners[i][2],
+             n[0], n[1], n[2], uvs[i][0], uvs[i][1]);
+    }
+  }
+
+  // One box, each face given an explicit normalised (0..1) UV rect
+  // [u0,v0,u1,v1] (or null to skip that face entirely -- used by the held-
+  // block mesh, which only builds top+2 sides per the HUD fake-iso
+  // convention). faceUVs: {top,bottom,front,back,left,right}.
+  function buildBoxUV(x0, y0, z0, x1, y1, z1, faceUVs) {
+    var v = [];
+    function quad(n, p0, p1, p2, p3, r) {
+      if (!r) return;
+      pushFaceUV(v, n, p0, p1, p2, p3,
+        [r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]);
+    }
+    quad([0, 0, 1],  [x0, y1, z1], [x1, y1, z1], [x1, y0, z1], [x0, y0, z1], faceUVs.front);
+    quad([0, 0, -1], [x1, y1, z0], [x0, y1, z0], [x0, y0, z0], [x1, y0, z0], faceUVs.back);
+    quad([-1, 0, 0], [x0, y1, z0], [x0, y1, z1], [x0, y0, z1], [x0, y0, z0], faceUVs.right);
+    quad([1, 0, 0],  [x1, y1, z1], [x1, y1, z0], [x1, y0, z0], [x1, y0, z1], faceUVs.left);
+    quad([0, 1, 0],  [x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1], faceUVs.top);
+    quad([0, -1, 0], [x0, y0, z1], [x1, y0, z1], [x1, y0, z0], [x0, y0, z0], faceUVs.bottom);
+    return new Float32Array(v);
+  }
+
+  // Full box, one shared UV rect on every face (armor plates + solid-colour
+  // procedural textures -- orientation doesn't matter for a flat colour).
+  function buildBoxUniformUV(x0, y0, z0, x1, y1, z1, r) {
+    return buildBoxUV(x0, y0, z0, x1, y1, z1,
+      { top: r, bottom: r, front: r, back: r, left: r, right: r });
+  }
+
+  function uploadMesh(gl, data) {
+    var vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    var vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 32, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 32, 12);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 32, 24);
+    gl.bindVertexArray(null);
+    return { vao: vao, count: data.length / 8, vbo: vbo };
+  }
+
+  // Tiny 4x4 flat-colour canvas for one armor tier -- procedural, no external
+  // images. A few px so NEAREST sampling still reads as a clean flat colour.
+  var _armorTexCanvasCache = {};
+  function armorTierCanvas(tier) {
+    if (_armorTexCanvasCache[tier]) return _armorTexCanvasCache[tier];
+    var rgb = ARMOR_TIERS[tier] || ARMOR_TIERS.iron;
+    var c = document.createElement('canvas');
+    c.width = 4; c.height = 4;
+    var ctx = c.getContext('2d');
+    ctx.fillStyle = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    ctx.fillRect(0, 0, 4, 4);
+    // a faint 1px darker edge shading so the plate reads as material, not a
+    // flat sticker -- still a solid-colour tile at NEAREST-sample scale.
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.fillRect(0, 3, 4, 1);
+    ctx.fillRect(3, 0, 1, 4);
+    _armorTexCanvasCache[tier] = c;
+    return c;
+  }
+
   // ---- per-context GL state --------------------------------------------------
-  var _states = []; // [{gl, prog, uni, geo, broken}]
+  // [{gl, prog, uni, geo, broken, atlasTex, heldCache, armorMeshCache, armorCache}]
+  var _states = [];
 
   function uploadLayer(gl, cpu) {
     var vao = gl.createVertexArray();
@@ -180,8 +322,14 @@ var PlayerModel = (function () {
     return { vao: vao, ranges: cpu.ranges };
   }
 
-  function buildState(gl) {
-    var st = { gl: gl, prog: null, uni: null, geo: null, broken: false };
+  function buildState(gl, opts) {
+    var st = {
+      gl: gl, prog: null, uni: null, geo: null, broken: false,
+      atlasTex: (opts && opts.atlasTex) || null,
+      heldCache: {},      // key "block:12" / "item:sword_iron" -> {vao,tex,count,owned}
+      armorMeshCache: {}, // key "classic:helmet" etc -> {vao,count} | null
+      armorCache: {}      // key tier -> {tex}
+    };
     try {
       if (typeof M3 === 'undefined' || typeof GLX === 'undefined' ||
           typeof Skins === 'undefined') {
@@ -207,12 +355,18 @@ var PlayerModel = (function () {
     return st;
   }
 
-  function stateFor(gl) {
+  function stateFor(gl, opts) {
     if (!gl) return null;
     for (var i = 0; i < _states.length; i++) {
-      if (_states[i].gl === gl) return _states[i].broken ? null : _states[i];
+      if (_states[i].gl === gl) {
+        // Allow a late/second init(gl, {atlasTex}) call to attach the atlas
+        // reference even if the context was already initialised earlier
+        // (e.g. PlayerModel.init(gl) ran before bootEngine had the atlas).
+        if (opts && opts.atlasTex && !_states[i].atlasTex) _states[i].atlasTex = opts.atlasTex;
+        return _states[i].broken ? null : _states[i];
+      }
     }
-    var st = buildState(gl);
+    var st = buildState(gl, opts);
     _states.push(st);
     return st.broken ? null : st;
   }
@@ -248,6 +402,9 @@ var PlayerModel = (function () {
   var S4 = new Float32Array(16), S5 = new Float32Array(16);
   var SP = new Float32Array(16), SV = new Float32Array(16), SVP = new Float32Array(16);
   var MZ = new Float32Array(16);
+  // Part III: dedicated scratch so held-item/armor transforms never race the
+  // per-part matrices drawLayers() is mid-computation with.
+  var H0 = new Float32Array(16), H1 = new Float32Array(16), H2 = new Float32Array(16);
 
   // M3 pins RotateX/RotateY but no RotateZ — post-multiply a hand-built
   // column-major Z rotation instead.
@@ -327,9 +484,209 @@ var PlayerModel = (function () {
     gl.bindVertexArray(null);
   }
 
+  // ============================================================================
+  // ---- Part III: held-item meshes (§9) --------------------------------------
+  // ============================================================================
+
+  // kind==='block': top+2-sides cube from the world atlas (no upload -- reuses
+  // st.atlasTex, wired in via PlayerModel.init(gl,{atlasTex})).
+  function buildHeldBlockMesh(gl, st, heldId) {
+    if (!st.atlasTex || typeof Blocks === 'undefined' || !Blocks.byId) return null;
+    var def = Blocks.byId(heldId);
+    if (!def || !def.tiles) return null;
+    var uvTop = Blocks.tileUV(def.tiles.top);
+    var uvSide = Blocks.tileUV(def.tiles.side);
+    if (!uvTop || !uvSide) return null;
+    var h = HELD_BLOCK_SIZE / 2;
+    var data = buildBoxUV(-h, -h, -h, h, h, h, {
+      top: uvTop, front: uvSide, right: uvSide,
+      // left/back/bottom omitted -- matches the "top+2 sides" fake-iso
+      // convention (§9): a visible corner reads as a cube without paying
+      // for faces the camera basically never sees on a held prop.
+      left: null, back: null, bottom: null
+    });
+    var mesh = uploadMesh(gl, data);
+    return { vao: mesh.vao, tex: st.atlasTex, count: mesh.count, owned: false };
+  }
+
+  // kind==='item': thin extruded flat-prop quad from Items.icon(id)'s canvas.
+  function buildHeldItemPropMesh(gl, st, heldId) {
+    if (typeof Items === 'undefined' || !Items.icon) return null;
+    var canvas = Items.icon(heldId);
+    if (!canvas) return null;
+    var tex = GLX.texture2D(gl, { canvas: canvas, filter: 'nearest', wrap: 'clamp' });
+    var w = HELD_ITEM_W / 2, hh = HELD_ITEM_H / 2, t = HELD_ITEM_T / 2;
+    var full = [0, 0, 1, 1];
+    var data = buildBoxUV(-w, -hh, -t, w, hh, t, {
+      front: full, back: full, top: full, bottom: full, left: full, right: full
+    });
+    var mesh = uploadMesh(gl, data);
+    return { vao: mesh.vao, tex: tex, count: mesh.count, owned: true };
+  }
+
+  // Memoized per (gl-context, kind, heldId). Returns null (safe no-op) when
+  // the id/kind is unrecognised, the dependency module isn't loaded yet, or
+  // the atlas texture reference was never supplied to init().
+  function heldItemMesh(gl, heldId, kind) {
+    var st = stateFor(gl);
+    if (!st || heldId == null) return null;
+    var k = (kind === 'item' ? 'item' : 'block') + ':' + heldId;
+    if (st.heldCache[k] !== undefined) return st.heldCache[k];
+    var mesh = (kind === 'item') ? buildHeldItemPropMesh(gl, st, heldId)
+                                  : buildHeldBlockMesh(gl, st, heldId);
+    st.heldCache[k] = mesh; // cache the null too -- avoids re-attempting every frame
+    return mesh;
+  }
+
+  // Draw the given held mesh parented to the hand transform `handBase`
+  // (already includes the hand's own local pose rotation -- this function
+  // only appends a small per-kind offset/orientation so the item sits IN the
+  // hand rather than at its pivot origin). scratch: a spare Float32Array(16)
+  // distinct from whatever the caller is still using.
+  function drawHeldMesh(gl, st, mesh, handBase, kind, scratchA, scratchB) {
+    if (!mesh) return;
+    // Blocks sit flatter/lower (as if resting on the palm); tools/items are
+    // angled more upright (as if gripped like a handle) -- §9.
+    if (kind === 'item') {
+      M3.mat4Translate(scratchA, handBase, 0, -2, 3);
+      M3.mat4RotateX(scratchB, scratchA, 0.35);
+      rotZ(scratchA, scratchB, 0.5);
+    } else {
+      M3.mat4Translate(scratchA, handBase, 0, -1, 4);
+      M3.mat4RotateY(scratchB, scratchA, 0.5);
+      rotZ(scratchA, scratchB, 0.15);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, mesh.tex);
+    gl.uniform1f(st.uni.uCutout, 0); // opaque box, same as the base skin layer
+    gl.uniformMatrix4fv(st.uni.uModel, false, scratchA);
+    gl.bindVertexArray(mesh.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+    gl.bindVertexArray(null);
+    // Nothing else draws after the held-item block in either caller (draw()/
+    // drawFirstPersonArm() both call this last, then only restore() GL
+    // enable-toggles) so the stray texture binding left on unit 0 here is
+    // harmless -- the NEXT PlayerModel.draw()/drawFirstPersonArm() call
+    // always rebinds its own skinTex before touching this unit again.
+  }
+
+  // ============================================================================
+  // ---- Part III: armor layer (§5.5) ------------------------------------------
+  // ============================================================================
+
+  // One extra box per equipped slot, +1.0 model units beyond the base skin
+  // box, textured with a flat per-tier colour. Built lazily and memoized by
+  // tier (the geometry itself only depends on which body-box it wraps, which
+  // is fixed, so we memoize the TEXTURE by tier and rebuild geometry per
+  // model variant on first use since classic/slim arm widths differ).
+  var _armorGeoCache = null; // {classic:{helmet,chest,legs,boots}, slim:{...}}
+  function armorGeo(model) {
+    if (!_armorGeoCache) _armorGeoCache = {};
+    if (_armorGeoCache[model]) return _armorGeoCache[model];
+    var net = Skins.NET[model];
+    var inf = ARMOR_INFLATE;
+    var uv = [0, 0, 1, 1];
+    var head = net.head.box, body = net.body.box;
+    var rArm = net.rightArm.box, lArm = net.leftArm.box;
+    var rLeg = net.rightLeg.box, lLeg = net.leftLeg.box;
+
+    // helmet: head box only.
+    var helmet = buildBoxUniformUV(
+      head.min[0] - inf, head.min[1] - inf, head.min[2] - inf,
+      head.max[0] + inf, head.max[1] + inf, head.max[2] + inf, uv);
+
+    // chestplate: body box + the upper (shoulder) portion of both arm boxes.
+    // "shoulders-of-arms" -> the arm's top third (nearest the pivot/shoulder).
+    var armShoulderFrac = 1 / 3;
+    var rArmTop = rArm.min[1] + (rArm.max[1] - rArm.min[1]) * (1 - armShoulderFrac);
+    var lArmTop = lArm.min[1] + (lArm.max[1] - lArm.min[1]) * (1 - armShoulderFrac);
+    var chestVerts = [];
+    function appendBox(dst, boxData) { for (var i = 0; i < boxData.length; i++) dst.push(boxData[i]); }
+    appendBox(chestVerts, buildBoxUniformUV(
+      body.min[0] - inf, body.min[1] - inf, body.min[2] - inf,
+      body.max[0] + inf, body.max[1] + inf, body.max[2] + inf, uv));
+    appendBox(chestVerts, buildBoxUniformUV(
+      rArm.min[0] - inf, rArmTop - inf, rArm.min[2] - inf,
+      rArm.max[0] + inf, rArm.max[1] + inf, rArm.max[2] + inf, uv));
+    appendBox(chestVerts, buildBoxUniformUV(
+      lArm.min[0] - inf, lArmTop - inf, lArm.min[2] - inf,
+      lArm.max[0] + inf, lArm.max[1] + inf, lArm.max[2] + inf, uv));
+    var chest = new Float32Array(chestVerts);
+
+    // leggings: upper 2/3 of each leg box (legs run min.y..max.y, max.y is
+    // the top/hip end since boxFor()'s leg box has max=[.,0,.]).
+    var legFrac = 2 / 3;
+    var rLegSplit = rLeg.min[1] + (rLeg.max[1] - rLeg.min[1]) * (1 - legFrac);
+    var lLegSplit = lLeg.min[1] + (lLeg.max[1] - lLeg.min[1]) * (1 - legFrac);
+    var legVerts = [];
+    appendBox(legVerts, buildBoxUniformUV(
+      rLeg.min[0] - inf, rLegSplit - inf, rLeg.min[2] - inf,
+      rLeg.max[0] + inf, rLeg.max[1] + inf, rLeg.max[2] + inf, uv));
+    appendBox(legVerts, buildBoxUniformUV(
+      lLeg.min[0] - inf, lLegSplit - inf, lLeg.min[2] - inf,
+      lLeg.max[0] + inf, lLeg.max[1] + inf, lLeg.max[2] + inf, uv));
+    var legs = new Float32Array(legVerts);
+
+    // boots: lower 1/3 of each leg box.
+    var bootVerts = [];
+    appendBox(bootVerts, buildBoxUniformUV(
+      rLeg.min[0] - inf, rLeg.min[1] - inf, rLeg.min[2] - inf,
+      rLeg.max[0] + inf, rLegSplit + inf, rLeg.max[2] + inf, uv));
+    appendBox(bootVerts, buildBoxUniformUV(
+      lLeg.min[0] - inf, lLeg.min[1] - inf, lLeg.min[2] - inf,
+      lLeg.max[0] + inf, lLegSplit + inf, lLeg.max[2] + inf, uv));
+    var boots = new Float32Array(bootVerts);
+
+    var g = { helmet: helmet, chest: chest, legs: legs, boots: boots };
+    _armorGeoCache[model] = g;
+    return g;
+  }
+
+  function armorMeshFor(gl, st, model, slot) {
+    var cacheKey = model + ':' + slot;
+    if (st.armorMeshCache[cacheKey] !== undefined) return st.armorMeshCache[cacheKey];
+    var geoData = armorGeo(model)[slot];
+    var mesh = geoData ? uploadMesh(gl, geoData) : null;
+    st.armorMeshCache[cacheKey] = mesh;
+    return mesh;
+  }
+
+  function armorTexFor(gl, st, tier) {
+    if (st.armorCache[tier]) return st.armorCache[tier].tex;
+    var tex = GLX.texture2D(gl, { canvas: armorTierCanvas(tier), filter: 'linear', wrap: 'clamp' });
+    st.armorCache[tier] = { tex: tex };
+    return tex;
+  }
+
+  // opts: {armor:{helmet,chest,legs,boots}}, base = the same world matrix
+  // drawLayers() was given (T(pos)*RotY(yaw+PI)*Scale).
+  function drawArmorLayer(gl, st, model, armor, base) {
+    if (!armor) return;
+    var slots = [
+      ['helmet', armor.helmet], ['chest', armor.chest],
+      ['legs', armor.legs], ['boots', armor.boots]
+    ];
+    gl.uniform1f(st.uni.uCutout, 0); // opaque flat-colour plates
+    for (var i = 0; i < slots.length; i++) {
+      var slot = slots[i][0], itemId = slots[i][1];
+      if (!itemId) continue;
+      var mesh = armorMeshFor(gl, st, model, slot);
+      if (!mesh) continue;
+      var tex = armorTexFor(gl, st, tierOfItemId(itemId));
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniformMatrix4fv(st.uni.uModel, false, base);
+      gl.bindVertexArray(mesh.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+    }
+    gl.bindVertexArray(null);
+  }
+
   // ---- public: full player ------------------------------------------------------
   // opts: { skinTex, model, viewProj, pos:[x,y,z], yaw, headYaw, headPitch,
-  //         swing, swingAmp, crouch, light, fog:{color,start,end}, camPos }
+  //         swing, swingAmp, crouch, light, fog:{color,start,end}, camPos,
+  //         heldId, heldKind (Part III §9, either may be null/undefined),
+  //         armor:{helmet,chest,legs,boots} (Part III §5.5, may be omitted) }
   function draw(gl, opts) {
     var st = stateFor(gl);
     if (!st || !opts || !opts.skinTex || !opts.viewProj) return;
@@ -349,8 +706,29 @@ var PlayerModel = (function () {
     M3.mat4RotateY(S2, S1, (opts.yaw || 0) + Math.PI);
     M3.mat4Scale(S0, S2, SCALE, SCALE, SCALE);
 
+    var pose = computePose(opts);
     var restore = pushDrawState(gl);
-    drawLayers(gl, st, st.geo[model], computePose(opts), S0);
+    drawLayers(gl, st, st.geo[model], pose, S0);
+
+    // Part III armor layer (§5.5) -- no-op when opts.armor is absent/empty.
+    // (drawArmorLayer sets uCutout itself; nothing else to do here.)
+    drawArmorLayer(gl, st, model, opts.armor, S0);
+
+    // Part III held item (§9), third person -- no-op when heldId is
+    // null/undefined, matching every other empty-hand-safe default here.
+    if (opts.heldId != null) {
+      var mesh = heldItemMesh(gl, opts.heldId, opts.heldKind);
+      if (mesh) {
+        // Recompute the right arm's own world matrix (drawLayers() already
+        // did this internally but didn't hand it back) so the held mesh can
+        // parent onto the SAME hand transform -- swing/bob carries it for
+        // free since it's driven by the same `pose.rightArm` values.
+        var net = Skins.NET.classic.rightArm; // pivots identical across variants
+        partMatrix(H0, S0, net.pivot, pose.rightArm);
+        drawHeldMesh(gl, st, mesh, H0, opts.heldKind, H1, H2);
+      }
+    }
+
     restore();
   }
 
@@ -359,6 +737,9 @@ var PlayerModel = (function () {
   // the attack swing (0..1, 0 = rest), bob a walk-cycle phase in radians.
   // Depth range is squeezed to [0, 0.1] so the arm always wins against the
   // already-rendered world without clearing the depth buffer.
+  // Part III (§9): o.heldId/o.heldKind (either may be null/undefined = empty
+  // hand, unchanged bare-arm behaviour) draw the held mesh parented to this
+  // SAME hand transform, so the existing swing/bob carries it for free.
   function drawFirstPersonArm(gl, o) {
     var st = stateFor(gl);
     if (!st || !o || !o.skinTex || !o.proj) return;
@@ -397,6 +778,17 @@ var PlayerModel = (function () {
       gl.drawArrays(gl.TRIANGLES, r.first, r.count);
     }
     gl.bindVertexArray(null);
+
+    // Part III held item (§9), first person -- no-op when heldId is
+    // null/undefined (empty hand, existing bare-arm behaviour unchanged).
+    if (o.heldId != null) {
+      var mesh = heldItemMesh(gl, o.heldId, o.heldKind);
+      // S3 (the arm's own hand transform, pre-ARM_SCALE-baked-in) is exactly
+      // the parent transform the contract asks for -- attach directly so the
+      // held mesh scales/rotates/translates with the arm for free.
+      if (mesh) drawHeldMesh(gl, st, mesh, S3, o.heldKind, H1, H2);
+    }
+
     gl.depthRange(0.0, 1.0);
     restore();
   }
@@ -620,11 +1012,20 @@ var PlayerModel = (function () {
 
   // ---- public API ------------------------------------------------------------------
   return {
-    init: function (gl) { stateFor(gl); },
+    // opts (Part III addition, optional, backward compatible with the plain
+    // PlayerModel.init(gl) call Part I/II code already makes): {atlasTex}
+    // -- the world atlas texture, reused (never re-uploaded) for §9's
+    // held-block meshes. Safe to omit entirely or to call again later once
+    // the atlas becomes available (see stateFor()'s late-attach handling).
+    init: function (gl, opts) { stateFor(gl, opts); },
     draw: draw,
     drawFirstPersonArm: drawFirstPersonArm,
     preview: preview,
-    attachTurntable: attachTurntable
+    attachTurntable: attachTurntable,
+    // Part III (§9): PlayerModel.heldItemMesh(gl, heldId, kind) -> {vao,tex}|null
+    // Exposed publicly for callers that want to pre-warm/inspect the memoized
+    // mesh cache; draw()/drawFirstPersonArm() also call this internally.
+    heldItemMesh: heldItemMesh
   };
 })();
 

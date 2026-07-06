@@ -939,8 +939,8 @@ body::after {
 .vox-btn-sneak.on, .vox-btn-sneak.active { background: var(--cy); color: var(--ink); border-color: var(--ink); }
 .vox-btn-sprint.on, .vox-btn-sprint.active { background: var(--am); color: var(--ink); border-color: var(--ink); }
 
-/* top-right utility bar: pause / chat / inventory / perspective */
-.vox-btn-pause, .vox-btn-chat, .vox-btn-inv, .vox-btn-persp {
+/* top-right utility bar: pause / chat / inventory / perspective / drop */
+.vox-btn-pause, .vox-btn-chat, .vox-btn-inv, .vox-btn-persp, .vox-btn-drop {
   position: absolute;
   top: calc(10px + env(safe-area-inset-top, 0px));
   width: 48px; height: 48px;
@@ -952,11 +952,12 @@ body::after {
   border: 2px solid rgba(255, 255, 255, .4);
 }
 .vox-btn-pause:active, .vox-btn-chat:active,
-.vox-btn-inv:active, .vox-btn-persp:active { background: rgba(255, 255, 255, .3); }
+.vox-btn-inv:active, .vox-btn-persp:active, .vox-btn-drop:active { background: rgba(255, 255, 255, .3); }
 .vox-btn-pause { right: calc(12px + env(safe-area-inset-right, 0px)); }
 .vox-btn-chat  { right: calc(66px + env(safe-area-inset-right, 0px)); }
 .vox-btn-inv   { right: calc(120px + env(safe-area-inset-right, 0px)); }
 .vox-btn-persp { right: calc(174px + env(safe-area-inset-right, 0px)); }
+.vox-btn-drop  { right: calc(234px + env(safe-area-inset-right, 0px)); }
 
 /* phones: tighter hotbar so 9 slots always fit, HUD nudges up a bit */
 @media (max-width: 560px) {

@@ -31,6 +31,15 @@ var HUD = (function () {
   var CHAT_FADE_MS = 8000;
   var HISTORY_MAX = 32;
 
+  // Part III (§8): armor-row slot keys, matching PlayerModel.draw's
+  // opts.armor shape {helmet, chest, legs, boots} exactly (already landed
+  // in playermodel.js -- this HUD row mirrors those same field names).
+  // Each holds a full item id string ("helmet_iron", "chestplate_diamond",
+  // ...) or null, so Items.icon()/Items.def() take the value directly with
+  // no key->prefix remapping needed.
+  var ARMOR_SLOT_KEYS = ['helmet', 'chest', 'legs', 'boots'];
+  var HOTBAR_TOOLTIP_MS = 1400;   // §9/§10: selection-triggered tooltip auto-hide
+
   // ---- helpers -------------------------------------------------------------
 
   function t(key, en) {
@@ -119,7 +128,15 @@ var HUD = (function () {
     '.vox-hotbar-row{display:grid;grid-template-columns:repeat(9,46px);gap:4px;padding-top:8px;border-top:1px solid rgba(255,255,255,.2);}',
     '.vox-tooltip{display:none;position:absolute;padding:3px 8px;background:rgba(0,0,0,.85);border:1px solid rgba(255,255,255,.3);border-radius:4px;font-size:12px;pointer-events:none;z-index:20;white-space:nowrap;}',
     '.vox-webgl-error{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#101820;color:#fff;text-align:center;padding:24px;pointer-events:auto;z-index:50;}',
-    '@media (max-width:520px){.vox-inv-grid,.vox-hotbar-row{grid-template-columns:repeat(9,minmax(30px,1fr));}.vox-inv-cell{width:auto;height:auto;aspect-ratio:1;}.vox-inv-cell canvas{width:86%;height:86%;}}'
+    '@media (max-width:520px){.vox-inv-grid,.vox-hotbar-row{grid-template-columns:repeat(9,minmax(30px,1fr));}.vox-inv-cell{width:auto;height:auto;aspect-ratio:1;}.vox-inv-cell canvas{width:86%;height:86%;}}',
+    /* ---- Part III combat additions (ARCHITECTURE-COMBAT.md §8) ---- */
+    '.vox-hitflash{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(200,0,0,0) 40%,rgba(180,0,0,.55) 100%);opacity:0;pointer-events:none;transition:opacity .12s ease-out;z-index:6;}',
+    '.vox-hitflash.on{opacity:1;transition:opacity 0s;}',
+    '.vox-armor-row{position:absolute;left:50%;bottom:calc(60px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:4px;pointer-events:none;}',
+    '.vox-armor-slot{position:relative;width:28px;height:28px;background:rgba(10,14,20,.4);border:2px dashed rgba(255,255,255,.22);border-radius:4px;box-sizing:border-box;}',
+    '.vox-armor-slot.filled{border-style:solid;border-color:rgba(255,255,255,.4);}',
+    '.vox-armor-slot canvas{position:absolute;inset:1px;width:22px;height:22px;image-rendering:pixelated;}',
+    '.vox-death-by{margin-top:-4px;font-size:15px;opacity:.85;text-shadow:1px 1px 0 rgba(0,0,0,.5);}'
   ].join('\n');
 
   function injectCSS() {
@@ -162,6 +179,13 @@ var HUD = (function () {
   var toastTimer = 0;
   var debugVisible = false;
   var debugLast = 0;
+
+  // Part III (§8/§9/§10) state
+  var lastArmorSig = '';
+  var hitflashTimer = 0;
+  var hotbarTooltipTimer = 0;
+  var hotbarTooltipSelected = -1;   // last selection we already showed a tooltip for
+  var combatWired = false;
 
   // ---- block icons (fake-iso from the atlas canvas) ---------------------------
 
@@ -268,20 +292,35 @@ var HUD = (function () {
     return c;
   }
 
-  // Paint a slot/cell canvas from the master icon.
-  function paintIconInto(canvas, id) {
+  // Paint a slot/cell canvas from the master icon. `id` may be a numeric
+  // block id (existing behaviour, unchanged) or -- Part III §4/§9 -- a
+  // string item id, in which case it's drawn via Items.icon() instead of
+  // the block atlas fake-iso builder. Kind is inferred from typeof id when
+  // not passed explicitly, matching Inventory's own {id,kind} slot rule
+  // ("kind defaults to 'block' for numeric ids, 'item' for string ids").
+  function paintIconInto(canvas, id, kind) {
     var ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (id) {
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(getIcon(id), 0, 0, canvas.width, canvas.height);
+    if (!id) return;
+    ctx.imageSmoothingEnabled = false;
+    var isItem = kind ? kind === 'item' : typeof id === 'string';
+    if (isItem) {
+      if (typeof Items === 'undefined' || !Items || typeof Items.icon !== 'function') return;
+      var itemCanvas = Items.icon(id);
+      if (itemCanvas) ctx.drawImage(itemCanvas, 0, 0, canvas.width, canvas.height);
+      return;
     }
+    ctx.drawImage(getIcon(id), 0, 0, canvas.width, canvas.height);
   }
 
   // ---- DOM construction --------------------------------------------------------
 
   function buildDom() {
     box = el('div', 'vox-hud', root);
+
+    // full-screen damage pulse (Part III §8) -- sits low in z-order, under
+    // every other element, so it never blocks crosshair/hotbar/chat input.
+    dom.hitflash = el('div', 'vox-hitflash', box);
 
     // crosshair
     dom.crosshair = el('div', 'vox-crosshair', box);
@@ -324,6 +363,18 @@ var HUD = (function () {
       })(i);
     }
 
+    // armor row (Part III §8): 4 small slot icons above the hotbar reflecting
+    // inv.armor -> {helmet,chest,legs,boots}; empty = dim dashed outline.
+    dom.armorRow = el('div', 'vox-armor-row', box);
+    dom.armorSlots = {};
+    ARMOR_SLOT_KEYS.forEach(function (key) {
+      var s = el('div', 'vox-armor-slot', dom.armorRow);
+      var cv = document.createElement('canvas');
+      cv.width = 40; cv.height = 40;
+      s.appendChild(cv);
+      dom.armorSlots[key] = { root: s, canvas: cv };
+    });
+
     // target block name label
     dom.targetLabel = el('div', 'vox-target-label', box);
 
@@ -361,6 +412,8 @@ var HUD = (function () {
     dom.death = el('div', 'vox-overlay vox-death', box);
     var dt = el('h2', null, dom.death);
     dt.textContent = t('vox.death.title', 'You died!');
+    dom.deathBy = el('div', 'vox-death-by', dom.death);
+    dom.deathBy.style.display = 'none';
     var rb = el('button', 'vox-ui-btn', dom.death);
     rb.textContent = t('vox.death.respawn', 'Respawn');
     rb.addEventListener('click', function () {
@@ -480,11 +533,81 @@ var HUD = (function () {
   }
   function hideTooltip() { dom.tooltip.style.display = 'none'; }
 
+  // ---- hotbar selection tooltip (Part III §9/§10) -----------------------------
+  // Bug fix per contract §10: the pinned hotbar row never called the existing
+  // tooltip mechanism. Whenever the SELECTED slot changes (hotbar number key,
+  // wheel scroll, or a touch tap -- i.e. any real call to inv.select() that
+  // actually changes inv.selected, which is exactly when Inventory's onChange
+  // fires for a selection edit per inventory.js's own `if (n === inv.selected)
+  // return;` early-out) show the slot's name above it for ~1.4s, auto-hiding.
+  // Explicitly NOT triggered by mere mouse hover (that's the pre-existing
+  // crosshair-target-name / inventory-panel-hover behaviour, left alone).
+  var hotbarSelectionListener = null;
+
+  function showHotbarSelectionTooltip() {
+    var inv = game && game.inventory;
+    if (!inv || !inv.hotbar || typeof inv.selected !== 'number') return;
+    var slot = dom.slots[inv.selected];
+    if (!slot) return;
+    var it = inv.hotbar[inv.selected];
+    if (!it) { hideTooltip(); return; } // empty slot selected: nothing to name
+    var label = slotName(it);
+    if (!label) return;
+    showTooltip(slot.root, label);
+    clearTimeout(hotbarTooltipTimer);
+    hotbarTooltipTimer = setTimeout(hideTooltip, HOTBAR_TOOLTIP_MS);
+  }
+
+  function wireHotbarSelectionTooltip() {
+    unwireHotbarSelectionTooltip();
+    if (!game || !game.inventory || typeof game.inventory.onChange !== 'function') return;
+    hotbarSelectionListener = function (inv) {
+      if (!inv || typeof inv.selected !== 'number') return;
+      if (inv.selected === hotbarTooltipSelected) return; // a non-selection mutation (count/contents change)
+      hotbarTooltipSelected = inv.selected;
+      showHotbarSelectionTooltip();
+    };
+    hotbarTooltipSelected = game.inventory.selected;
+    game.inventory.onChange(hotbarSelectionListener);
+  }
+
+  function unwireHotbarSelectionTooltip() {
+    if (hotbarSelectionListener && game && game.inventory && typeof game.inventory.offChange === 'function') {
+      game.inventory.offChange(hotbarSelectionListener);
+    }
+    hotbarSelectionListener = null;
+  }
+
   // ---- inventory panel ----------------------------------------------------------
 
   function blockName(id) {
     var def = (typeof Blocks !== 'undefined') ? Blocks.byId(id) : null;
     return def ? t(def.i18nKey, def.name) : '';
+  }
+
+  // Part III (§4/§9/§10): item-id name lookup, same i18n shape as blockName.
+  // Items.nameOf already does the I18n.t(i18nKey,name) fallback internally,
+  // but we mirror it locally too so this file degrades identically (empty
+  // string) when Items isn't loaded, matching blockName's own empty-string
+  // contract for an unknown id.
+  function itemName(id) {
+    if (typeof Items === 'undefined' || !Items) return '';
+    var def = Items.def ? Items.def(id) : null;
+    if (!def) return '';
+    return typeof Items.nameOf === 'function' ? Items.nameOf(id) : t(def.i18nKey, def.name);
+  }
+
+  // Name lookup that works for BOTH a hotbar/backpack slot's {id,kind} shape
+  // (§4: kind defaults to 'block' for numeric ids, 'item' for string ids)
+  // and a bare id (numeric = block, string = item) for callers that don't
+  // carry a slot object (e.g. the armor row, which stores bare item ids).
+  function slotName(slotOrId) {
+    if (slotOrId && typeof slotOrId === 'object') {
+      if (slotOrId.kind === 'item' || typeof slotOrId.id === 'string') return itemName(slotOrId.id);
+      return blockName(slotOrId.id);
+    }
+    if (typeof slotOrId === 'string') return itemName(slotOrId);
+    return blockName(slotOrId);
   }
 
   function invCell(parent, slot, onClick, name) {
@@ -493,12 +616,14 @@ var HUD = (function () {
     cv.width = 40; cv.height = 40;
     cell.appendChild(cv);
     var id = slot ? slot.id : 0;
-    paintIconInto(cv, id);
+    paintIconInto(cv, id, slot ? slot.kind : null);
     if (slot && slot.count > 1) {
       var cnt = el('span', 'vox-slot-count', cell);
       cnt.textContent = slot.count;
     }
-    var label = name || (id ? blockName(id) : '');
+    // Part III §4: slot may now be an item-kind {id,count,kind} entry, not
+    // just a block id -- slotName() handles both transparently.
+    var label = name || (id ? slotName(slot) : '');
     if (label) {
       cell.addEventListener('mouseenter', function () { showTooltip(cell, label); });
       cell.addEventListener('mouseleave', hideTooltip);
@@ -747,6 +872,13 @@ var HUD = (function () {
     if (on) {
       if (chatOpen) closeChat(false);
       if (invOpen) closeInventory();
+      // Part III §8: an optional cbs.cause string sets the "Slain by <name>"
+      // / "Killed by a zombie" / "Fell to their death" line in one call;
+      // callers that prefer to set it separately can still use
+      // HUD.setDeathCause(text) at any point (e.g. once a 'death' message
+      // with `by` arrives slightly after the local death is first shown).
+      if (cbs && typeof cbs.cause === 'string') setDeathCause(cbs.cause);
+      else if (!cbs || cbs.cause === undefined) setDeathCause(''); // fresh death, no cause yet
       dom.death.style.display = 'flex';
     } else {
       dom.death.style.display = 'none';
@@ -759,7 +891,7 @@ var HUD = (function () {
     var s = String(selected);
     for (var i = 0; i < 9; i++) {
       var it = hotbar[i];
-      s += '|' + (it ? it.id + ':' + it.count : '');
+      s += '|' + (it ? it.id + ':' + it.count + ':' + (it.kind || '') : '');
     }
     return s;
   }
@@ -772,7 +904,7 @@ var HUD = (function () {
       var slot = dom.slots[i];
       var it = state.hotbar ? state.hotbar[i] : null;
       slot.root.classList.toggle('sel', i === state.selected);
-      paintIconInto(slot.canvas, it ? it.id : 0);
+      paintIconInto(slot.canvas, it ? it.id : 0, it ? it.kind : null);
       var showCount = it && it.count > 1 && state.mode !== 'creative';
       slot.count.textContent = showCount ? String(it.count) : '';
     }
@@ -832,8 +964,88 @@ var HUD = (function () {
     dom.debug.textContent = lines.join('\n');
   }
 
+  // Part III §8: armor row -- reads game.inventory.armor directly (rather
+  // than requiring it on the passed `state`) so HUD.update(state)'s pinned
+  // signature stays exactly as documented; this mirrors how updateDebug()
+  // already reaches into `game` for extra info beyond `state`.
+  function armorSig(armor) {
+    if (!armor) return '';
+    var s = '';
+    for (var i = 0; i < ARMOR_SLOT_KEYS.length; i++) s += '|' + (armor[ARMOR_SLOT_KEYS[i]] || '');
+    return s;
+  }
+
+  function updateArmorRow() {
+    if (!dom.armorRow) return;
+    var inv = game && game.inventory;
+    var armor = inv && inv.armor ? inv.armor : null;
+    var sig = armorSig(armor);
+    if (sig === lastArmorSig) return;
+    lastArmorSig = sig;
+    for (var i = 0; i < ARMOR_SLOT_KEYS.length; i++) {
+      var key = ARMOR_SLOT_KEYS[i];
+      var itemId = armor ? armor[key] : null;
+      var s = dom.armorSlots[key];
+      if (!s) continue;
+      s.root.classList.toggle('filled', !!itemId);
+      var ctx = s.canvas.getContext('2d');
+      ctx.clearRect(0, 0, s.canvas.width, s.canvas.height);
+      if (itemId && typeof Items !== 'undefined' && Items && typeof Items.icon === 'function') {
+        ctx.imageSmoothingEnabled = false;
+        var icon = Items.icon(itemId);
+        if (icon) ctx.drawImage(icon, 0, 0, s.canvas.width, s.canvas.height);
+      }
+    }
+  }
+
+  // Part III §8: full-screen red pulse on taking damage. Public entry point
+  // HUD.flashDamage(); also self-wires to Combat.onDamage the first time
+  // update() runs with a Combat global present, so Game doesn't strictly
+  // have to call it manually (either path is safe -- flashDamage() is a
+  // plain re-triggerable animation, not a queue).
+  function flashDamage() {
+    if (!dom.hitflash) return;
+    dom.hitflash.classList.remove('on');
+    // force reflow so re-adding 'on' restarts the CSS transition even if a
+    // flash is already fading (rapid hits shouldn't silently no-op).
+    void dom.hitflash.offsetWidth;
+    dom.hitflash.classList.add('on');
+    clearTimeout(hitflashTimer);
+    hitflashTimer = setTimeout(function () {
+      if (dom.hitflash) dom.hitflash.classList.remove('on');
+    }, 90);
+  }
+
+  function wireCombatOnce() {
+    if (combatWired) return;
+    if (typeof Combat === 'undefined' || !Combat || typeof Combat.onDamage !== 'function') return;
+    combatWired = true;
+    Combat.onDamage(function (msg) {
+      // Only the local player's own incoming damage should pulse the
+      // screen -- Combat doesn't know the local id itself at the HUD layer,
+      // so we compare against Combat.localHP's owner via the message id
+      // when available; if `msg.id` is absent (older/looser payload),
+      // flash anyway since that's the safer default for a solo/offline path.
+      if (msg && msg.id != null && typeof Net !== 'undefined' && Net && Net.youId != null && msg.id !== Net.youId) {
+        return; // damage to someone else (e.g. a mob you hit) -- not our screen to flash
+      }
+      flashDamage();
+    });
+  }
+
+  // Part III §8: death-by cause line, e.g. "Slain by Steve" / "Killed by a
+  // zombie" / "Fell to their death". Also settable via showDeath's cbs.cause
+  // for callers that prefer to pass it alongside onRespawn in one call.
+  function setDeathCause(text) {
+    if (!dom.deathBy) return;
+    var s = text ? String(text) : '';
+    dom.deathBy.textContent = s;
+    dom.deathBy.style.display = s ? 'block' : 'none';
+  }
+
   function update(state) {
     if (!box) return;
+    wireCombatOnce();
 
     // mode change → badge (skip the very first frame)
     if (lastMode !== null && state.mode !== lastMode) {
@@ -849,6 +1061,7 @@ var HUD = (function () {
     updateHotbar(state);
     updateHearts(state);
     updateBubbles(state);
+    updateArmorRow();
     updateDebug(state);
 
     var tn = state.targetName || '';
@@ -870,9 +1083,11 @@ var HUD = (function () {
       iconCache = {};
       chatOpen = false; invOpen = false; pausedOpen = false; deathOpen = false;
       lastMode = null; lastHealth = -1; lastAir = 'x'; lastHotbarSig = ''; lastTarget = '';
+      lastArmorSig = ''; hotbarTooltipSelected = -1; combatWired = false;
       atlasCanvas = resolveAtlasCanvas(opts);
       buildDom();
       applyTouchSize(loadSettings().touch || 'm');
+      wireHotbarSelectionTooltip();
     },
 
     update: update,
@@ -898,16 +1113,25 @@ var HUD = (function () {
     destroy: function () {
       clearTimeout(toastTimer);
       clearTimeout(badgeTimer);
+      clearTimeout(hitflashTimer);
+      clearTimeout(hotbarTooltipTimer);
+      unwireHotbarSelectionTooltip();
       if (chatOpen) closeChat(false);
       pauseCbs = {}; deathCbs = {};
       chatOpen = invOpen = pausedOpen = deathOpen = settingsOpen = false;
       debugVisible = false;
+      combatWired = false;
       if (box && box.parentNode) box.parentNode.removeChild(box);
       box = null;
       dom = {};
       game = null;
       root = null;
-    }
+    },
+
+    // Part III (§8): explicit entry points, in case Game prefers to drive
+    // these itself rather than relying on HUD's own Combat.onDamage auto-wire.
+    flashDamage: flashDamage,
+    setDeathCause: setDeathCause
   };
 
   return api;

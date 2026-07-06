@@ -45,10 +45,10 @@ const clipChat = 200
 
 // helloMsg is the shape of the first client frame.
 type helloMsg struct {
-	Token *string         `json:"token"`
-	Nick  *string         `json:"nick"`
-	RoomID string         `json:"roomId"`
-	Pin    string         `json:"pin"`
+	Token  *string         `json:"token"`
+	Nick   *string         `json:"nick"`
+	RoomID string          `json:"roomId"`
+	Pin    string          `json:"pin"`
 	Skin   json.RawMessage `json:"skin"`
 	Mode   string          `json:"mode"`
 }
@@ -213,6 +213,7 @@ func (inst *Instance) tryJoin(username string, guest bool, name, mode string, sk
 	p := &Player{
 		ID: id, Username: username, Name: name, Guest: guest,
 		Skin: sanitizeSkin(skin), Mode: mode, conn: conn,
+		HP: maxHP, // contract §5.2: default 20
 	}
 	p.Pos = inst.spawn
 
@@ -233,8 +234,8 @@ func (inst *Instance) tryJoin(username string, guest bool, name, mode string, sk
 	hostName := inst.hostName
 
 	welcome := wsFrame{
-		"t":     "welcome",
-		"youId": id,
+		"t":      "welcome",
+		"youId":  id,
 		"roomId": inst.RoomID,
 		"world": map[string]interface{}{
 			"id": inst.World.ID, "name": inst.World.Name, "seed": inst.World.Seed,
@@ -243,6 +244,9 @@ func (inst *Instance) tryJoin(username string, guest bool, name, mode string, sk
 		"deltas":  inst.deltasSnapshotB64Locked(),
 		"players": roster,
 		"host":    hostName,
+		"hp":      p.HP, "max": maxHP,
+		"difficulty":    inst.difficulty,
+		"keepInventory": inst.keepInventory,
 	}
 	inst.mu.Unlock()
 
@@ -274,9 +278,13 @@ func (inst *Instance) deltasSnapshotB64Locked() map[string]string {
 // building a join roster), so both go through their locked accessors.
 func playerView(p *Player) map[string]interface{} {
 	pos, yaw, pitch, _, _, _ := p.snapshot()
+	hp, dead := p.hpSnapshot()
+	heldID, heldKind := p.heldSnapshot()
 	return map[string]interface{}{
 		"id": p.ID, "name": p.Name, "guest": p.Guest, "skin": p.Skin, "mode": p.modeSnapshot(),
 		"p": pos, "yaw": yaw, "pitch": pitch,
+		"hp": hp, "dead": dead,
+		"held": map[string]interface{}{"id": heldID, "kind": heldKind},
 	}
 }
 
@@ -457,6 +465,20 @@ func readLoop(conn wsConn, inst *Instance, p *Player) {
 			handleMode(inst, p, raw)
 		case "time":
 			handleTime(inst, p, raw)
+		case "hit":
+			handleHit(inst, p, raw)
+		case "respawn":
+			handleRespawn(inst, p)
+		case "selfDamage":
+			handleSelfDamage(inst, p, raw)
+		case "pickup":
+			handlePickup(inst, p, raw)
+		case "drop":
+			handleDrop(inst, p, raw)
+		case "difficulty":
+			handleDifficulty(inst, p, raw)
+		case "gamerule":
+			handleGamerule(inst, p, raw)
 		case "ping":
 			_ = conn.WriteMessage(mustMarshal(wsFrame{"t": "pong"}))
 		default:
@@ -470,15 +492,38 @@ func readLoop(conn wsConn, inst *Instance, p *Player) {
 
 // ---- move -----------------------------------------------------------
 
+// heldMsg is the optional held-item field on 'move' (contract §9/§5.2:
+// "extend the move message shape with an optional 'held':{id,kind} field,
+// backward-compatible/optional"). A pointer field on moveMsg so its absence
+// (an older-shaped move message) is distinguishable from an explicit
+// empty-hand value and never touches HeldID/HeldKind when omitted.
+type heldMsg struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+}
+
+// armorMsg is the optional worn-armor field on 'move' (contract §5.2: "extend
+// hello or move to optionally carry an 'armor':{helmet,chest,legs,boots}
+// field the same optional/backward-compatible way"). Empty string per slot
+// means that slot is unequipped.
+type armorMsg struct {
+	Helmet string `json:"helmet"`
+	Chest  string `json:"chest"`
+	Legs   string `json:"legs"`
+	Boots  string `json:"boots"`
+}
+
 type moveMsg struct {
-	P    [3]float64 `json:"p"`
-	Yaw  float64    `json:"yaw"`
-	Pitch float64   `json:"pitch"`
-	Anim struct {
+	P     [3]float64 `json:"p"`
+	Yaw   float64    `json:"yaw"`
+	Pitch float64    `json:"pitch"`
+	Anim  struct {
 		Swing  float64 `json:"swing"`
 		Crouch bool    `json:"crouch"`
 		Fly    bool    `json:"fly"`
 	} `json:"anim"`
+	Held  *heldMsg  `json:"held"`
+	Armor *armorMsg `json:"armor"`
 }
 
 func handleMove(inst *Instance, p *Player, raw []byte) {
@@ -500,8 +545,57 @@ func handleMove(inst *Instance, p *Player, raw []byte) {
 	p.Swing = swing
 	p.Crouch = mv.Anim.Crouch
 	p.Fly = mv.Anim.Fly
+	if mv.Held != nil {
+		p.HeldID = mv.Held.ID
+		p.HeldKind = mv.Held.Kind
+	}
+	if mv.Armor != nil {
+		p.Armor = ArmorSet{Helmet: mv.Armor.Helmet, Chest: mv.Armor.Chest, Legs: mv.Armor.Legs, Boots: mv.Armor.Boots}
+	}
 	p.changed = true
 	p.mu.Unlock()
+}
+
+// armorPointsBySlotTier / armorItemPoints / totalArmorPoints derive the
+// armorPoints of a player's currently-worn armor set for the damage-
+// reduction formula (contract §5.2). Since this package does not import the
+// client-only js/vox/items.js registry (Go/JS boundary, no shared code per
+// the contract's cross-language posture elsewhere e.g. §14), it derives
+// armor points from the item id's tier suffix and slot-implied base value —
+// a small, explicit, server-side mirror of the Items registry's per-tier
+// armorPoints table (§4: "helmet 1-3, chest 3-6, legs 2-5, boots 1-3 by
+// tier"), keyed by the SAME item id strings the client sends, so a registry
+// change on the client only requires updating this table too (both sides
+// are documented as intentionally duplicated, matching the project's
+// existing Go/JS duplication precedent).
+var armorPointsBySlotTier = map[string]map[string]float64{
+	"helmet":     {"leather": 1, "iron": 2, "diamond": 3},
+	"chestplate": {"leather": 3, "iron": 5, "diamond": 6},
+	"leggings":   {"leather": 2, "iron": 4, "diamond": 5},
+	"boots":      {"leather": 1, "iron": 2, "diamond": 3},
+}
+
+func armorItemPoints(slot, itemID string) float64 {
+	if itemID == "" {
+		return 0
+	}
+	tiers, ok := armorPointsBySlotTier[slot]
+	if !ok {
+		return 0
+	}
+	// itemID is "<slot>_<tier>", e.g. "helmet_iron" (contract §4 naming).
+	for tier, pts := range tiers {
+		if strings.HasSuffix(itemID, "_"+tier) {
+			return pts
+		}
+	}
+	return 0
+}
+
+// totalArmorPoints sums all four slots of an ArmorSet.
+func totalArmorPoints(a ArmorSet) float64 {
+	return armorItemPoints("helmet", a.Helmet) + armorItemPoints("chestplate", a.Chest) +
+		armorItemPoints("leggings", a.Legs) + armorItemPoints("boots", a.Boots)
 }
 
 // ---- block ------------------------------------------------------------

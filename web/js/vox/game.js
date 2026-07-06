@@ -120,6 +120,8 @@ var Game = (function () {
 
   // ---- Part II (ARCHITECTURE-MP.md §4.5): multiplayer session state --------
   var isMultiplayer = false;
+  var difficulty = 'normal';     // §6: peaceful|easy|normal|hard
+  var keepInventory = false;     // §6: /gamerule keepInventory (vanilla default: false)
   var myNetId = null;             // welcome.youId — used to skip self-echoes
   var netHandlers = null;         // {type: fn} registered via Net.on, unwired on stop()
   var _moveState = {              // reused scratch object for Net.sendMove (no per-frame alloc)
@@ -467,7 +469,7 @@ var Game = (function () {
     sfx('hurt');
   }
 
-  function die() {
+  function die(cause) {
     if (dead) return;
     dead = true;
     player.health = 0;
@@ -476,8 +478,30 @@ var Game = (function () {
       if (Input.setUIMode) Input.setUIMode(true);
       if (Input.exitPointerLock) Input.exitPointerLock();
     }
-    HUD.showDeath(true, { onRespawn: function () { api.respawn(); } });
+    HUD.showDeath(true, { onRespawn: function () { api.respawn(); }, cause: cause });
     saveNow();
+  }
+
+  // Part III (§5.2/§8): formats a death cause and kills the local player.
+  // Two call sites feed this: (1) multiplayer, when a 'death' message for OUR
+  // OWN player id arrives from the server (authoritative, whether the killer
+  // was another player or a mob) even if local survivalTick hadn't
+  // independently noticed hp<=0 yet -- `by` is the attacker's display name or
+  // a mob-kind string per contract §5.1's death{id,by} shape; (2) solo/
+  // offline, from Mobs.localTick's onPlayerDamage callback the instant local
+  // health hits 0 (there is no server to report a death in solo mode) -- `by`
+  // there is simply the local mob's kind string. Both format into one of the
+  // three cause phrasings §8 asks for.
+  function handleLocalDeath(by) {
+    var cause;
+    if (by) {
+      var isMobName = ['zombie', 'pig'].indexOf(by) !== -1;
+      cause = isMobName
+        ? t('vox.death.byMob', 'Killed by a {mob}').replace('{mob}', t('vox.mob.' + by, by))
+        : t('vox.death.byPlayer', 'Slain by {name}').replace('{name}', by);
+    }
+    dead = false; // let die() run its normal (idempotent, single-fire) path
+    die(cause);
   }
 
   function survivalTick(dt) {
@@ -657,6 +681,53 @@ var Game = (function () {
     Input.on('flyToggle', function () {
       if (running && mode === 'creative' && !uiBlocked()) player.flying = !player.flying;
     });
+    Input.on('drop', function () {
+      if (running && !paused && !dead && !uiBlocked()) dropSelected();
+    });
+  }
+
+  // Part III (§10): drop ONE item from the selected hotbar slot. Solo: spawn
+  // it directly via Drops.spawn (no server to ask). Multiplayer: send the
+  // request and let the server's own 'dropSpawn' broadcast -- which reaches
+  // every connected client INCLUDING us, per the existing house pattern
+  // where an authoritative echo is how the sender itself sees its own action
+  // take effect (mirrors how a 'block' edit is echoed back to its own
+  // sender) -- actually create the visible drop; nothing is spawned
+  // optimistically client-side in MP.
+  function dropSelected() {
+    if (!inv || !inv.hotbar) return;
+    var stack = inv.hotbar[inv.selected];
+    if (!stack || !stack.id) return;
+    var one = { id: stack.id, count: 1, kind: stack.kind || 'block' };
+
+    if (isMultiplayer) {
+      if (typeof Net !== 'undefined' && Net.isConnected && Net.send) {
+        Net.send('drop', { stack: one });
+      } else {
+        return; // no connection: nothing to do, do not consume the item
+      }
+    }
+
+    // Consume from the hotbar in BOTH modes (in MP we don't wait for the
+    // server's echo to decrement -- dropping your own held item is not a
+    // contested resource the way a block edit or a pickup is, so there is
+    // nothing meaningful to roll back if the send somehow fails after this
+    // point; Net.send never throws synchronously per its own contract).
+    // Routed through setHotbarSlot (not a direct array write) so it fires
+    // inv's onChange the same way every other inventory mutation does --
+    // the HUD hotbar redraw depends on that signal.
+    if (stack.count > 1) {
+      inv.setHotbarSlot(inv.selected, stack.id, stack.count - 1, stack.kind);
+    } else {
+      inv.setHotbarSlot(inv.selected, 0, 0);
+    }
+
+    if (!isMultiplayer && typeof Drops !== 'undefined' && Drops.spawn) {
+      readVec(player.body.pos, _p);
+      var fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw);
+      Drops.spawn([_p[0] + fx * 0.6, _p[1] + eyeHeight() * 0.6, _p[2] + fz * 0.6], one);
+    }
+    sfx('drop');
   }
 
   function onCanvasClick() {
@@ -725,6 +796,142 @@ var Game = (function () {
     return clamp((env.ambient || 0.5) + 0.45, 0.25, 1);
   }
 
+  // ---- combat: entity-first raycast on press (§5.4) ------------------------
+  //
+  // Entities beat blocks under the crosshair (contract §5.4). This has to be
+  // decided at the MOMENT of breakStart, not on release: Interact starts
+  // acting on breakStart the instant it sees it (accruing break-progress that
+  // same frame), so waiting for breakStop to decide "was this actually an
+  // attack" would mean retroactively un-mining a block that was already
+  // partway broken -- not possible. So: on every breakStart/tapBreakStart,
+  // probe for an entity first; if one is under the crosshair, treat this
+  // press as an attack (send/apply the hit right away) and strip that one
+  // action so Interact never sees it and never starts a break-progress timer
+  // for this press. Holding down on a mob keeps re-probing on each NEW
+  // breakStart (there is only ever one per physical press), so repeated
+  // clicks land repeated attacks exactly like Minecraft's own click-to-hit
+  // feel -- rate limiting is Combat's own 120ms client debounce plus the
+  // server's 350ms cooldown, not anything gated here. A press that finds no
+  // entity falls through untouched, zero change to existing block breaking.
+  function processCombatActions(actions) {
+    if (typeof Combat === 'undefined') return actions;
+    var out = actions;
+    for (var i = 0; i < actions.length; i++) {
+      var a = actions[i];
+      if (a.type !== 'breakStart' && a.type !== 'tapBreakStart') continue;
+      var hit = Combat.probe(eyeCam);
+      if (!hit) continue;
+      attackEntity(hit);
+      out = out.filter(function (x) { return x !== a; });
+    }
+    return out;
+  }
+
+  // Resolves a Combat.probe() hit into an actual attack: sends the network
+  // hit in multiplayer (server is authoritative -- no local damage applied,
+  // matching Combat's own "never apply damage locally" design, see combat.js
+  // header); in solo/offline there IS no server, so a mob hit is resolved
+  // immediately against the local mob simulation via Mobs.localHit (the one
+  // bridge Combat intentionally leaves for a caller to build, since it has no
+  // way to know solo mode exists). A solo hit on a real player id can't occur
+  // (Combat.setEntitySource never contributes RemotePlayers in solo mode).
+  function attackEntity(hit) {
+    if (isMultiplayer) {
+      Combat.attemptHit(eyeCam, world);
+      return;
+    }
+    if (hit.kind === 'mob' && typeof Mobs !== 'undefined' && Mobs.localHit) {
+      var mobLocalId = String(hit.id).indexOf('mob:') === 0 ? hit.id.slice(4) : hit.id;
+      var dmg = localAttackDamage();
+      Mobs.localHit(mobLocalId, dmg);
+      sfx('hit');
+    }
+  }
+
+  // Damage dealt by the locally-selected weapon (solo PvE only -- multiplayer
+  // damage is always server-computed, see attackEntity above). Fist = 1,
+  // matching Items' own fist-less convention (Items has no "fist" entry; an
+  // empty/non-sword selection just uses the bare-hands default here).
+  function localAttackDamage() {
+    if (!inv || !inv.hotbar) return 1;
+    var stack = inv.hotbar[inv.selected];
+    if (!stack || stack.kind !== 'item' || typeof Items === 'undefined') return 1;
+    var def = Items.def(stack.id);
+    return (def && typeof def.damage === 'number') ? def.damage : 1;
+  }
+
+  // Wires Combat once per session (idempotent-safe: Combat.init/setEntitySource
+  // just overwrite module state, no leak from calling this twice across a
+  // stop()->start() cycle). net: the real Net global in multiplayer, null
+  // solo/offline -- Combat.init stores this SAME reference for both sending
+  // ('hit' via netRef.send) and its own auto-wire of 6 incoming event types
+  // (netRef.on('health'/'damage'/'death'/'mobSpawn'/'mobState'/'mobDespawn'),
+  // there is no way to opt into one without the other, so wireNetHandlers()
+  // below deliberately does NOT also register those 6 types -- Combat owns
+  // that half of the incoming dispatch table entirely once init() has run
+  // with a real net. localPlayerId: welcome.youId in MP, null solo (nothing
+  // needs to self-filter when there ARE no remote players to filter out).
+  function setupCombatSystems(net, localPlayerId) {
+    if (typeof Combat === 'undefined') return;
+    Combat.init({ net: net, hud: HUD, localPlayerId: localPlayerId });
+    Combat.setEntitySource(function () {
+      var list = [];
+      if (isMultiplayer && typeof RemotePlayers !== 'undefined' && RemotePlayers.list) {
+        list = list.concat(RemotePlayers.list());
+      }
+      if (typeof Mobs !== 'undefined' && Mobs.list) {
+        // Mobs.list() reports kind as 'zombie'/'pig' (the mob's actual
+        // species); Combat's entity-source shape wants the literal 'mob' so
+        // it knows to id-prefix with 'mob:' (contract §5.1) rather than
+        // treating the entry as a player. Remap here, at the one seam that
+        // joins the two modules, rather than either module assuming the
+        // other's convention.
+        var mobs = Mobs.list();
+        for (var i = 0; i < mobs.length; i++) {
+          list.push({ id: mobs[i].id, pos: mobs[i].pos, kind: 'mob' });
+        }
+      }
+      return list;
+    });
+  }
+
+  // Part III (§10, MP branch): drops we've asked the server to let us pick
+  // up, keyed by dropId -> the stack we'll grant ourselves once confirmed.
+  // Cleared/repopulated is unnecessary -- an entry is removed the instant its
+  // 'dropDespawn' arrives (see wireNetHandlers), and a drop that despawns for
+  // an unrelated reason (another player grabbed it, or it timed out) just
+  // leaves a harmless orphaned entry that is never looked up again.
+  var pendingPickups = {};
+  var PICKUP_REQUEST_RADIUS = 1.2;   // matches drops.js's own PICKUP_RADIUS / the Go server's pickupRadius
+  var PICKUP_REQUEST_COOLDOWN_MS = 500; // don't spam pickup{} every frame while standing on an unconfirmed drop
+  var _lastPickupRequestAt = Object.create(null);
+
+  function requestNearbyPickups(playerPosArr) {
+    var list = Drops.list();
+    var now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i];
+      if (!d || !d.pos || pendingPickups[d.id]) continue;
+      var dx = d.pos[0] - playerPosArr[0], dy = d.pos[1] - playerPosArr[1], dz = d.pos[2] - playerPosArr[2];
+      if ((dx * dx + dy * dy + dz * dz) > PICKUP_REQUEST_RADIUS * PICKUP_REQUEST_RADIUS) continue;
+      var last = _lastPickupRequestAt[d.id] || -1e9;
+      if (now - last < PICKUP_REQUEST_COOLDOWN_MS) continue;
+      _lastPickupRequestAt[d.id] = now;
+      pendingPickups[d.id] = d.stack;
+      Net.send('pickup', { dropId: d.id });
+    }
+  }
+
+  // Cheap per-point sky exposure for Mobs.localTick's spawn gate (§7: hostile
+  // mobs need a dark/night spot, not broad daylight). Mesher computes a
+  // proper per-vertex version of this internally but keeps it private to its
+  // own chunk-meshing pass; this is the same "is the column open above y"
+  // idea, just queried for one point via World's already-public heightAt().
+  function skyExposureAt(x, y, z) {
+    if (!world || !world.heightAt) return 1;
+    return (world.heightAt(x, z) <= y) ? 1 : 0.55;
+  }
+
   // Trigger the first-person arm swing from interaction activity.
   function updateArmSwing(dt, actions) {
     var breaking = !!(interactSys && interactSys.target && interactSys.target.progress > 0);
@@ -740,8 +947,21 @@ var Game = (function () {
     armSwingT += dt;
   }
 
+  // Part III (ARCHITECTURE-COMBAT.md §9): the currently-selected hotbar
+  // stack's {id, kind} for held-item rendering, empty-hand-safe. Guards for
+  // an inventory.js snapshot that predates §4's 'kind' field by defaulting
+  // to 'block' -- matching that module's own stated backward-compat default
+  // for numeric ids (every Part I/II stack id is numeric today).
+  function selectedHeld() {
+    if (!inv || !inv.hotbar) return { heldId: null, heldKind: null };
+    var stack = inv.hotbar[inv.selected];
+    if (!stack || stack.id == null || stack.id === 0) return { heldId: null, heldKind: null };
+    return { heldId: stack.id, heldKind: stack.kind || 'block' };
+  }
+
   function drawOwnPlayer(env) {
     readVec(player.body.pos, _p);
+    var held = selectedHeld();
     PlayerModel.draw(gl, {
       skinTex: skinTex,
       model: skinModel,
@@ -755,23 +975,33 @@ var Game = (function () {
       crouch: !player.flying && typeof Input !== 'undefined' && Input.state && !!Input.state.sneak,
       light: playerLight(env),
       fog: { color: env.fogColor, start: env.fogStart, end: env.fogEnd },
-      camPos: renderCam.pos
+      camPos: renderCam.pos,
+      heldId: held.heldId,
+      heldKind: held.heldKind,
+      armor: (inv && inv.armor) ? inv.armor : null
     });
   }
 
   function drawArm(env) {
     var swing01 = armSwingT < 0.3 ? armSwingT / 0.3 : 0;
+    if (typeof Combat !== 'undefined' && Combat.swingPhase) {
+      var attackSwing = Combat.swingPhase();
+      if (attackSwing > swing01) swing01 = attackSwing;
+    }
     readVec(player.body.vel, _v);
     var hs = Math.sqrt(_v[0] * _v[0] + _v[2] * _v[2]);
     var bob = Math.sin(bobPhase * Math.PI * 2) * Math.min(1, hs / 4.3) *
               (player.body.onGround ? 1 : 0);
+    var held = selectedHeld();
     PlayerModel.drawFirstPersonArm(gl, {
       skinTex: skinTex,
       model: skinModel,
       proj: renderCam.proj,
       swing01: swing01,
       bob: bob,
-      light: playerLight(env)
+      light: playerLight(env),
+      heldId: held.heldId,
+      heldKind: held.heldKind
     });
   }
 
@@ -838,6 +1068,7 @@ var Game = (function () {
 
     // -- interaction --
     var actions = Input.consumeActions();
+    if (active) actions = processCombatActions(actions);
     if (active && interactSys) {
       interactSys.update(dt, actions, eyeCam);
       updateArmSwing(dt, actions);
@@ -865,6 +1096,52 @@ var Game = (function () {
       if (typeof RemotePlayers !== 'undefined' && RemotePlayers.update) RemotePlayers.update(dt);
     }
 
+    // -- Part III (§7/§10): mobs + dropped items --------------------------------
+    // Mobs.draw()/Drops.draw() fold BOTH rosters (server-synced + local-sim)
+    // into one draw call each and are safe to call unconditionally every
+    // frame (see their own draw() implementations) -- only the TICKING side
+    // needs to branch on mode: MP mobs are server-authoritative (interpolate
+    // toward the last mobState batch, never simulated client-side); solo/
+    // offline mobs run their own lightweight AI locally since there is no
+    // server to ask.
+    //
+    // Drops are subtler: the Go server (internal/rooms/drops.go) fixes a
+    // drop's position once at spawn and never moves it again -- bob/spin/
+    // gravity settling is explicitly a client-rendering-only concern there,
+    // so Drops.update()'s local physics sim is safe to run in BOTH modes
+    // (nothing server-side ever contests position). The one thing that DOES
+    // need a mode split is GRANTING an item: Drops.checkPickup() applies
+    // inventory.add() immediately and unconditionally, which is correct
+    // solo (no server to ask) but would let a client hand itself items with
+    // zero server validation in MP. So in MP we do our own proximity check
+    // via Drops.list() and send pickup{dropId} instead of calling
+    // checkPickup() at all; the actual inventory.add() only happens once the
+    // server confirms via a 'dropDespawn' echo for a drop we ourselves
+    // requested (see wireNetHandlers' dropDespawn entry and pendingPickups).
+    if (active) {
+      readVec(player.body.pos, _p);
+      if (typeof Drops !== 'undefined' && Drops.update) Drops.update(dt, world);
+      if (isMultiplayer) {
+        if (typeof Mobs !== 'undefined' && Mobs.update) Mobs.update(dt);
+        if (typeof Drops !== 'undefined' && Drops.list && typeof Net !== 'undefined' && Net.isConnected) {
+          requestNearbyPickups(_p);
+        }
+      } else {
+        if (typeof Mobs !== 'undefined' && Mobs.localTick) {
+          Mobs.localTick(dt, world, null, _p, {
+            skyExposure: skyExposureAt,
+            timeTicks: timeTicks,
+            difficulty: difficulty,
+            onPlayerDamage: function (amount, mobKind) {
+              damage(amount * 2); // damage() takes half-hearts; mob dmg is whole hearts
+              if (player.health <= 0) handleLocalDeath(mobKind);
+            }
+          });
+        }
+        if (typeof Drops !== 'undefined' && Drops.checkPickup && inv) Drops.checkPickup(_p, inv);
+      }
+    }
+
     // -- render (pass order pinned in §5.15/§5.16) --
     var env = Renderer.computeEnv(timeTicks, renderDist);
     var under = eyeUnderwater();
@@ -877,6 +1154,13 @@ var Game = (function () {
     if (isMultiplayer && typeof RemotePlayers !== 'undefined' && RemotePlayers.draw) {
       RemotePlayers.draw(gl, renderCam, env);
     }
+    // Part III (§7/§10): unconditional, unlike RemotePlayers -- both Mobs and
+    // Drops fold their local-sim/local-drop roster into the SAME draw() call
+    // as their server-synced one, so this renders correctly in solo AND
+    // multiplayer without a mode check here (the mode branch that matters is
+    // in the TICKING code above, not drawing).
+    if (typeof Mobs !== 'undefined' && Mobs.draw) Mobs.draw(gl, renderCam, env);
+    if (typeof Drops !== 'undefined' && Drops.draw) Drops.draw(gl, renderCam, env);
     Renderer.drawChunks(renderCam, env, 'translucent');
     Renderer.drawClouds(env, renderCam, nowMs);
     if (player.perspective === 0 && skinTex && active && !uiBlocked()) drawArm(env);
@@ -914,7 +1198,17 @@ var Game = (function () {
     var atlas = Blocks.buildAtlas(glCtx);
     var lutTex = LUT.texture(glCtx);
     Renderer.init(glCtx, { atlas: atlas, lutTex: lutTex });
-    PlayerModel.init(glCtx);
+    // Part III (ARCHITECTURE-COMBAT.md §9): PlayerModel reuses this SAME
+    // atlas texture (no new upload) to texture held-block meshes -- pass it
+    // through as an additive, optional init() field.
+    PlayerModel.init(glCtx, { atlasTex: atlas.tex });
+    // Part III (§7/§10): Mobs/Drops render in BOTH solo and multiplayer (each
+    // module folds its local-sim/local-drop roster into the same draw() path
+    // as its server-synced one), so -- unlike RemotePlayers, which is MP-only
+    // and initialized inside startMultiplayer() -- these belong in the shared
+    // one-time GPU bootstrap so solo play gets them too.
+    if (typeof Mobs !== 'undefined' && Mobs.init) Mobs.init(glCtx);
+    if (typeof Drops !== 'undefined' && Drops.init) Drops.init(glCtx);
     return atlas;
   }
 
@@ -1019,6 +1313,7 @@ var Game = (function () {
       HUD.init({ root: hudRoot, game: api, atlas: atlas });
       interactSys = Interact.create({ world: world, player: player, inventory: inv, hud: HUD, game: api });
       Commands.init({ game: api, hud: HUD });
+      setupCombatSystems(null, null); // solo/offline: no server, Combat never sends a network hit
 
       // pointer lock on canvas click (idempotent re-hook; skipped when ?dev=1
       // inside resumePointerLock itself)
@@ -1115,8 +1410,66 @@ var Game = (function () {
         if (typeof Menu !== 'undefined' && Menu.toast) {
           Menu.toast((msg && msg.reason) || t('mp.err.disconnected', 'Disconnected from the server'), 'warn');
         }
+      },
+      // health/damage/death/mobSpawn/mobState/mobDespawn are NOT listed here:
+      // Combat.init() (see setupCombatSystems) auto-registers its own
+      // Net.on(...) for the first three, and adding them a second time here
+      // would double-fire every health/damage/death event. mobSpawn/mobState/
+      // mobDespawn route through Combat's own onMobSpawn/onMobState/
+      // onMobDespawn pub-sub below instead of a second raw Net.on, for the
+      // same one-dispatch-path-per-message-type reason.
+      difficulty: function (msg) {
+        if (msg && typeof msg.value === 'string') applyDifficultyLocal(msg.value);
+      },
+      gamerule: function (msg) {
+        if (msg && msg.rule === 'keepInventory') applyKeepInventoryLocal(!!msg.value);
+      },
+      dropSpawn: function (msg) {
+        if (msg && msg.id != null && typeof Drops !== 'undefined' && Drops.serverSpawn) {
+          Drops.serverSpawn(msg);
+        }
+      },
+      dropDespawn: function (msg) {
+        if (!msg || msg.id == null) return;
+        // If WE requested this pickup (see requestNearbyPickups), the server
+        // confirming its despawn IS the authorization to actually grant the
+        // item -- this is the second half of the two-phase pickup flow (§10/
+        // §11's server-authoritative trust posture: the server validates
+        // proximity, we trust ourselves for inventory space, matching
+        // internal/rooms/drops.go's own documented design). A despawn for a
+        // drop we never asked for (another player grabbed it, or it timed
+        // out) just removes it visually, same as always.
+        var stack = pendingPickups[msg.id];
+        if (stack && inv && inv.add) {
+          inv.add(stack.id, stack.count);
+          delete pendingPickups[msg.id];
+          sfx('pickup');
+        }
+        if (typeof Drops !== 'undefined' && Drops.serverDespawn) Drops.serverDespawn(msg.id);
       }
     };
+    if (typeof Combat !== 'undefined') {
+      // Wire mob lifecycle through Combat's already-established pub-sub
+      // (Combat.handleMobSpawn/etc. were already invoked once by Combat's
+      // OWN auto-wire per setupCombatSystems' comment above; onMobSpawn here
+      // is a SEPARATE listener list Combat exposes precisely so callers can
+      // still react to the same events without re-subscribing to Net
+      // directly -- see combat.js's onMobSpawn/onMobState/onMobDespawn).
+      if (Combat.onMobSpawn) Combat.onMobSpawn(function (msg) {
+        if (msg && typeof Mobs !== 'undefined' && Mobs.spawn) Mobs.spawn(msg);
+      });
+      if (Combat.onMobState) Combat.onMobState(function (msg) {
+        // Wire payload is {m:[[id,x,y,z,yaw,hp,anim],...]}; Mobs.applyState
+        // wants the raw array, not the wrapper object.
+        if (msg && msg.m && typeof Mobs !== 'undefined' && Mobs.applyState) Mobs.applyState(msg.m);
+      });
+      if (Combat.onMobDespawn) Combat.onMobDespawn(function (msg) {
+        if (msg && msg.id != null && typeof Mobs !== 'undefined' && Mobs.despawn) Mobs.despawn(msg.id);
+      });
+      if (Combat.onDeath) Combat.onDeath(function (msg) {
+        if (msg && msg.id === myNetId) handleLocalDeath(msg.by);
+      });
+    }
     for (var type in netHandlers) {
       if (Object.prototype.hasOwnProperty.call(netHandlers, type)) Net.on(type, netHandlers[type]);
     }
@@ -1213,6 +1566,10 @@ var Game = (function () {
       HUD.init({ root: hudRoot, game: api, atlas: atlas });
       interactSys = Interact.create({ world: world, player: player, inventory: inv, hud: HUD, game: api });
       Commands.init({ game: api, hud: HUD });
+      // isMultiplayer/myNetId aren't assigned until just below this block, so
+      // welcome.youId (already resolved, right here in scope) is passed
+      // explicitly rather than read back off module state.
+      setupCombatSystems((typeof Net !== 'undefined') ? Net : null, welcome.youId);
 
       canvas.removeEventListener('click', onCanvasClick);
       canvas.addEventListener('click', onCanvasClick);
@@ -1356,6 +1713,22 @@ var Game = (function () {
     timeTicks = ((tv % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;
   }
 
+  // Local-only mutation for /difficulty and /gamerule keepInventory (§6),
+  // mirroring applyTimeLocal's split: this is what the incoming Net
+  // 'difficulty'/'gamerule' handlers call to apply the host's authoritative
+  // value; api.setDifficulty/setKeepInventory (below) are the command-facing
+  // entry points that forward instead of mutating when in MP.
+  function applyDifficultyLocal(d) {
+    difficulty = d;
+    // Mobs.localTick (solo/offline mode) reads the current `difficulty` value
+    // via its own opts.difficulty argument every tick and clears hostiles
+    // itself the instant it sees "peaceful" (contract §7) -- no separate
+    // despawn call is needed here, see stepMobsLocal()/wireNetHandlers below.
+  }
+  function applyKeepInventoryLocal(kv) {
+    keepInventory = !!kv;
+  }
+
   // ---- public API --------------------------------------------------------------------------------
 
   var api = {
@@ -1398,6 +1771,11 @@ var Game = (function () {
       api.teleport(player.spawn[0], player.spawn[1], player.spawn[2]);
       if (typeof Input !== 'undefined' && Input.setUIMode) Input.setUIMode(false);
       resumePointerLock();
+      // §5.1: tell the server we're back so its authoritative hp resets too
+      // (it broadcast our 'death' and is otherwise still holding us at 0 hp).
+      if (isMultiplayer && typeof Net !== 'undefined' && Net.isConnected && Net.send) {
+        Net.send('respawn', {});
+      }
     },
 
     setSpawn: function (x, y, z) {

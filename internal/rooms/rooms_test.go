@@ -3,6 +3,7 @@ package rooms
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -87,6 +88,17 @@ func (f *fakeWorldStore) UpdateSettings(id string, settings json.RawMessage) err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.settings[id] = settings
+	// Also propagate into the stored World's own Settings field, mirroring
+	// the real worlds.Store (an UPDATE statement on the same row Get later
+	// reads back) — without this, a Get() immediately after UpdateSettings
+	// would see stale settings, which no real store would ever exhibit and
+	// which would make a re-Open-after-Close round-trip test (see
+	// TestDifficultyAndKeepInventoryPersistRoundTrip) fail for a reason
+	// that has nothing to do with the code under test.
+	if w, ok := f.worlds[id]; ok {
+		w.Settings = settings
+		f.worlds[id] = w
+	}
 	return nil
 }
 
@@ -101,7 +113,9 @@ type fakeFriendChecker struct {
 	pairs map[[2]string]bool
 }
 
-func newFakeFriendChecker() *fakeFriendChecker { return &fakeFriendChecker{pairs: map[[2]string]bool{}} }
+func newFakeFriendChecker() *fakeFriendChecker {
+	return &fakeFriendChecker{pairs: map[[2]string]bool{}}
+}
 
 func (f *fakeFriendChecker) addFriends(a, b string) {
 	f.pairs[[2]string{a, b}] = true
@@ -1029,5 +1043,890 @@ func TestVerifyTokenInjection(t *testing.T) {
 	user, guest, name, ok = resolveIdentity(m, inst, helloMsg{Nick: &nick})
 	if !ok || !guest || user != "" || name != "~steve" {
 		t.Fatalf("nick-only hello should resolve to a guest, got user=%q guest=%v name=%q ok=%v", user, guest, name, ok)
+	}
+}
+
+// ===========================================================================
+// Part III: combat, mobs, drops, difficulty/keepInventory (ARCHITECTURE-
+// COMBAT.md §5.2/§6/§7/§10).
+// ===========================================================================
+
+// joinTestPlayer is a small helper wrapping tryJoin for the combat tests
+// below, which mostly don't care about mode/skin/guest nuances (already
+// thoroughly covered by the Part II tests above) and just need a connected
+// *Player with a known starting position.
+func joinTestPlayer(t *testing.T, inst *Instance, id string) (*Player, *fakeConn) {
+	t.Helper()
+	conn := newFakeConn()
+	p, _, ok := inst.tryJoin(id, false, id, "survival", nil, conn)
+	if !ok {
+		t.Fatalf("join failed for %q", id)
+	}
+	return p, conn
+}
+
+// ---- hit validation (§5.2) -----------------------------------------------
+
+func TestHitInRangeSucceeds(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	target, targetConn := joinTestPlayer(t, inst, "target")
+
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.mu.Unlock()
+	target.mu.Lock()
+	target.Pos = [3]float64{2, 64, 0} // 2 blocks away: within the 4.5 range
+	target.mu.Unlock()
+
+	raw, _ := json.Marshal(hitMsg{TargetID: target.ID})
+	handleHit(inst, attacker, raw)
+
+	hp, dead := target.hpSnapshot()
+	if hp != maxHP-fistDamage {
+		t.Fatalf("in-range fist hit should deal %v damage, target hp = %v (want %v)", fistDamage, hp, maxHP-fistDamage)
+	}
+	if dead {
+		t.Fatal("a single fist hit should not kill a full-hp target")
+	}
+	dmgFrames := targetConn.framesOfType("damage")
+	if len(dmgFrames) != 1 {
+		t.Fatalf("expected exactly 1 'damage' frame broadcast to the target, got %d", len(dmgFrames))
+	}
+	if dmgFrames[0]["by"] != attacker.ID || dmgFrames[0]["cause"] != "player" {
+		t.Fatalf("damage frame = %+v, want by=%q cause=player", dmgFrames[0], attacker.ID)
+	}
+}
+
+func TestHitOutOfRangeRejected(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	target, _ := joinTestPlayer(t, inst, "target")
+
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.mu.Unlock()
+	target.mu.Lock()
+	target.Pos = [3]float64{100, 64, 0} // far beyond the 4.5-block range
+	target.mu.Unlock()
+
+	raw, _ := json.Marshal(hitMsg{TargetID: target.ID})
+	handleHit(inst, attacker, raw)
+
+	hp, _ := target.hpSnapshot()
+	if hp != maxHP {
+		t.Fatalf("out-of-range hit should deal no damage, target hp = %v (want %v)", hp, maxHP)
+	}
+}
+
+func TestHitCooldownEnforced(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	target, _ := joinTestPlayer(t, inst, "target")
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.mu.Unlock()
+	target.mu.Lock()
+	target.Pos = [3]float64{1, 64, 0}
+	target.mu.Unlock()
+
+	raw, _ := json.Marshal(hitMsg{TargetID: target.ID})
+	handleHit(inst, attacker, raw) // 1st hit: allowed
+	handleHit(inst, attacker, raw) // 2nd hit, same instant: cooldown should reject
+
+	hp, _ := target.hpSnapshot()
+	if hp != maxHP-fistDamage {
+		t.Fatalf("second hit within the 350ms cooldown should be rejected, target hp = %v (want %v after exactly 1 landed hit)", hp, maxHP-fistDamage)
+	}
+
+	// After the cooldown elapses, a further hit should land.
+	time.Sleep(hitCooldown + 20*time.Millisecond)
+	handleHit(inst, attacker, raw)
+	hp, _ = target.hpSnapshot()
+	if hp != maxHP-2*fistDamage {
+		t.Fatalf("a hit after the cooldown elapses should land, target hp = %v (want %v)", hp, maxHP-2*fistDamage)
+	}
+}
+
+func TestHitSelfRejected(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	raw, _ := json.Marshal(hitMsg{TargetID: attacker.ID})
+	handleHit(inst, attacker, raw)
+
+	hp, _ := attacker.hpSnapshot()
+	if hp != maxHP {
+		t.Fatalf("hitting yourself should never deal damage, hp = %v (want %v)", hp, maxHP)
+	}
+}
+
+// ---- damage/armor-reduction math (§5.2) -----------------------------------
+
+func TestApplyArmorReductionFormula(t *testing.T) {
+	cases := []struct {
+		dmg, armorPoints, want float64
+	}{
+		{10, 0, 10},      // no armor: full damage
+		{10, 5, 8},       // 1 - 5*0.04 = 0.8
+		{10, 20, 2},      // 1 - 20*0.04 = 0.2 -> exactly the floor
+		{10, 100, 2},     // way over the floor: clamped to the 0.2 minimum multiplier
+		{4, 15, 4 * 0.4}, // sword_wood damage vs 15 armor points: 1-15*0.04=0.4
+	}
+	for _, c := range cases {
+		got := applyArmorReduction(c.dmg, c.armorPoints)
+		if math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("applyArmorReduction(%v,%v) = %v, want %v", c.dmg, c.armorPoints, got, c.want)
+		}
+	}
+}
+
+func TestHitWithArmorReducesDamage(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	target, _ := joinTestPlayer(t, inst, "target")
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.HeldID = "sword_iron" // damage 6, per contract §4
+	attacker.mu.Unlock()
+	target.mu.Lock()
+	target.Pos = [3]float64{1, 64, 0}
+	// Full iron armor set: helmet 2 + chest 5 + legs 4 + boots 2 = 13 points.
+	target.Armor = ArmorSet{Helmet: "helmet_iron", Chest: "chestplate_iron", Legs: "leggings_iron", Boots: "boots_iron"}
+	target.mu.Unlock()
+
+	raw, _ := json.Marshal(hitMsg{TargetID: target.ID})
+	handleHit(inst, attacker, raw)
+
+	wantDmg := applyArmorReduction(6, 13)
+	hp, _ := target.hpSnapshot()
+	if math.Abs(hp-(maxHP-wantDmg)) > 1e-9 {
+		t.Fatalf("armored hit: target hp = %v, want %v (dmg=%v)", hp, maxHP-wantDmg, wantDmg)
+	}
+
+	// Sanity: the SAME attack against a bare target should deal full,
+	// unreduced iron-sword damage (6), proving the armor really is the
+	// thing doing the reducing above, not some other unrelated factor.
+	bareTarget, _ := joinTestPlayer(t, inst, "baretarget")
+	bareTarget.mu.Lock()
+	bareTarget.Pos = [3]float64{0, 64, 1}
+	bareTarget.mu.Unlock()
+	time.Sleep(hitCooldown + 20*time.Millisecond) // clear the attacker's own cooldown from the first swing
+	raw2, _ := json.Marshal(hitMsg{TargetID: bareTarget.ID})
+	handleHit(inst, attacker, raw2)
+	bareHP, _ := bareTarget.hpSnapshot()
+	if bareHP != maxHP-6 {
+		t.Fatalf("unarmored target hit by an iron sword should take exactly 6 damage, hp = %v (want %v)", bareHP, maxHP-6)
+	}
+}
+
+func TestTotalArmorPointsSumsAllSlots(t *testing.T) {
+	set := ArmorSet{Helmet: "helmet_diamond", Chest: "chestplate_diamond", Legs: "leggings_diamond", Boots: "boots_diamond"}
+	got := totalArmorPoints(set)
+	want := 3.0 + 6.0 + 5.0 + 3.0 // contract §4: helmet 1-3, chest 3-6, legs 2-5, boots 1-3 by tier; diamond is the top of each range
+	if got != want {
+		t.Fatalf("totalArmorPoints(full diamond) = %v, want %v", got, want)
+	}
+	if got := totalArmorPoints(ArmorSet{}); got != 0 {
+		t.Fatalf("totalArmorPoints(empty) = %v, want 0", got)
+	}
+}
+
+// ---- death + respawn (§5.1/§5.2) ------------------------------------------
+
+func TestDeathBroadcastsOnZeroHP(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, _ := joinTestPlayer(t, inst, "attacker")
+	target, targetConn := joinTestPlayer(t, inst, "target")
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.HeldID = "sword_diamond" // damage 8: 3 hits kill a full-hp unarmored target (20 hp)
+	attacker.mu.Unlock()
+	target.mu.Lock()
+	target.Pos = [3]float64{1, 64, 0}
+	target.mu.Unlock()
+
+	raw, _ := json.Marshal(hitMsg{TargetID: target.ID})
+	for i := 0; i < 3; i++ {
+		handleHit(inst, attacker, raw)
+		if i < 2 {
+			time.Sleep(hitCooldown + 20*time.Millisecond)
+		}
+	}
+
+	hp, dead := target.hpSnapshot()
+	if hp != 0 {
+		t.Fatalf("hp should clamp at exactly 0, got %v", hp)
+	}
+	if !dead {
+		t.Fatal("target should be marked Dead once hp reaches 0")
+	}
+	deathFrames := targetConn.framesOfType("death")
+	if len(deathFrames) != 1 {
+		t.Fatalf("expected exactly 1 'death' frame, got %d", len(deathFrames))
+	}
+	if deathFrames[0]["id"] != target.ID || deathFrames[0]["by"] != attacker.ID {
+		t.Fatalf("death frame = %+v, want id=%q by=%q", deathFrames[0], target.ID, attacker.ID)
+	}
+
+	// A dead target takes no further damage (already-dead hits are filtered
+	// before reaching the damage/armor math at all).
+	time.Sleep(hitCooldown + 20*time.Millisecond)
+	handleHit(inst, attacker, raw)
+	hp2, _ := target.hpSnapshot()
+	if hp2 != 0 {
+		t.Fatalf("hitting an already-dead player should be a no-op, hp = %v", hp2)
+	}
+}
+
+func TestRespawnResetsHPAndPosition(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	w.Settings = json.RawMessage(`{"cap":8,"spawn":[5,70,5]}`)
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, conn := joinTestPlayer(t, inst, "p1")
+	p.mu.Lock()
+	p.HP = 0
+	p.Dead = true
+	p.Pos = [3]float64{999, 12, 999}
+	p.mu.Unlock()
+
+	handleRespawn(inst, p)
+
+	hp, dead := p.hpSnapshot()
+	if hp != maxHP {
+		t.Fatalf("respawn should reset hp to %v, got %v", maxHP, hp)
+	}
+	if dead {
+		t.Fatal("respawn should clear the Dead flag")
+	}
+	p.mu.Lock()
+	pos := p.Pos
+	p.mu.Unlock()
+	if pos != ([3]float64{5, 70, 5}) {
+		t.Fatalf("respawn should reposition to world spawn, got %v want [5 70 5]", pos)
+	}
+	healthFrames := conn.framesOfType("health")
+	if len(healthFrames) == 0 {
+		t.Fatal("respawn should broadcast a 'health' frame")
+	}
+	last := healthFrames[len(healthFrames)-1]
+	if last["hp"] != maxHP {
+		t.Fatalf("final health frame hp = %v, want %v", last["hp"], maxHP)
+	}
+}
+
+// ---- selfDamage (§8) -------------------------------------------------------
+
+func TestSelfDamageAppliesAndCanKill(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, conn := joinTestPlayer(t, inst, "p1")
+	raw, _ := json.Marshal(selfDamageMsg{Amount: 7, Cause: "fall"})
+	handleSelfDamage(inst, p, raw)
+
+	hp, _ := p.hpSnapshot()
+	if hp != maxHP-7 {
+		t.Fatalf("selfDamage should apply the claimed amount, hp = %v (want %v)", hp, maxHP-7)
+	}
+	dmgFrames := conn.framesOfType("damage")
+	if len(dmgFrames) != 1 || dmgFrames[0]["cause"] != "fall" {
+		t.Fatalf("expected a 'damage' frame with cause=fall, got %+v", dmgFrames)
+	}
+
+	// An invalid cause is rejected outright.
+	rawBad, _ := json.Marshal(selfDamageMsg{Amount: 5, Cause: "player"})
+	handleSelfDamage(inst, p, rawBad)
+	hp2, _ := p.hpSnapshot()
+	if hp2 != maxHP-7 {
+		t.Fatalf("a selfDamage cause of 'player' must never be accepted (that path is hit-only), hp changed to %v", hp2)
+	}
+
+	// Can kill: enough fall damage to reach 0.
+	rawKill, _ := json.Marshal(selfDamageMsg{Amount: maxHP, Cause: "void"})
+	handleSelfDamage(inst, p, rawKill)
+	hp3, dead := p.hpSnapshot()
+	if hp3 != 0 || !dead {
+		t.Fatalf("large selfDamage should be able to kill, hp = %v dead = %v", hp3, dead)
+	}
+}
+
+// ---- difficulty / keepInventory persistence round-trip (§6) ---------------
+
+func TestDifficultyAndKeepInventoryPersistRoundTrip(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if got := inst.Difficulty(); got != "normal" {
+		t.Fatalf("default difficulty should be %q, got %q", "normal", got)
+	}
+	if got := inst.KeepInventory(); got != false {
+		t.Fatal("default keepInventory should be false, matching vanilla convention")
+	}
+
+	host, hostConn := joinTestPlayer(t, inst, "owner1")
+
+	diffRaw, _ := json.Marshal(difficultyMsg{Value: "hard"})
+	handleDifficulty(inst, host, diffRaw)
+	if got := inst.Difficulty(); got != "hard" {
+		t.Fatalf("Difficulty() after handleDifficulty = %q, want hard", got)
+	}
+	diffFrames := hostConn.framesOfType("difficulty")
+	if len(diffFrames) != 1 || diffFrames[0]["value"] != "hard" {
+		t.Fatalf("expected a 'difficulty' broadcast frame with value=hard, got %+v", diffFrames)
+	}
+
+	ruleRaw, _ := json.Marshal(gameruleMsg{Rule: "keepInventory", Value: true})
+	handleGamerule(inst, host, ruleRaw)
+	if got := inst.KeepInventory(); got != true {
+		t.Fatal("KeepInventory() after handleGamerule should be true")
+	}
+	ruleFrames := hostConn.framesOfType("gamerule")
+	if len(ruleFrames) != 1 || ruleFrames[0]["rule"] != "keepInventory" || ruleFrames[0]["value"] != true {
+		t.Fatalf("expected a 'gamerule' broadcast frame, got %+v", ruleFrames)
+	}
+
+	// Now flush settings (as shutdown() does) and verify the SAME
+	// worlds.settings jsonb object round-trips difficulty+keepInventory
+	// alongside cap/spawn/time — not a second persistence path.
+	inst.flushSettings()
+
+	raw := store.settings[w.ID]
+	if raw == nil {
+		t.Fatal("expected UpdateSettings to have been called")
+	}
+	var persisted worldSettings
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("persisted settings did not decode: %v", err)
+	}
+	if persisted.Difficulty != "hard" {
+		t.Fatalf("persisted settings.difficulty = %q, want hard", persisted.Difficulty)
+	}
+	if !persisted.KeepInventory {
+		t.Fatal("persisted settings.keepInventory should be true")
+	}
+	if persisted.Cap != inst.Cap() {
+		t.Fatalf("persisted settings.cap = %d, want %d (extending the SAME object, not replacing it)", persisted.Cap, inst.Cap())
+	}
+
+	// Close via the Manager (not a bare inst.shutdown()) so the world's
+	// byWorld/byRoom lock entries are actually released — mirroring
+	// TestCloseThenOpenAgainSucceeds above, since Manager.Close is what
+	// performs shutdown() AND removes the instance from the manager's maps.
+	// The requester must be the CONNECTED host ("owner1", who actually
+	// joined above and became host), not "host1" (only Open()'s pre-join
+	// placeholder host name, per newInstance's doc).
+	if err := m.Close(inst.RoomID, "owner1", false); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Re-opening the world should load difficulty/keepInventory straight
+	// back out of the persisted settings, proving the round-trip through
+	// parseSettings on the load side too.
+	w2, _ := store.Get(w.ID)
+	inst2, err := m.Open(w2, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	defer inst2.shutdown()
+	if got := inst2.Difficulty(); got != "hard" {
+		t.Fatalf("re-opened instance Difficulty() = %q, want hard (loaded from persisted settings)", got)
+	}
+	if got := inst2.KeepInventory(); got != true {
+		t.Fatal("re-opened instance KeepInventory() should be true (loaded from persisted settings)")
+	}
+}
+
+func TestDifficultyRejectsUnknownValue(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+	host, hostConn := joinTestPlayer(t, inst, "owner1")
+
+	raw, _ := json.Marshal(difficultyMsg{Value: "nightmare"})
+	handleDifficulty(inst, host, raw)
+	if got := inst.Difficulty(); got != "normal" {
+		t.Fatalf("an unknown difficulty value must be rejected, Difficulty() = %q, want unchanged normal", got)
+	}
+	errFrames := hostConn.framesOfType("error")
+	if len(errFrames) == 0 {
+		t.Fatal("expected an 'error' frame for the unknown difficulty value")
+	}
+}
+
+func TestDifficultyAndGameruleAreHostOnly(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	joinTestPlayer(t, inst, "host1") // becomes host (first joiner)
+	nonHost, nonHostConn := joinTestPlayer(t, inst, "mallory")
+
+	diffRaw, _ := json.Marshal(difficultyMsg{Value: "hard"})
+	handleDifficulty(inst, nonHost, diffRaw)
+	if got := inst.Difficulty(); got != "normal" {
+		t.Fatalf("a non-host difficulty change must be rejected, got %q", got)
+	}
+
+	ruleRaw, _ := json.Marshal(gameruleMsg{Rule: "keepInventory", Value: true})
+	handleGamerule(inst, nonHost, ruleRaw)
+	if got := inst.KeepInventory(); got != false {
+		t.Fatal("a non-host gamerule change must be rejected")
+	}
+
+	errFrames := nonHostConn.framesOfType("error")
+	if len(errFrames) != 2 {
+		t.Fatalf("expected 2 'error' frames (one per rejected command) sent to the non-host, got %d", len(errFrames))
+	}
+}
+
+// ---- mob spawn/despawn + population caps (§7) ------------------------------
+
+func TestMobSpawnAndDamageAndDespawn(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	_, conn := joinTestPlayer(t, inst, "p1")
+
+	mob := inst.spawnMob("zombie", [3]float64{10, 64, 10})
+	spawnFrames := conn.framesOfType("mobSpawn")
+	if len(spawnFrames) != 1 || spawnFrames[0]["id"] != mob.ID || spawnFrames[0]["kind"] != "zombie" {
+		t.Fatalf("expected a 'mobSpawn' broadcast, got %+v", spawnFrames)
+	}
+	if mob.HP != zombieHP {
+		t.Fatalf("a freshly spawned zombie should have %v hp, got %v", zombieHP, mob.HP)
+	}
+
+	inst.mu.Lock()
+	_, exists := inst.mobs[mob.ID]
+	inst.mu.Unlock()
+	if !exists {
+		t.Fatal("spawned mob should be registered in inst.mobs")
+	}
+
+	inst.despawnMob(mob.ID, nil, false, "")
+	inst.mu.Lock()
+	_, stillExists := inst.mobs[mob.ID]
+	inst.mu.Unlock()
+	if stillExists {
+		t.Fatal("despawnMob should remove the mob from inst.mobs")
+	}
+	despawnFrames := conn.framesOfType("mobDespawn")
+	if len(despawnFrames) != 1 || despawnFrames[0]["id"] != mob.ID {
+		t.Fatalf("expected a 'mobDespawn' broadcast, got %+v", despawnFrames)
+	}
+}
+
+func TestHitMobDealsDamageAndKills(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	attacker, conn := joinTestPlayer(t, inst, "attacker")
+	attacker.mu.Lock()
+	attacker.Pos = [3]float64{0, 64, 0}
+	attacker.HeldID = "sword_diamond" // 8 damage
+	attacker.mu.Unlock()
+
+	mob := inst.spawnMob("pig", [3]float64{1, 64, 0}) // pigHP = 10: 2 diamond-sword hits kill it
+
+	raw, _ := json.Marshal(hitMsg{TargetID: "mob:" + mob.ID})
+	handleHit(inst, attacker, raw)
+	if mob.HP != pigHP-8 {
+		t.Fatalf("mob hp after 1 hit = %v, want %v", mob.HP, pigHP-8)
+	}
+
+	time.Sleep(hitCooldown + 20*time.Millisecond)
+	handleHit(inst, attacker, raw)
+	if mob.HP != 0 {
+		t.Fatalf("mob hp should clamp at 0, got %v", mob.HP)
+	}
+
+	inst.mu.Lock()
+	_, stillExists := inst.mobs[mob.ID]
+	inst.mu.Unlock()
+	if stillExists {
+		t.Fatal("a mob reduced to 0 hp should be despawned")
+	}
+	deathFrames := conn.framesOfType("death")
+	if len(deathFrames) != 1 || deathFrames[0]["id"] != "mob:"+mob.ID || deathFrames[0]["by"] != attacker.ID {
+		t.Fatalf("expected a 'death' frame for the killed mob, got %+v", deathFrames)
+	}
+}
+
+func TestMobPopulationCapEnforced(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	joinTestPlayer(t, inst, "p1")
+
+	// Directly spawn up to the cap (spawnMob itself has no cap check — the
+	// cap is enforced by rollMobSpawns' population count before it decides
+	// to roll a new spawn at all — so this test exercises rollMobSpawns
+	// specifically, matching how the contract frames the cap as a spawn-time
+	// gate, not a spawnMob-time gate).
+	for i := 0; i < maxZombies; i++ {
+		inst.spawnMob("zombie", [3]float64{float64(i), 64, 0})
+	}
+	inst.mu.Lock()
+	inst.timeTicks = 15000 // deep night band, so zombies are eligible to spawn
+	players := make([]*Player, 0, len(inst.players))
+	for _, p := range inst.players {
+		players = append(players, p)
+	}
+	inst.mu.Unlock()
+
+	for i := 0; i < 50; i++ { // many rolls: if the cap were broken, at least one would exceed it
+		inst.rollMobSpawns(players, "normal")
+	}
+
+	inst.mu.Lock()
+	zombieCount := 0
+	for _, mob := range inst.mobs {
+		if mob.Kind == "zombie" {
+			zombieCount++
+		}
+	}
+	inst.mu.Unlock()
+	if zombieCount != maxZombies {
+		t.Fatalf("zombie population should stay capped at %d, got %d", maxZombies, zombieCount)
+	}
+}
+
+func TestZombieChasesAndAttacksPlayerViaTickMobs(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, conn := joinTestPlayer(t, inst, "p1")
+	p.mu.Lock()
+	p.Pos = [3]float64{0, 64, 0}
+	p.mu.Unlock()
+
+	// Spawn a zombie already adjacent to the player (<1.2 blocks) so the
+	// very first tickMobs call goes straight to the attack branch rather
+	// than needing several ticks of straight-line chase movement first.
+	mob := inst.spawnMob("zombie", [3]float64{0.5, 64, 0})
+	mob.mu.Lock()
+	mob.lastMoveAt = time.Now().Add(-100 * time.Millisecond) // give it a sane, small dt
+	mob.mu.Unlock()
+
+	inst.tickMobs()
+
+	hp, _ := p.hpSnapshot()
+	if hp >= maxHP {
+		t.Fatalf("an adjacent zombie should have landed an attack on its first tick, player hp = %v (want < %v)", hp, maxHP)
+	}
+	if hp < maxHP-zombieDmgMax || hp > maxHP-zombieDmgMin {
+		t.Fatalf("zombie damage should fall within the contract's 2-4 range, player hp = %v (dmg = %v, want in [%v,%v])", hp, maxHP-hp, zombieDmgMin, zombieDmgMax)
+	}
+	dmgFrames := conn.framesOfType("damage")
+	if len(dmgFrames) != 1 || dmgFrames[0]["cause"] != "mob" || dmgFrames[0]["by"] != "mob:"+mob.ID {
+		t.Fatalf("expected a 'damage' frame with cause=mob by=mob:%s, got %+v", mob.ID, dmgFrames)
+	}
+
+	// A second tickMobs call immediately after should NOT land a second hit
+	// (the zombie's own 1s per-attack cooldown gates repeated melee, same
+	// spirit as the player-side hit cooldown).
+	inst.tickMobs()
+	hp2, _ := p.hpSnapshot()
+	if hp2 != hp {
+		t.Fatalf("a zombie should not land two attacks within its attack cooldown window, hp changed from %v to %v", hp, hp2)
+	}
+}
+
+func TestPeacefulDifficultyDespawnsHostiles(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	host, _ := joinTestPlayer(t, inst, "owner1")
+	zombie := inst.spawnMob("zombie", [3]float64{2, 64, 2})
+	pig := inst.spawnMob("pig", [3]float64{3, 64, 3})
+
+	raw, _ := json.Marshal(difficultyMsg{Value: "peaceful"})
+	handleDifficulty(inst, host, raw)
+
+	inst.mu.Lock()
+	_, zombieStillExists := inst.mobs[zombie.ID]
+	_, pigStillExists := inst.mobs[pig.ID]
+	inst.mu.Unlock()
+	if zombieStillExists {
+		t.Fatal("/difficulty peaceful should immediately despawn existing hostile mobs")
+	}
+	if !pigStillExists {
+		t.Fatal("/difficulty peaceful should NOT despawn passive mobs")
+	}
+}
+
+func TestZombieDamageScalesWithDifficulty(t *testing.T) {
+	// difficultyDamageMult is the exact per-tick multiplier applied to a
+	// zombie's rolled damage (contract §6: "easy/normal/hard scale damage
+	// 0.5/1.0/1.5×"), and peaceful must never deal PvE damage at all.
+	cases := []struct {
+		difficulty string
+		want       float64
+	}{
+		{"peaceful", 0},
+		{"easy", 0.5},
+		{"normal", 1.0},
+		{"hard", 1.5},
+	}
+	for _, c := range cases {
+		if got := difficultyDamageMult(c.difficulty); got != c.want {
+			t.Errorf("difficultyDamageMult(%q) = %v, want %v", c.difficulty, got, c.want)
+		}
+	}
+}
+
+// ---- drops (§10/§11) -------------------------------------------------------
+
+func TestDropSpawnPickupDespawn(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, conn := joinTestPlayer(t, inst, "p1")
+	p.mu.Lock()
+	p.Pos = [3]float64{10, 64, 10}
+	p.mu.Unlock()
+
+	drop := inst.spawnDrop([3]float64{10.5, 64, 10}, DropStack{ID: "sword_iron", Count: 1, Kind: "item"})
+	spawnFrames := conn.framesOfType("dropSpawn")
+	if len(spawnFrames) != 1 || spawnFrames[0]["id"] != drop.ID {
+		t.Fatalf("expected a 'dropSpawn' broadcast, got %+v", spawnFrames)
+	}
+
+	raw, _ := json.Marshal(pickupMsg{DropID: drop.ID})
+	handlePickup(inst, p, raw)
+
+	inst.mu.Lock()
+	_, exists := inst.drops[drop.ID]
+	inst.mu.Unlock()
+	if exists {
+		t.Fatal("an in-range pickup should remove the drop")
+	}
+	despawnFrames := conn.framesOfType("dropDespawn")
+	if len(despawnFrames) != 1 || despawnFrames[0]["id"] != drop.ID {
+		t.Fatalf("expected a 'dropDespawn' broadcast after pickup, got %+v", despawnFrames)
+	}
+}
+
+func TestDropPickupOutOfRangeRejected(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, _ := joinTestPlayer(t, inst, "p1")
+	p.mu.Lock()
+	p.Pos = [3]float64{0, 64, 0}
+	p.mu.Unlock()
+
+	drop := inst.spawnDrop([3]float64{50, 64, 50}, DropStack{ID: "cobblestone", Count: 4, Kind: "block"})
+
+	raw, _ := json.Marshal(pickupMsg{DropID: drop.ID})
+	handlePickup(inst, p, raw)
+
+	inst.mu.Lock()
+	_, exists := inst.drops[drop.ID]
+	inst.mu.Unlock()
+	if !exists {
+		t.Fatal("an out-of-range pickup request must not remove the drop")
+	}
+}
+
+func TestDropDespawnsAfterTimeout(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	drop := inst.spawnDrop([3]float64{0, 64, 0}, DropStack{ID: "dirt", Count: 1, Kind: "block"})
+	drop.mu.Lock()
+	drop.SpawnedAt = time.Now().Add(-dropDespawnAfter - time.Second) // force it "old"
+	drop.mu.Unlock()
+
+	inst.tickDrops()
+
+	inst.mu.Lock()
+	_, exists := inst.drops[drop.ID]
+	inst.mu.Unlock()
+	if exists {
+		t.Fatal("tickDrops should despawn a drop older than dropDespawnAfter")
+	}
+}
+
+// ---- move message optional held/armor fields (§9/§5.2) --------------------
+
+func TestMoveHeldAndArmorAreOptionalAndBackwardCompatible(t *testing.T) {
+	store := newFakeWorldStore()
+	w := testWorld("w1", "owner1")
+	store.addWorld(w)
+	m := newTestManager(store, newFakeFriendChecker(), nil)
+	inst, err := m.Open(w, "host1", "public", "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer inst.shutdown()
+
+	p, _ := joinTestPlayer(t, inst, "p1")
+
+	// An old-shaped move (no held/armor fields at all) must not touch
+	// HeldID/HeldKind/Armor or error/kick the connection.
+	oldShaped := []byte(`{"t":"move","p":[1,2,3],"yaw":0,"pitch":0,"anim":{"swing":0,"crouch":false,"fly":false}}`)
+	handleMove(inst, p, oldShaped)
+	p.mu.Lock()
+	heldID, armor := p.HeldID, p.Armor
+	p.mu.Unlock()
+	if heldID != "" || armor != (ArmorSet{}) {
+		t.Fatalf("an old-shaped move message must leave held/armor untouched, got heldID=%q armor=%+v", heldID, armor)
+	}
+
+	// A new-shaped move WITH held+armor should update both.
+	newShaped := []byte(`{"t":"move","p":[1,2,3],"yaw":0,"pitch":0,"anim":{"swing":0,"crouch":false,"fly":false},"held":{"id":"sword_iron","kind":"item"},"armor":{"helmet":"helmet_iron","chest":"","legs":"","boots":""}}`)
+	handleMove(inst, p, newShaped)
+	p.mu.Lock()
+	heldID, heldKind, armor := p.HeldID, p.HeldKind, p.Armor
+	p.mu.Unlock()
+	if heldID != "sword_iron" || heldKind != "item" {
+		t.Fatalf("held field should update HeldID/HeldKind, got id=%q kind=%q", heldID, heldKind)
+	}
+	if armor.Helmet != "helmet_iron" {
+		t.Fatalf("armor field should update Armor.Helmet, got %+v", armor)
 	}
 }

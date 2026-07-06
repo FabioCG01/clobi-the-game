@@ -13,14 +13,14 @@
 //     // 'breakStart'|'breakStop'|'place'|'pick' (crosshair) and
 //     // 'tapPlace'|'tapBreakStart' (with px,py CSS pixels)|'tapBreakStop' (touch)
 //   Input.on(evt, fn)               // 'hotbar'|'hotbarScroll'|'chat'|'pause'|
-//                                   // 'debug'|'perspective'|'inventory'|'flyToggle'
+//                                   // 'debug'|'perspective'|'inventory'|'flyToggle'|'drop'
 //   Input.setUIMode(on)             // chat/menu open: all held game state released
 //   Input.requestPointerLock()/exitPointerLock()/isLocked
 //   Input.setTouchVisible(on)       // touch controls shown + touch listeners active
 //   Input.setFlying(on)             // extra: shows/hides fly up/down touch buttons
 //
 // Desktop map: WASD move, Space jump (double-Space 350 ms = flyToggle),
-// Shift sneak, Ctrl/R sprint, E inventory, T chat, '/' chat-prefill, Esc pause
+// Shift sneak, Ctrl/R sprint, E inventory, Q drop (§10), T chat, '/' chat-prefill, Esc pause
 // (via pointer-lock loss), F3 debug, F5 perspective, 1-9 hotbar, wheel scroll,
 // LMB hold break / RMB place / MMB pick.
 //
@@ -191,6 +191,11 @@ var Input = (function () {
       case 'KeyE':
         e.preventDefault();
         if (!e.repeat) emit('inventory');
+        return;
+      case 'KeyQ':
+        // Part III §10: drop one item from the selected hotbar slot.
+        e.preventDefault();
+        if (!e.repeat) emit('drop');
         return;
       case 'KeyT':
         e.preventDefault();
@@ -568,7 +573,8 @@ var Input = (function () {
       pause: mkButton('vox-btn-pause', '⏸', 'vox.touch.pause', 'Pause', 48, topRight(10, 10)),
       chat: mkButton('vox-btn-chat', '💬', 'vox.touch.chat', 'Chat', 48, topRight(10, 66)),
       inv: mkButton('vox-btn-inv', '🎒', 'vox.touch.inventory', 'Inventory', 48, topRight(10, 122)),
-      persp: mkButton('vox-btn-persp', '👁', 'vox.touch.perspective', 'Perspective', 48, topRight(10, 178))
+      persp: mkButton('vox-btn-persp', '👁', 'vox.touch.perspective', 'Perspective', 48, topRight(10, 178)),
+      drop: mkButton('vox-btn-drop', '⤓', 'vox.touch.drop', 'Drop', 48, topRight(10, 234))
     };
 
     // fly buttons stay hidden until Game reports flying via setFlying(true)
@@ -622,6 +628,7 @@ var Input = (function () {
     wireTap(btns.chat, function () { emit('chat', ''); }, false);
     wireTap(btns.inv, function () { emit('inventory'); }, false);
     wireTap(btns.persp, function () { emit('perspective'); }, false);
+    wireTap(btns.drop, function () { emit('drop'); }, false);
 
     for (var k in btns) container.appendChild(btns[k]);
     hudRoot.appendChild(container);

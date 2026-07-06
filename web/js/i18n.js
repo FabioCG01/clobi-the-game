@@ -1,9 +1,9 @@
-// i18n.js — localization for TUX SMASH ROYALE.
+// i18n.js — localization for CLOBI CRAFT.
 // Exactly one global: window.I18n.
 //
 // Languages: English (default), Deutsch, Francais, Portugues, Letzebuergesch,
 // and Srpskohrvatski (Serbo-Croatian, the common ex-Yugoslav language, Latin).
-// The product name "Tux Smash Royale" and the "Activate Windows" gag text are
+// The product name "CLOBI CRAFT" and the "Activate Windows" gag text are
 // NEVER translated (kept verbatim in English in every language).
 //
 // API (pinned by the project contract; other modules depend on these):
@@ -172,7 +172,7 @@
     "nav.marketplace": "Marketplace",
     "nav.editChar": "Edit Character",
     "wip.title": "The Arena",
-    "wip.desc": "Tux Smash and Distro Royale are offline for now — work in progress.",
+    "wip.desc": "Clobi Craft and Distro Royale are offline for now — work in progress.",
     "footer.openSource": "Open source on GitHub",
     "footer.privacy": "Privacy & data",
     "soon.create": "Paint studio coming soon.",
@@ -433,7 +433,7 @@
     "nav.marketplace": "Marktplatz",
     "nav.editChar": "Charakter bearbeiten",
     "wip.title": "Die Arena",
-    "wip.desc": "Tux Smash und Distro Royale sind vorerst offline — in Arbeit.",
+    "wip.desc": "Clobi Craft und Distro Royale sind vorerst offline — in Arbeit.",
     "footer.openSource": "Open Source auf GitHub",
     "footer.privacy": "Datenschutz & Daten",
     "soon.create": "Malstudio kommt bald.",
@@ -694,7 +694,7 @@
     "nav.marketplace": "Place de marché",
     "nav.editChar": "Modifier le personnage",
     "wip.title": "L'Arène",
-    "wip.desc": "Tux Smash et Distro Royale sont hors ligne pour le moment — en cours de développement.",
+    "wip.desc": "Clobi Craft et Distro Royale sont hors ligne pour le moment — en cours de développement.",
     "footer.openSource": "Open source sur GitHub",
     "footer.privacy": "Confidentialité et données",
     "soon.create": "Studio de peinture bientôt disponible.",
@@ -955,7 +955,7 @@
     "nav.marketplace": "Mercado",
     "nav.editChar": "Editar Personagem",
     "wip.title": "A Arena",
-    "wip.desc": "Tux Smash e Distro Royale estão offline para já — trabalho em curso.",
+    "wip.desc": "Clobi Craft e Distro Royale estão offline para já — trabalho em curso.",
     "footer.openSource": "Código aberto no GitHub",
     "footer.privacy": "Privacidade e dados",
     "soon.create": "Estúdio de pintura brevemente.",
@@ -1216,7 +1216,7 @@
     "nav.marketplace": "Maartplaz",
     "nav.editChar": "Charakter beaarbechten",
     "wip.title": "D'Arena",
-    "wip.desc": "Tux Smash an Distro Royale sinn am Moment offline — gëtt nach geschafft.",
+    "wip.desc": "Clobi Craft an Distro Royale sinn am Moment offline — gëtt nach geschafft.",
     "footer.openSource": "Open Source op GitHub",
     "footer.privacy": "Privatsphär & Donnéeën",
     "soon.create": "Paint Studio kënnt geschwënn.",
@@ -1477,7 +1477,7 @@
     "nav.marketplace": "Tržnica",
     "nav.editChar": "Uredi lik",
     "wip.title": "Arena",
-    "wip.desc": "Tux Smash i Distro Royale su trenutno nedostupni — u izradi.",
+    "wip.desc": "Clobi Craft i Distro Royale su trenutno nedostupni — u izradi.",
     "footer.openSource": "Otvoreni kod na GitHub",
     "footer.privacy": "Privatnost i podaci",
     "soon.create": "Studio za crtanje uskoro.",

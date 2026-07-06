@@ -1,6 +1,6 @@
 // menu.js -- global Menu.
 //
-// The home screen of CLOBI CRAFT (TUX SMASH ROYALE's fully-3D voxel era) plus
+// The home screen of CLOBI CRAFT (formerly the fully-3D voxel era of Clobi's Arena) plus
 // the WARDROBE screen (the player's Minecraft-compatible skin library):
 //   - Hero: game logo + a large live 3D turntable of the currently-worn skin
 //     (PlayerModel.attachTurntable; falls back to a friendly message when the
@@ -219,7 +219,7 @@ const Menu = (function () {
 
     // ---------- Title ------------------------------------------------------
     const title = el('div', { class: 'menu-title' }, [
-      el('div', { class: 'title-eyebrow', text: 'TUX SMASH ROYALE' }),
+      el('div', { class: 'title-eyebrow', text: 'CLOBI CRAFT' }),
       el('h1', { class: 'title-main', text: 'CLOBI' }),
       el('h2', { class: 'title-sub', text: 'CRAFT' }),
       el('p', {

@@ -13,8 +13,12 @@
 //                  underwater tint+wobble, subtle vignette
 //
 // Also home of computeEnv(timeTicks, renderDist): the day/night color script
-// (dawn 23000-1000, day, dusk 11000-13000, night) with the sun rotating in the
-// X/Y plane and fog pinned to renderDist (start 0.55, end 0.92 of the range).
+// (dawn 22200-1800, day, dusk 10200-13800, night -- widened per Part III §14
+// for a fuller golden-hour moment, was a narrower ±1000-tick band around each
+// peak) with the sun rotating in the X/Y plane, a moon opposite it + fading
+// procedural stars (Part III §13), and fog pinned to renderDist (start 0.72,
+// end 1.15 of the range -- pushed out from 0.55/0.92 per Part III §2's fix
+// for fog washing distant terrain to near-white at low render distances).
 //
 // Chunk meshes are registered via uploadChunkMesh(cx, cz, meshData) (from
 // Mesher.meshChunk) and kept in a Map 'cx,cz' -> {VAOs, counts, aabb}; culling
@@ -56,7 +60,8 @@ const Renderer = (function () {
   const CLOUD_Y = 118;
   const CLOUD_RANGE = 640;
 
-  // ---- day/night keyframe states (see ARCHITECTURE-3D.md section 7) ----------
+  // ---- day/night keyframe states (see ARCHITECTURE-3D.md section 7, polished
+  // per ARCHITECTURE-COMBAT.md §13/§14) ----------
   const ENV_DAY = {
     skyTop: [0.239, 0.545, 1.0],       // #3D8BFF
     horizon: [0.749, 0.890, 1.0],      // #BFE3FF
@@ -64,11 +69,15 @@ const Renderer = (function () {
     ambient: 0.55,
     night: 0.0
   };
+  // Golden-hour peak (Part III §14: "widen and warm... a bit more saturated
+  // orange/pink at the sun-near-horizon moment" -- the single prettiest beat
+  // of the cycle, so it gets richer saturation + a warmer magenta-pink top
+  // and a slightly hotter, more saturated horizon/sun than the Part I values).
   const ENV_GOLD = {                   // sunrise / sunset
-    skyTop: [0.42, 0.26, 0.55],        // magenta-purple top
-    horizon: [1.0, 0.604, 0.235],      // #FF9A3C
-    sun: [1.0, 0.604, 0.235],
-    ambient: 0.34,
+    skyTop: [0.46, 0.22, 0.50],        // warmer magenta-pink top (was 0.42/0.26/0.55)
+    horizon: [1.0, 0.522, 0.184],      // #FF8530 -- hotter, more saturated orange
+    sun: [1.0, 0.49, 0.20],
+    ambient: 0.36,
     night: 0.08
   };
   const ENV_NIGHT = {
@@ -96,6 +105,13 @@ const Renderer = (function () {
     'void main() { vNDC = aPos; gl_Position = vec4(aPos, 0.0, 1.0); }'
   ].join('\n');
 
+  // Part III §13/§14: real moon (soft glow, simple lit-half, geometrically
+  // gated on dot(sunDir,up)<~0.05 rather than the old env.night proxy, smooth-
+  // stepped so it fades rather than pops) + procedural stars whose density
+  // AND brightness both ramp in with a smoothstep of "how far past dusk" the
+  // current sun altitude is (not a hard >0.02 cutoff) so dusk->night reads as
+  // a gradual reveal. uSunDir.y IS dot(sunDir, up) since up=(0,1,0) -- no new
+  // uniform needed, uSunDir is already bound every frame.
   const FS_SKY = [
     '#version 300 es',
     'precision highp float;',
@@ -109,25 +125,52 @@ const Renderer = (function () {
     '  vec3 dir = normalize(p.xyz / p.w - uCamPos);',
     '  float h = clamp(dir.y, -1.0, 1.0);',
     '  vec3 col = mix(uSkyHorizon, uSkyTop, pow(clamp(h, 0.0, 1.0), 0.55));',
-    '  col = mix(col, uSkyHorizon * 0.82, smoothstep(0.0, -0.35, h));',
+    // NOTE: GLSL smoothstep(edge0,edge1,x) is spec-undefined when edge0>=
+    // edge1, so a below-the-horizon darken (wants HIGH output at LOW h) is
+    // written as 1-smoothstep(loEdge,hiEdge,h) with edges correctly ordered,
+    // never as a reversed-edge smoothstep call (same fix applied to the new
+    // moon/star gates below, for the same reason).
+    '  col = mix(col, uSkyHorizon * 0.82, 1.0 - smoothstep(-0.35, 0.0, h));',
     '  float d = dot(dir, uSunDir);',
     '  float disc = smoothstep(0.99955, 0.99985, d);',
     '  float glow = pow(clamp(d, 0.0, 1.0), 180.0) * 0.45',
     '             + pow(clamp(d, 0.0, 1.0), 8.0) * 0.08;',
     '  col += uSunColor * (disc * 1.2 + glow);',
-    '  float md = dot(dir, -uSunDir);',
-    '  float moon = smoothstep(0.99975, 0.99991, md);',
-    '  col += vec3(0.85, 0.90, 1.0) * moon * (0.05 + 0.75 * uNight);',
-    '  col += vec3(0.60, 0.70, 0.90) * pow(clamp(md, 0.0, 1.0), 300.0) * 0.12 * uNight;',
-    '  if (uNight > 0.02 && dir.y > 0.02) {',                     // subtle stars
+    // moon: geometric visibility gate is the sun's altitude crossing the
+    // horizon (dot(sunDir,up) = uSunDir.y), smoothstepped over a small band
+    // around the ~0.05 threshold so it eases in/out with dusk/dawn rather
+    // than snapping the instant the sun's y goes negative. Wants HIGH output
+    // at LOW uSunDir.y -> invert a correctly-ordered smoothstep (see NOTE above).
+    '  float belowHorizon = 1.0 - smoothstep(-0.05, 0.10, uSunDir.y);',
+    '  vec3 moonDir = -uSunDir;',
+    '  float md = dot(dir, moonDir);',
+    '  float moonMask = smoothstep(0.99975, 0.99991, md);',
+    '  if (moonMask > 0.0001) {',
+    '    vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir) + vec3(0.0001, 0.0, 0.0));',
+    '    vec3 onMoon = dir - moonDir * md;',
+    '    float lu = dot(onMoon, right) * 340.0;',               // simple lit-half terminator
+    '    float lit = smoothstep(-0.35, 0.45, lu);',
+    '    vec3 moonCol = mix(vec3(0.30, 0.32, 0.40), vec3(0.92, 0.94, 1.0), lit);',
+    '    col += moonCol * moonMask * belowHorizon;',
+    '  }',
+    '  col += vec3(0.60, 0.70, 0.90) * pow(clamp(md, 0.0, 1.0), 300.0) * 0.14 * belowHorizon;', // soft glow halo
+    // stars: dusk-depth factor ramps smoothly with how far past the horizon
+    // the sun has sunk (belowHorizon itself is already a smoothstep of sun
+    // altitude); use it to drive BOTH density (lower reveal threshold as it
+    // grows) and brightness, so more stars visibly appear over the dusk->
+    // night transition rather than the same star field just dimming.
+    '  float duskDepth = smoothstep(-0.05, 0.55, -uSunDir.y);',
+    '  if (duskDepth > 0.01 && dir.y > 0.0) {',
     '    vec2 sc = vec2(atan(dir.x, dir.z), asin(h)) * 57.3;',
     '    vec2 cell = floor(sc);',
     '    vec2 f = fract(sc);',
     '    float hh = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453123);',
     '    vec2 sp = fract(vec2(hh * 13.73, hh * 7.31)) * 0.8 + 0.1;',
-    '    float star = smoothstep(0.10, 0.02, length(f - sp)) * step(0.965, hh);',
+    '    float star = 1.0 - smoothstep(0.02, 0.10, length(f - sp));', // near sp -> 1 (see NOTE above re: edge order)
+    '    float revealThresh = mix(0.985, 0.94, duskDepth);',      // density grows with duskDepth
+    '    star *= smoothstep(revealThresh, revealThresh + 0.02, hh);',
     '    float tw = 0.7 + 0.3 * sin(uTicks * 0.02 + hh * 40.0);',
-    '    col += vec3(star * tw) * uNight * smoothstep(0.02, 0.25, dir.y) * 0.8;',
+    '    col += vec3(star * tw) * duskDepth * smoothstep(0.0, 0.20, dir.y) * 0.85;',
     '  }',
     '  outColor = vec4(col, 1.0);',
     '}'
@@ -304,10 +347,23 @@ const Renderer = (function () {
       '             cos(uv.x * 27.0 + uTime * 1.7)) * 0.004 * uUnderwater;',
       '  uv = clamp(uv, vec2(0.001), vec2(0.999));',
       '  vec3 c = texture(uScene, uv).rgb;',
-      '  c = c / (c + 0.35) * 1.30;',                              // filmic tonemap
+      // Part III §2 fog fix: the filmic shoulder's brightness lift is eased
+      // back slightly (1.30 -> 1.22) -- it was pushing already-bright pixels
+      // (foggy/distant terrain, which sits close to the fog color and is
+      // naturally light) hard against the 1.0 clip. Vibrance stays at its
+      // full "vibrant realism" strength (uVibrance is untouched, still the
+      // Part I default 0.18) but its (1-sat) weighting -- which boosts
+      // ALREADY-DESATURATED pixels the most, i.e. exactly the washed-out
+      // far-field fog case -- is curved with pow(...,1.4) so that boost
+      // tapers off for near-zero-saturation pixels while barely changing it
+      // for already-saturated up-close pixels (where 1-sat is small either
+      // way): distant haze stays gently hazy instead of blowing out, and
+      // up-close color keeps its full vivid punch.
+      '  c = c / (c + 0.35) * 1.22;',                              // filmic tonemap
       '  float l = dot(c, vec3(0.299, 0.587, 0.114));',            // vibrance
       '  float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));',
-      '  c = clamp(vec3(l) + (c - vec3(l)) * (1.0 + uVibrance * (1.0 - sat)), 0.0, 1.0);',
+      '  float vibW = pow(clamp(1.0 - sat, 0.0, 1.0), 1.4);',
+      '  c = clamp(vec3(l) + (c - vec3(l)) * (1.0 + uVibrance * vibW), 0.0, 1.0);',
       '  c = pow(c, vec3(1.0 / max(uGamma, 0.1)));',               // gamma
       '  vec3 graded = applyLUT(uLut, c);',                        // CLOBI POP
       '  c = mix(c, graded, uLutAmount);',
@@ -536,21 +592,36 @@ const Renderer = (function () {
   }
 
   // ---- public: environment script -------------------------------------------------
+  // Part III §14 polish: the dawn/dusk transition half-segments are widened
+  // from 1000 to 1800 ticks each (was a narrow ~4.2% of the day; now a fuller
+  // ~7.5% each side of the two true gold peaks at t=0 [sunrise] and t=12000
+  // [sunset]) so golden hour reads as a real, lingering moment rather than a
+  // quick flash. Every segment already blends via smooth01 (verified: at
+  // each of the 6 boundaries below both the incoming segment's smooth01(1)
+  // and the outgoing segment's smooth01(0) evaluate to slope 0, so the
+  // composite is C1-continuous already -- no hard/linear cuts exist anywhere
+  // in this script, nothing needed converting). Total still sums to 24000.
+  const BAND = 1800;                    // half-segment width (was 1000)
+  const DUSK1_START = 6000 + 4200;      // 10200 -- day fades toward sunset gold
+  const DUSK_PEAK = 12000;              // true sunset instant (sun at horizon)
+  const NIGHT_START = DUSK_PEAK + BAND; // 13800
+  const NIGHT_END = 24000 - BAND;       // 22200 -- dawn gold begins approaching
+
   function computeEnv(timeTicks, renderDist) {
     const t = ((timeTicks % 24000) + 24000) % 24000;
     let st;
-    if (t < 1000) {                                                // dawn 2nd half
-      st = mixEnvState(ENV_GOLD, ENV_DAY, smooth01(t / 1000));
-    } else if (t < 11000) {                                        // day
+    if (t < BAND) {                                                // dawn 2nd half (gold -> day)
+      st = mixEnvState(ENV_GOLD, ENV_DAY, smooth01(t / BAND));
+    } else if (t < DUSK1_START) {                                  // day
       st = mixEnvState(ENV_DAY, ENV_DAY, 0);
-    } else if (t < 12000) {                                        // dusk 1st half
-      st = mixEnvState(ENV_DAY, ENV_GOLD, smooth01((t - 11000) / 1000));
-    } else if (t < 13000) {                                        // dusk 2nd half
-      st = mixEnvState(ENV_GOLD, ENV_NIGHT, smooth01((t - 12000) / 1000));
-    } else if (t < 23000) {                                        // night
+    } else if (t < DUSK_PEAK) {                                    // dusk 1st half (day -> gold)
+      st = mixEnvState(ENV_DAY, ENV_GOLD, smooth01((t - DUSK1_START) / (DUSK_PEAK - DUSK1_START)));
+    } else if (t < NIGHT_START) {                                  // dusk 2nd half (gold -> night)
+      st = mixEnvState(ENV_GOLD, ENV_NIGHT, smooth01((t - DUSK_PEAK) / BAND));
+    } else if (t < NIGHT_END) {                                    // night
       st = mixEnvState(ENV_NIGHT, ENV_NIGHT, 0);
-    } else {                                                       // dawn 1st half
-      st = mixEnvState(ENV_NIGHT, ENV_GOLD, smooth01((t - 23000) / 1000));
+    } else {                                                       // dawn 1st half (night -> gold)
+      st = mixEnvState(ENV_NIGHT, ENV_GOLD, smooth01((t - NIGHT_END) / BAND));
     }
 
     // sun rotates in the X/Y plane: rises +X (t=0), zenith at noon (t=6000)
@@ -558,14 +629,22 @@ const Renderer = (function () {
     const sunDir = [-Math.sin(theta), Math.cos(theta), 0];
 
     const range = (renderDist || 4) * 16;
+    // Part III §2 fog fix: push fogStart/fogEnd further out (was 0.55/0.92 of
+    // range -- fog read as a wall at 60% of view distance and washed distant
+    // terrain to near-white). Also deepen the fog/horizon colors ~12% (×0.88)
+    // at all times of day so distant terrain reads as tinted-toward-sky haze
+    // rather than washed-out white, while keeping every band's hue intact.
+    const FOG_DEEPEN = 0.88;
+    const fogColor = [st.horizon[0] * FOG_DEEPEN, st.horizon[1] * FOG_DEEPEN, st.horizon[2] * FOG_DEEPEN];
+    const skyHorizon = [st.horizon[0] * FOG_DEEPEN, st.horizon[1] * FOG_DEEPEN, st.horizon[2] * FOG_DEEPEN];
     return {
       timeTicks: t,
       sunDir: sunDir,
       skyTop: st.skyTop,
-      skyHorizon: st.horizon,
-      fogColor: st.horizon.slice(),                                // fog = horizon
-      fogStart: range * 0.55,
-      fogEnd: range * 0.92,
+      skyHorizon: skyHorizon,
+      fogColor: fogColor,
+      fogStart: range * 0.72,
+      fogEnd: range * 1.15,
       sunColor: st.sun,
       ambient: st.ambient,
       underwater: false,

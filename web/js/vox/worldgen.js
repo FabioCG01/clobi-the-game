@@ -20,8 +20,26 @@
 //   whose radius-2 canopy always fits inside their own chunk, and
 //   flowers/tallgrass tufts on grass.
 //
-// Block ids are the stable contract §4 values (mirrored as local constants;
-// blocks.js is the registry of record and loads before this file).
+// Part III additions (ARCHITECTURE-COMBAT.md §3):
+//   - biomeNoise(x,z): a cheap, huge-blob, height-INDEPENDENT lateral value
+//     (own low-freq lattice channel, S_BIOME) gating four lateral bands —
+//     cold / temperate / desert-ish / jungle-ish — independent of the
+//     existing altitude-gated snow line. Documented per-band below at its
+//     definition.
+//   - a second cheap value-noise channel (S_STONEVAR) recolors plain stone
+//     below y≈40 into granite/diorite/andesite blobs, same blob-threshold
+//     technique as the existing S_PATCH gravel/sand patches.
+//   - new depth-gated ore veins (redstone/lapis/emerald/ancient-debris),
+//     same per-chunk seeded vein-walk (carveVeins) as coal/iron/gold/diamond.
+//   - clay in beach/riverbed columns at sea level, mossy cobble as a rare
+//     shoreline+forest surface variant, and cactus/melon/pumpkin/mushroom/
+//     vine surface decorations analogous to the existing flowers/tallgrass
+//     (same "must fit fully inside the chunk" rule — all are single-column
+//     or leaf-attached features with no cross-chunk radius).
+//
+// Block ids are the stable contract §4 (Part I) + §3 (Part III) values
+// (mirrored as local constants; blocks.js is the registry of record and
+// loads before this file).
 
 var WorldGen = (function () {
 
@@ -31,11 +49,15 @@ var WorldGen = (function () {
   var SEA = 40;
   var CHUNK_VOL = CHUNK * WORLD_H * CHUNK;
 
-  // ---- block ids (contract §4 — stable) ----
+  // ---- block ids (contract §4/§3 — stable) ----
   var AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, BEDROCK = 5, LOG = 6,
       LEAVES = 8, SAND = 9, GRAVEL = 10, WATER = 11,
       COAL_ORE = 16, IRON_ORE = 17, GOLD_ORE = 18, DIAMOND_ORE = 19,
-      SNOW_GRASS = 20, FLOWER_RED = 27, FLOWER_YELLOW = 28, TALLGRASS = 29;
+      SNOW_GRASS = 20, FLOWER_RED = 27, FLOWER_YELLOW = 28, TALLGRASS = 29,
+      REDSTONE_ORE = 34, LAPIS_ORE = 35, EMERALD_ORE = 36, ANCIENT_DEBRIS = 37,
+      GRANITE = 38, DIORITE = 39, ANDESITE = 40, CLAY = 41, MOSSY_COBBLE = 43,
+      ICE = 44, PACKED_ICE = 45, CACTUS = 46, MELON = 47, PUMPKIN = 48,
+      MUSHROOM_RED = 49, MUSHROOM_BROWN = 50, VINE = 51;
 
   // ---- noise salts (namespaces inside the one seed) ----
   var S_HEIGHT = 101;   // 3-octave plains field (uses +1, +2 too)
@@ -49,6 +71,11 @@ var WorldGen = (function () {
   var S_CANOPY = 180;   // canopy corner trimming
   var S_DECO = 190;     // tallgrass / flower placement
   var S_ORE = 200;      // per-chunk ore RNG stream
+  var S_BIOME = 210;    // Part III: lateral biome band (huge blobs, height-independent)
+  var S_STONEVAR = 220; // Part III: granite/diorite/andesite blob channel
+  var S_MOSSY = 230;    // Part III: mossy cobble shoreline+forest roll
+  var S_DECO2 = 240;    // Part III: cactus/melon/pumpkin/mushroom placement
+  var S_VINE = 250;     // Part III: vine attachment under jungle-biome leaves
 
   function idx(x, y, z) { return (y * CHUNK + z) * CHUNK + x; }
 
@@ -116,6 +143,30 @@ var WorldGen = (function () {
       return 65 + (h32(wx, wz, S_SNOW) % 3); // 65..67 — ragged, not a contour line
     }
 
+    // ---- Part III: biomeNoise(x,z) — cheap, huge-blob, HEIGHT-INDEPENDENT
+    // lateral value (0..1) gating four bands, independent of the altitude-
+    // gated snow line above (a mountaintop and a lowland can each land in
+    // any band). Very low frequency (denominator ~210) so bands read as
+    // broad regions many chunks wide, not per-chunk noise. Bands (contract
+    // §3): snow_grass/ice/packed_ice extend into the COLD band; cactus into
+    // DESERT; melon/pumpkin/vine (+jungle mushroom pockets) into JUNGLE;
+    // mossy cobble + occasional dark-forest mushrooms sit in TEMPERATE.
+    //   [0.00, 0.18) cold      — lake surfaces freeze (ice/packed_ice)
+    //   [0.18, 0.62) temperate — the existing default plains/forest look
+    //   [0.62, 0.82) desert    — cactus on sand/gravel patches
+    //   [0.82, 1.00] jungle    — melon/pumpkin fields, vines off tree leaves
+    function biomeNoise(wx, wz) {
+      return vnoise(S_BIOME, wx / 210, wz / 210);
+    }
+    var BIOME_COLD = 0.18, BIOME_DESERT = 0.62, BIOME_JUNGLE = 0.82;
+
+    // ---- Part III: mountain mask — reuses the existing hills-country mask
+    // channel (S_MASK) but thresholded much higher, so only the tallest
+    // hill-country blobs count as "mountain" (gates emerald ore, very rare).
+    function isMountain(wx, wz) {
+      return vnoise(S_MASK, wx / 170, wz / 170) > 0.74;
+    }
+
     // ---- ore veins: seeded random walk, only ever replaces stone ----
     function carveVeins(b, rng, ore, count, yMin, yMax, lenMin, lenMax) {
       for (var v = 0; v < count; v++) {
@@ -147,13 +198,33 @@ var WorldGen = (function () {
       }
     }
 
+    // ---- Part III: ancient debris — "very rare, isolated single-block
+    // finds not veins" (contract §3): unlike carveVeins, this drops a
+    // single ore block per roll with no walk/thicken, so debris never
+    // clusters into a vein shape. Same per-chunk RNG stream as the other
+    // ore passes for full determinism. ----
+    function carveIsolated(b, rng, ore, count, yMin, yMax) {
+      for (var v = 0; v < count; v++) {
+        var x = (rng() * CHUNK) | 0;
+        var z = (rng() * CHUNK) | 0;
+        var y = yMin + ((rng() * (yMax - yMin + 1)) | 0);
+        var i = idx(x, y, z);
+        if (b[i] === STONE) b[i] = ore;
+      }
+    }
+
     // ---- oak tree: trunk 4–6 + leaf blob, canopy stays inside the chunk ----
-    function placeTree(b, x, z, h, wx, wz) {
+    // `jungle` (Part III): when true, some canopy-edge leaf columns grow a
+    // short VINE strand hanging straight down into the air below them —
+    // same x,z as an already-in-chunk leaf block, so it trivially satisfies
+    // the "canopy must fit fully inside the chunk" rule (no new x/z reach).
+    function placeTree(b, x, z, h, wx, wz, jungle) {
       var th = 4 + (h32(wx, wz, S_TRUNK) % 3);         // 4..6
       if (h + th + 2 >= WORLD_H) return;
       b[idx(x, h, z)] = DIRT;                          // roots eat the grass
       for (var k = 1; k <= th; k++) b[idx(x, h + k, z)] = LOG;
       var ty = h + th;                                 // canopy centre height
+      var leafCols = [];                               // [dx,dz,lowestLeafY] for vine pass
       for (var ly = ty - 2; ly <= ty + 1; ly++) {
         var rad = (ly <= ty - 1) ? 2 : 1;
         for (var dz = -rad; dz <= rad; dz++) {
@@ -165,8 +236,22 @@ var WorldGen = (function () {
             if (rad === 1 && ly === ty && ax === 1 && az === 1 &&
                 rnd(S_CANOPY + 7, wx + dx, wz + dz) < 0.4) continue;       // ruffle mid layer
             var i = idx(x + dx, ly, z + dz);
-            if (b[i] === AIR) b[i] = LEAVES;
+            if (b[i] === AIR) { b[i] = LEAVES; leafCols.push([dx, dz, ly]); }
           }
+        }
+      }
+      if (!jungle) return;
+      // vines: for a handful of canopy-edge leaf columns, hang a short
+      // strand (1-3 blocks) straight down through the air beneath them.
+      for (var c = 0; c < leafCols.length; c++) {
+        var vdx = leafCols[c][0], vdz = leafCols[c][1], vly = leafCols[c][2];
+        if (rnd(S_VINE, wx + vdx, wz + vdz + vly) > 0.22) continue;   // sparse
+        var vlen = 1 + (h32(wx + vdx, wz + vdz, S_VINE + 1) % 3);     // 1..3
+        for (var vy = vly - 1; vy > vly - 1 - vlen; vy--) {
+          if (vy < 1) break;
+          var vi = idx(x + vdx, vy, z + vdz);
+          if (b[vi] !== AIR) break;                                  // stop at first obstruction
+          b[vi] = VINE;
         }
       }
     }
@@ -177,6 +262,10 @@ var WorldGen = (function () {
       var heights = new Int16Array(CHUNK * CHUNK);
       var x, z, y, wx, wz, h, i;
 
+      // biome band per column, cached for passes 2-4 (avoids recomputing the
+      // vnoise lookup 3-4x per column across passes).
+      var biomes = new Uint8Array(CHUNK * CHUNK); // 0 cold, 1 temperate, 2 desert, 3 jungle
+
       // -- pass 1: columns (bedrock / stone / soil / top / water) --
       for (z = 0; z < CHUNK; z++) {
         for (x = 0; x < CHUNK; x++) {
@@ -185,16 +274,28 @@ var WorldGen = (function () {
           h = terrainHeight(wx, wz);
           heights[z * CHUNK + x] = h;
 
+          var bn = biomeNoise(wx, wz);
+          var biome = (bn < BIOME_COLD) ? 0 : (bn < BIOME_DESERT) ? 1 : (bn < BIOME_JUNGLE) ? 2 : 3;
+          biomes[z * CHUNK + x] = biome;
+          // cold biome lowers the effective snow line dramatically so whole
+          // regions read as snowy regardless of hill height (vs. the plain
+          // altitude gate elsewhere), giving biomeNoise real visual effect.
+          var effSnowLine = (biome === 0) ? (SEA + 2) : snowLine(wx, wz);
+
           var soil = 3 + (h32(wx, wz, S_SOIL) & 1);    // 3–4 soil layers
           var top, under;
+          var isBeach = false;
           if (h <= SEA - 2) {
             // submerged floor: sand shallows, gravel beds in patches
             var floorPatch = vnoise(S_PATCH, wx / 7.3, wz / 7.3);
             top = under = (floorPatch > 0.62) ? GRAVEL : SAND;
           } else if (h <= SEA + 1) {
             top = under = SAND;                        // beaches (sea level ±1)
-          } else if (h >= snowLine(wx, wz)) {
-            top = SNOW_GRASS; under = DIRT;            // high-altitude caps
+            isBeach = true;
+            // Part III: clay patches in beach/riverbed columns at sea level
+            if (vnoise(S_PATCH, wx / 5.1 + 19.0, wz / 5.1 - 7.0) > 0.72) top = under = CLAY;
+          } else if (h >= effSnowLine) {
+            top = SNOW_GRASS; under = DIRT;            // high-altitude caps / cold biome
           } else {
             top = GRASS; under = DIRT;
             var pv = vnoise(S_PATCH, wx / 7.3, wz / 7.3);
@@ -206,10 +307,38 @@ var WorldGen = (function () {
           for (y = 1; y <= h; y++) {
             if (y === h) b[idx(x, y, z)] = top;
             else if (y >= h - soil) b[idx(x, y, z)] = under;
-            else b[idx(x, y, z)] = STONE;
+            else {
+              // Part III: granite/diorite/andesite blob patches replace
+              // plain stone below y≈40 (own value-noise channel, same
+              // blob-threshold technique as the S_PATCH gravel/sand patches
+              // above, at a lower frequency so blobs span many blocks).
+              var variant = STONE;
+              if (y < 40) {
+                var sv = vnoise(S_STONEVAR, wx / 11.0, wz / 11.0) +
+                         (vnoise(S_STONEVAR + 1, x * 0.6, y * 0.6) - 0.5) * 0.2;
+                if (sv > 0.74) variant = GRANITE;
+                else if (sv > 0.6) variant = DIORITE;
+                else if (sv > 0.5) variant = ANDESITE;
+              }
+              b[idx(x, y, z)] = variant;
+            }
           }
           if (h < SEA) {
             for (y = h + 1; y <= SEA; y++) b[idx(x, y, z)] = WATER;
+            // Part III: cold-biome lakes freeze at the surface
+            if (biome === 0) {
+              var freezeIdx = idx(x, SEA, z);
+              b[freezeIdx] = (rnd(S_BIOME + 3, wx, wz) < 0.35) ? PACKED_ICE : ICE;
+            }
+          }
+          // Part III: mossy cobble — rare shoreline+forest surface variant.
+          // Gate: shoreline column (beach or just-above-beach land edge) in
+          // the temperate biome (stands in for "near water+forest"); replace
+          // a couple of blocks right under the surface with mossy cobble.
+          if (biome === 1 && (isBeach || (h > SEA + 1 && h <= SEA + 3)) &&
+              rnd(S_MOSSY, wx, wz) < 0.05) {
+            var my = h - 1;
+            if (my >= 1) b[idx(x, my, z)] = MOSSY_COBBLE;
           }
         }
       }
@@ -221,6 +350,19 @@ var WorldGen = (function () {
       carveVeins(b, rng, GOLD_ORE, 3, 2, 27, 3, 6);    // y<28
       if (rng() < 0.6) carveVeins(b, rng, DIAMOND_ORE, 1, 1, 15, 3, 4); // rare, y<16
       if (rng() < 0.25) carveVeins(b, rng, DIAMOND_ORE, 1, 1, 15, 3, 4);
+      // -- Part III ore veins (same per-chunk RNG stream, depth-gated) --
+      carveVeins(b, rng, REDSTONE_ORE, 4, 2, 31, 3, 7);   // uncommon, y<32
+      carveVeins(b, rng, LAPIS_ORE, 2, 1, 23, 4, 8);      // uncommon, clusters, y<24
+      if (rng() < 0.5) carveVeins(b, rng, LAPIS_ORE, 1, 1, 23, 4, 7); // occasional 2nd cluster
+      // emerald: y<40 AND only inside the mountain mask -- test the CHUNK
+      // center (cheap single sample; emerald is "very rare" so a per-chunk
+      // gate rather than per-column is intentional and keeps it isolated to
+      // genuine mountain chunks) before rolling any veins at all.
+      if (isMountain(cx * CHUNK + 8, cz * CHUNK + 8) && rng() < 0.35) {
+        carveVeins(b, rng, EMERALD_ORE, 1, 4, 39, 2, 4);
+      }
+      // ancient debris: very rare, isolated single blocks, deep only (y<12)
+      if (rng() < 0.4) carveIsolated(b, rng, ANCIENT_DEBRIS, 1, 1, 11);
 
       // -- pass 3: trees (interior columns only, so the radius-2 canopy
       //    never crosses the chunk border → chunks stay independent) --
@@ -231,24 +373,46 @@ var WorldGen = (function () {
           h = heights[z * CHUNK + x];
           if (b[idx(x, h, z)] !== GRASS) continue;     // grass only (skips beaches,
           if (rnd(S_TREE, wx, wz) >= 0.022) continue;  //  snow, gravel patches)
-          placeTree(b, x, z, h, wx, wz);
+          placeTree(b, x, z, h, wx, wz, biomes[z * CHUNK + x] === 3 /* jungle */);
         }
       }
 
-      // -- pass 4: decorations (tallgrass tufts + the odd flower) --
+      // -- pass 4: decorations (tallgrass tufts + the odd flower, plus
+      //    Part III's biome-gated cactus/melon/pumpkin/mushroom) --
       for (z = 0; z < CHUNK; z++) {
         for (x = 0; x < CHUNK; x++) {
           h = heights[z * CHUNK + x];
           if (h + 1 >= WORLD_H || h <= SEA) continue;
-          if (b[idx(x, h, z)] !== GRASS) continue;     // tree roots turned to dirt
-          i = idx(x, h + 1, z);
-          if (b[i] !== AIR) continue;                  // canopy/trunk already there
           wx = cx * CHUNK + x;
           wz = cz * CHUNK + z;
-          var r = rnd(S_DECO, wx, wz);
-          if (r < 0.055) b[i] = TALLGRASS;
-          else if (r < 0.068) {
-            b[i] = (h32(wx, wz, S_DECO + 1) & 1) ? FLOWER_RED : FLOWER_YELLOW;
+          var biome4 = biomes[z * CHUNK + x];
+          var surfaceId = b[idx(x, h, z)];
+          i = idx(x, h + 1, z);
+          if (b[i] !== AIR) continue;                  // canopy/trunk already there
+
+          if (surfaceId === GRASS) {
+            var r = rnd(S_DECO, wx, wz);
+            if (r < 0.055) { b[i] = TALLGRASS; continue; }
+            else if (r < 0.068) {
+              b[i] = (h32(wx, wz, S_DECO + 1) & 1) ? FLOWER_RED : FLOWER_YELLOW;
+              continue;
+            }
+            // Part III: melon/pumpkin fields in the jungle band; rare
+            // mushroom pockets in temperate/jungle (dark-forest flavor).
+            var r2 = rnd(S_DECO2, wx, wz);
+            if (biome4 === 3 && r2 < 0.02) {
+              b[i] = (h32(wx, wz, S_DECO2 + 1) & 1) ? MELON : PUMPKIN;
+            } else if ((biome4 === 1 || biome4 === 3) && r2 > 0.988) {
+              b[i] = (h32(wx, wz, S_DECO2 + 2) & 1) ? MUSHROOM_RED : MUSHROOM_BROWN;
+            }
+          } else if (surfaceId === SAND && biome4 === 2) {
+            // Part III: cactus in the desert band, short 1-3 tall stack
+            if (rnd(S_DECO2 + 3, wx, wz) < 0.03) {
+              var cactusH = 1 + (h32(wx, wz, S_DECO2 + 4) % 3);   // 1..3
+              for (var cy = 0; cy < cactusH && h + 1 + cy < WORLD_H; cy++) {
+                b[idx(x, h + 1 + cy, z)] = CACTUS;
+              }
+            }
           }
         }
       }

@@ -210,27 +210,44 @@ var Commands = (function () {
 
     // -- /give --
     register('give', {
-      usage: '/give <blockKey|id> [count]',
-      help: { key: 'vox.cmd.give.help', en: 'Add blocks to your inventory' },
+      usage: '/give <blockKey|id|itemId> [count]',
+      help: { key: 'vox.cmd.give.help', en: 'Add blocks or items to your inventory' },
       exec: function (args, c) {
         if (!args[0]) { usageErr(this); return; }
-        var def = null;
-        if (typeof Blocks !== 'undefined') {
-          def = Blocks.byKey(args[0].toLowerCase());
+        var giveId = null, giveKind = null, giveName = null, maxN = 576;
+
+        // Part III (§4): try an Items-registered string id first (sword_iron,
+        // helmet_diamond, bucket_water, ...) -- item ids never collide with a
+        // block key/numeric id, so checking both in either order is safe.
+        if (typeof Items !== 'undefined' && Items.isItem(args[0])) {
+          giveId = args[0];
+          giveKind = 'item';
+          giveName = Items.nameOf(args[0]);
+          maxN = 1; // gear never stacks (contract §4) -- /give ignores any count for items
+        } else if (typeof Blocks !== 'undefined') {
+          var def = Blocks.byKey(args[0].toLowerCase());
           if (!def && /^\d+$/.test(args[0])) def = Blocks.byId(parseInt(args[0], 10));
+          if (def && def.placeable) {
+            giveId = def.id;
+            giveKind = 'block';
+            giveName = t(def.i18nKey, def.name);
+          }
         }
-        if (!def || !def.placeable) {
-          err(tf('vox.cmd.give.noBlock', 'Unknown block: {b}', { b: args[0] }));
+
+        if (giveId === null) {
+          err(tf('vox.cmd.give.noBlock', 'Unknown block or item: {b}', { b: args[0] }));
           return;
         }
-        var n = Math.max(1, Math.min(576, parseInt(args[1], 10) || 1));
-        var left = c.game.inventory ? c.game.inventory.add(def.id, n) : n;
-        var name = t(def.i18nKey, def.name);
+        var n = Math.max(1, Math.min(maxN, parseInt(args[1], 10) || 1));
+        // Inventory.add(id, n) infers block-vs-item purely from id's JS type
+        // (string -> item, number -> block, see inventory.js's inferKind) --
+        // giveKind above is only used for the /give-side count/message logic.
+        var left = c.game.inventory ? c.game.inventory.add(giveId, n) : n;
         if (left > 0) {
           err(tf('vox.cmd.give.full', 'Inventory full ({n} left over)', { n: left }));
         }
         if (left < n) {
-          say(tf('vox.cmd.give.done', 'Gave {n} × {name}', { n: n - left, name: name }));
+          say(tf('vox.cmd.give.done', 'Gave {n} × {name}', { n: n - left, name: giveName }));
         }
       }
     });
@@ -415,6 +432,59 @@ var Commands = (function () {
         }).catch(function (e) {
           err(tf('vox.cmd.save.fail', 'Save failed: {msg}', { msg: (e && e.message) || 'error' }));
         });
+      }
+    });
+
+    // -- /difficulty (contract §6): peaceful/easy/normal/hard. Host-only when
+    // hosted, exactly like /time above — the CLIENT never gates this itself,
+    // it always routes the request through Net when connected and trusts the
+    // server to authorize (server sends back an error/chat line if the caller
+    // isn't the host, mirroring Game.setTime's existing routing contract).
+    register('difficulty', {
+      usage: '/difficulty <peaceful|easy|normal|hard>',
+      help: { key: 'vox.cmd.difficulty.help', en: 'Set the world difficulty' },
+      exec: function (args, c) {
+        var d = (args[0] || '').toLowerCase();
+        if (['peaceful', 'easy', 'normal', 'hard'].indexOf(d) === -1) {
+          err(tf('vox.cmd.difficulty.unknown', 'Unknown difficulty: {d} (use peaceful, easy, normal, or hard)',
+            { d: args[0] || '' }));
+          return;
+        }
+        if (typeof c.game.setDifficulty !== 'function') {
+          err(t('vox.cmd.difficulty.unavailable', 'Difficulty switching is unavailable'));
+          return;
+        }
+        c.game.setDifficulty(d);   // Game routes through Net when hosted (host-only, server-authorized), else applies locally
+        var dname = t('vox.difficulty.' + d, d.charAt(0).toUpperCase() + d.slice(1));
+        say(tf('vox.cmd.difficulty.done', 'Difficulty set to {d}', { d: dname }));
+      }
+    });
+
+    // -- /gamerule keepInventory <true|false> (contract §6). Same host-only-
+    // when-hosted routing posture as /difficulty and /time: only `keepInventory`
+    // is implemented this pass (the syntax leaves room for more rules later).
+    register('gamerule', {
+      usage: '/gamerule keepInventory <true|false>',
+      help: { key: 'vox.cmd.gamerule.help', en: 'Set a world rule (currently: keepInventory)' },
+      exec: function (args, c) {
+        var rule = (args[0] || '').toLowerCase();
+        if (rule !== 'keepinventory') {
+          err(tf('vox.cmd.gamerule.unknownRule', 'Unknown game rule: {r} (use keepInventory)',
+            { r: args[0] || '' }));
+          return;
+        }
+        var raw = (args[1] || '').toLowerCase();
+        if (raw !== 'true' && raw !== 'false') {
+          err(tf('vox.cmd.gamerule.badValue', 'Invalid value: {v} (use true or false)', { v: args[1] || '' }));
+          return;
+        }
+        if (typeof c.game.setKeepInventory !== 'function') {
+          err(t('vox.cmd.gamerule.unavailable', 'Game rules are unavailable'));
+          return;
+        }
+        var kv = (raw === 'true');
+        c.game.setKeepInventory(kv);   // Game routes through Net when hosted (host-only, server-authorized), else applies locally
+        say(tf('vox.cmd.gamerule.done', 'Game rule keepInventory set to {v}', { v: kv ? 'true' : 'false' }));
       }
     });
   }

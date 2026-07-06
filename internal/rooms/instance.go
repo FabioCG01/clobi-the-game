@@ -17,14 +17,14 @@ import (
 // advances the timeTicks counter by exactly 1 per tick — the two 20s are the
 // same pinned rate, not a coincidence to be divided out.
 const (
-	tickHz       = 20                   // server timeTicks advance rate
-	tickPeriod   = time.Second / tickHz // 50ms
-	movesHz      = 10                   // batched 'moves' broadcast rate
+	tickHz       = 20                    // server timeTicks advance rate
+	tickPeriod   = time.Second / tickHz  // 50ms
+	movesHz      = 10                    // batched 'moves' broadcast rate
 	movesPeriod  = time.Second / movesHz // 100ms
-	timeBcast    = 10 * time.Second     // batched 'time' broadcast interval
-	autoflush    = 10 * time.Second     // dirty-chunk flush interval
-	emptyTimeout = 60 * time.Second     // janitor: close after this long empty
-	ticksPerDay  = 24000                // Minecraft-style day length
+	timeBcast    = 10 * time.Second      // batched 'time' broadcast interval
+	autoflush    = 10 * time.Second      // dirty-chunk flush interval
+	emptyTimeout = 60 * time.Second      // janitor: close after this long empty
+	ticksPerDay  = 24000                 // Minecraft-style day length
 )
 
 // Rate limits pinned by the contract §3.3/§5.
@@ -38,6 +38,18 @@ const (
 
 const defaultCap = 8
 
+// Combat constants pinned by the contract §5.2/§7.
+const (
+	maxHP           = 20.0
+	hpRegenPerTick  = 1.0 / (4 * tickHz) // +1 hp per 4s, applied every 20Hz tick
+	regenIdleWindow = 30 * time.Second   // no damage taken for this long -> regen resumes
+	hitRange        = 4.5                // blocks, attacker-to-target
+	hitCooldown     = 350 * time.Millisecond
+	fistDamage      = 1.0
+	armorReductionK = 0.04 // dmg * max(0.2, 1 - armorPoints*armorReductionK)
+	minDamageMult   = 0.2
+)
+
 // Player is one connected participant in a live Instance.
 type Player struct {
 	ID       string // stable per-connection id, assigned on join
@@ -50,14 +62,34 @@ type Player struct {
 	// Live transform, updated by 'move' frames (client-authoritative per
 	// the contract's security posture — movement is never server-validated
 	// for physics, only relayed).
-	mu       sync.Mutex
-	Pos      [3]float64
-	Yaw      float64
-	Pitch    float64
-	Swing    float64
-	Crouch   bool
-	Fly      bool
-	changed  bool // has this player's state changed since the last 'moves' batch?
+	mu      sync.Mutex
+	Pos     [3]float64
+	Yaw     float64
+	Pitch   float64
+	Swing   float64
+	Crouch  bool
+	Fly     bool
+	changed bool // has this player's state changed since the last 'moves' batch?
+
+	// Held item + worn armor, carried optionally on 'move' per contract §9/
+	// §5.2 ("extend the move message shape with an optional 'held'/'armor'
+	// field... backward-compatible/optional so older-shaped move messages...
+	// don't break"). Zero values (HeldID=="", Armor all "") mean empty-hand/
+	// no-armor, which is also what a pre-Part-III client implicitly sends by
+	// omitting the fields entirely.
+	HeldID   string // item id ("" = empty hand) or numeric block id as string
+	HeldKind string // "block" | "item" | "" (empty hand)
+	Armor    ArmorSet
+
+	// Combat state (contract §5.2): authoritative HP, regen bookkeeping, and
+	// the attacker-side hit cooldown. Guarded by mu alongside the transform
+	// fields since 'health'/'moves' broadcasts and hit-validation all read
+	// these from goroutines other than the player's own read loop.
+	HP           float64
+	Dead         bool
+	lastDamageAt time.Time // zero = never damaged (regen freely once past spawn)
+	lastHitAt    time.Time // last time THIS player's hit{} was accepted (attacker cooldown)
+	hpChanged    bool      // HP changed since the last 'health' broadcast check
 
 	conn wsConn
 
@@ -73,6 +105,15 @@ type Player struct {
 
 	closeOnce sync.Once
 	closed    atomic.Bool
+}
+
+// ArmorSet mirrors the contract §5.2/§5.5 armor field: one item id (or "")
+// per slot. Carried optionally on 'move' (see Player.Armor doc above).
+type ArmorSet struct {
+	Helmet string `json:"helmet"`
+	Chest  string `json:"chest"`
+	Legs   string `json:"legs"`
+	Boots  string `json:"boots"`
 }
 
 // snapshot copies the fields needed for a 'moves'/'join'/'welcome' entry
@@ -95,6 +136,21 @@ func (p *Player) modeSnapshot() string {
 	return p.Mode
 }
 
+// hpSnapshot returns the player's current authoritative HP and dead flag.
+func (p *Player) hpSnapshot() (hp float64, dead bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.HP, p.Dead
+}
+
+// heldSnapshot returns the player's currently-held item id/kind for
+// third-person rendering by other viewers (contract §9).
+func (p *Player) heldSnapshot() (id, kind string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.HeldID, p.HeldKind
+}
+
 // Instance is one live, in-memory room: the runtime for a single world being
 // played right now. Exactly one Instance may exist per world at a time,
 // which Manager enforces (see rooms.go). Instance state mirrors the
@@ -110,20 +166,31 @@ type Instance struct {
 	onEmpty func(*Instance) // Manager.closeIfStillEmpty, invoked by the janitor
 
 	// ---- mutable state, guarded by mu ----
-	mu         sync.Mutex
-	access     string // "public"|"password"|"friends"|"private"
-	pinHash    string // bcrypt hash, "" unless access=="password"
-	hostID     string // current host's Player.ID ("" if no players)
-	hostName   string // current host's display name (cached so HostUsername() is lock-cheap... still locked)
-	cap        int
-	spawn      [3]float64
-	timeTicks  int64
-	deltas     map[string]map[uint16]uint8 // chunkKey -> index -> blockId
-	dirty      map[string]bool             // chunkKey -> needs flush
-	players    map[string]*Player          // Player.ID -> player
-	lastEmpty  time.Time                   // zero while non-empty; set when it becomes empty
-	nextPID    uint64
-	closed     bool
+	mu        sync.Mutex
+	access    string // "public"|"password"|"friends"|"private"
+	pinHash   string // bcrypt hash, "" unless access=="password"
+	hostID    string // current host's Player.ID ("" if no players)
+	hostName  string // current host's display name (cached so HostUsername() is lock-cheap... still locked)
+	cap       int
+	spawn     [3]float64
+	timeTicks int64
+	deltas    map[string]map[uint16]uint8 // chunkKey -> index -> blockId
+	dirty     map[string]bool             // chunkKey -> needs flush
+	players   map[string]*Player          // Player.ID -> player
+	lastEmpty time.Time                   // zero while non-empty; set when it becomes empty
+	nextPID   uint64
+	closed    bool
+
+	// Combat/mob/drop state (contract §5.2/§6/§7/§10). difficulty/
+	// keepInventory persist through the SAME worlds.settings jsonb object as
+	// cap/spawn/time (parseSettings/flushSettings below), not a second path.
+	difficulty          string // "peaceful"|"easy"|"normal"|"hard"
+	keepInventory       bool
+	mobs                map[string]*Mob  // Mob.ID -> mob
+	drops               map[string]*Drop // Drop.ID -> drop
+	nextMobID           uint64
+	nextDropID          uint64
+	lastMobSpawnAttempt time.Time
 
 	// lifecycle control
 	stopCh   chan struct{}
@@ -145,11 +212,16 @@ type instanceConfig struct {
 }
 
 // worldSettings mirrors the jsonb shape stored in worlds.settings (contract
-// §1: `{cap:int (2..8, default 8), spawn:[x,y,z]|null, time:int ticks}`).
+// §1: `{cap:int (2..8, default 8), spawn:[x,y,z]|null, time:int ticks}`,
+// extended by Part III §6: "Both persist in `worlds.settings` jsonb...
+// alongside existing `{cap,spawn,time}`" — same object, two more keys, never
+// a second persistence path).
 type worldSettings struct {
-	Cap   int        `json:"cap"`
-	Spawn *[3]float64 `json:"spawn"`
-	Time  int64       `json:"time"`
+	Cap           int         `json:"cap"`
+	Spawn         *[3]float64 `json:"spawn"`
+	Time          int64       `json:"time"`
+	Difficulty    string      `json:"difficulty"`
+	KeepInventory bool        `json:"keepInventory"`
 }
 
 // newInstance builds an Instance from a config. The initial host is
@@ -163,36 +235,76 @@ func newInstance(cfg instanceConfig) *Instance {
 		cfg.deltas = make(map[string]map[uint16]uint8)
 	}
 	inst := &Instance{
-		RoomID:    cfg.roomID,
-		World:     cfg.world,
-		CreatedAt: cfg.createdAt,
-		store:     cfg.store,
-		friends:   cfg.friends,
-		onEmpty:   cfg.onEmpty,
-		access:    cfg.access,
-		pinHash:   cfg.pinHash,
-		hostName:  cfg.host,
-		cap:       st.Cap,
-		spawn:     st.spawnOrDefault(),
-		timeTicks: st.Time,
-		deltas:    cfg.deltas,
-		dirty:     make(map[string]bool),
-		players:   make(map[string]*Player),
-		lastEmpty: cfg.createdAt, // empty since creation until the first join
-		stopCh:    make(chan struct{}),
+		RoomID:        cfg.roomID,
+		World:         cfg.world,
+		CreatedAt:     cfg.createdAt,
+		store:         cfg.store,
+		friends:       cfg.friends,
+		onEmpty:       cfg.onEmpty,
+		access:        cfg.access,
+		pinHash:       cfg.pinHash,
+		hostName:      cfg.host,
+		cap:           st.Cap,
+		spawn:         st.spawnOrDefault(),
+		timeTicks:     st.Time,
+		deltas:        cfg.deltas,
+		dirty:         make(map[string]bool),
+		players:       make(map[string]*Player),
+		lastEmpty:     cfg.createdAt, // empty since creation until the first join
+		difficulty:    st.Difficulty,
+		keepInventory: st.KeepInventory,
+		mobs:          make(map[string]*Mob),
+		drops:         make(map[string]*Drop),
+		stopCh:        make(chan struct{}),
 	}
 	return inst
 }
 
+// defaultDifficulty matches vanilla convention (contract §6: "Default false"
+// for keepInventory; difficulty has no explicit pinned default, "normal" is
+// the conventional Minecraft default and what an unset/legacy world's
+// settings jsonb — which predates §6 — should resolve to).
+const defaultDifficulty = "normal"
+
 func parseSettings(raw json.RawMessage) worldSettings {
-	st := worldSettings{Cap: defaultCap}
+	st := worldSettings{Cap: defaultCap, Difficulty: defaultDifficulty}
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &st) // tolerate missing/partial settings
 	}
 	if st.Cap < 2 || st.Cap > 8 {
 		st.Cap = defaultCap
 	}
+	if !validDifficulty(st.Difficulty) {
+		st.Difficulty = defaultDifficulty
+	}
 	return st
+}
+
+// validDifficulty reports whether d is one of the four recognized
+// difficulty levels (contract §6: peaceful|easy|normal|hard).
+func validDifficulty(d string) bool {
+	switch d {
+	case "peaceful", "easy", "normal", "hard":
+		return true
+	}
+	return false
+}
+
+// difficultyDamageMult maps difficulty to the PvE-only hostile-mob damage
+// scale (contract §6: "easy/normal/hard scale damage 0.5/1.0/1.5×; only
+// affects PvE, never PvP damage"). peaceful never reaches this (hostiles are
+// despawned/never spawn), but returns 0 defensively if ever called.
+func difficultyDamageMult(d string) float64 {
+	switch d {
+	case "peaceful":
+		return 0
+	case "easy":
+		return 0.5
+	case "hard":
+		return 1.5
+	default: // "normal" and any unrecognized value
+		return 1.0
+	}
 }
 
 func (st worldSettings) spawnOrDefault() [3]float64 {
@@ -246,6 +358,22 @@ func (inst *Instance) TimeTicks() int64 {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	return inst.timeTicks
+}
+
+// Difficulty returns the instance's current difficulty level (contract §6).
+func (inst *Instance) Difficulty() string {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.difficulty
+}
+
+// KeepInventory returns the instance's current keepInventory gamerule value
+// (contract §6). Purely informational to clients — see §5.2's note that
+// inventory itself is never server-tracked.
+func (inst *Instance) KeepInventory() bool {
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return inst.keepInventory
 }
 
 // checkPin bcrypt-compares an offered plaintext PIN against the stored hash.
@@ -323,9 +451,23 @@ func (inst *Instance) tickLoop() {
 		case <-inst.stopCh:
 			return
 		case <-ticker.C:
+			// Runs at the pinned 20Hz tick rate (§3.1): time advancement and
+			// HP regen accumulation share this cadence (regen is a "+1/4s"
+			// rate, i.e. hpRegenPerTick per 20Hz tick, per contract §5.2).
+			// The resulting 'health' broadcast is batched into the 10Hz
+			// cadence below (broadcastHealth), not fired 20x/sec per player.
 			inst.advanceTime()
+			inst.accumulateHPRegen()
 		case <-movesTicker.C:
+			// Health-change broadcasts, mob AI, and drop bookkeeping piggy-
+			// back on the SAME 10Hz cadence already used for player 'moves'
+			// (contract §7: "batched like `moves`... @ 10Hz") rather than a
+			// new ticker, per "extend the existing [loop]... do not spawn a
+			// SEPARATE goroutine".
 			inst.broadcastMoves()
+			inst.broadcastHealth()
+			inst.tickMobs()
+			inst.tickDrops()
 		case <-timeTicker.C:
 			inst.broadcastTime()
 		}
@@ -336,6 +478,62 @@ func (inst *Instance) advanceTime() {
 	inst.mu.Lock()
 	inst.timeTicks = (inst.timeTicks + 1) % ticksPerDay
 	inst.mu.Unlock()
+}
+
+// accumulateHPRegen applies the contract §5.2 regen rule (+1/4s once 30s
+// have passed since the player last took damage) to every connected,
+// non-dead player at the 20Hz tick rate, marking hpChanged so the next 10Hz
+// broadcastHealth pass picks it up. Dead players do not regen (they wait for
+// 'respawn'). Splitting accumulation (20Hz) from broadcast (10Hz, see
+// broadcastHealth) avoids firing a 'health' frame 20x/sec per regenerating
+// player — regen is batched exactly like 'moves' already is.
+func (inst *Instance) accumulateHPRegen() {
+	now := time.Now()
+	inst.mu.Lock()
+	for _, p := range inst.players {
+		p.mu.Lock()
+		if !p.Dead && p.HP < maxHP && (p.lastDamageAt.IsZero() || now.Sub(p.lastDamageAt) >= regenIdleWindow) {
+			p.HP += hpRegenPerTick
+			if p.HP > maxHP {
+				p.HP = maxHP
+			}
+			p.hpChanged = true
+		}
+		p.mu.Unlock()
+	}
+	inst.mu.Unlock()
+}
+
+// broadcastHealth sends 'health' for every player whose HP changed since the
+// last pass (regen accumulation or a hit), at the same 10Hz cadence as
+// 'moves'. This is the ONLY place hpChanged is cleared, so a change is never
+// dropped even if it happens between two broadcastHealth calls.
+func (inst *Instance) broadcastHealth() {
+	inst.mu.Lock()
+	if len(inst.players) == 0 {
+		inst.mu.Unlock()
+		return
+	}
+	type healthUpdate struct {
+		id string
+		hp float64
+	}
+	var updates []healthUpdate
+	for _, p := range inst.players {
+		p.mu.Lock()
+		if p.hpChanged {
+			updates = append(updates, healthUpdate{p.ID, p.HP})
+			p.hpChanged = false
+		}
+		p.mu.Unlock()
+	}
+	recipients := inst.connSlice()
+	inst.mu.Unlock()
+
+	for _, u := range updates {
+		frame := mustMarshal(wsFrame{"t": "health", "id": u.id, "hp": u.hp, "max": maxHP})
+		broadcastRaw(recipients, frame)
+	}
 }
 
 // SetTime is the host-only `/time` command / `time{set:ticks}` WS message.
@@ -449,12 +647,16 @@ func (inst *Instance) flushDirty() {
 	_ = inst.store.SaveDeltas(worldID, out) // best-effort; a failed flush retries next tick since keys are only cleared locally
 }
 
-// flushSettings persists spawn/time/cap back to worlds.settings (called on
-// close, mirroring the contract: "on close: flush deltas + settings
-// (spawn/time)").
+// flushSettings persists spawn/time/cap/difficulty/keepInventory back to
+// worlds.settings (called on close, mirroring the contract: "on close:
+// flush deltas + settings (spawn/time)", extended by Part III §6 to also
+// carry difficulty/keepInventory through the SAME jsonb object).
 func (inst *Instance) flushSettings() {
 	inst.mu.Lock()
-	st := worldSettings{Cap: inst.cap, Time: inst.timeTicks}
+	st := worldSettings{
+		Cap: inst.cap, Time: inst.timeTicks,
+		Difficulty: inst.difficulty, KeepInventory: inst.keepInventory,
+	}
 	spawn := inst.spawn
 	st.Spawn = &spawn
 	worldID := inst.World.ID

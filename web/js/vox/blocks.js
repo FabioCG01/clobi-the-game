@@ -2,8 +2,17 @@
 //
 // Single global: Blocks.
 //
-// The registry pins the 34 stable block ids from the architecture contract §4
-// (0 = air … 33 = lozenge). Every def carries the full flag set the mesher,
+// The registry pins the 34 stable block ids from Part I's architecture
+// contract §4 (0 = air … 33 = lozenge) PLUS the Part III (ARCHITECTURE-
+// COMBAT.md §3) expansion ids 34-61 (redstone/lapis/emerald/ancient-debris
+// ores, granite/diorite/andesite stone variants, clay/terracotta, mossy
+// cobble, ice/packed ice, cactus/melon/pumpkin/mushrooms/vine, 6 more wool
+// colors, and 4 decorative deep-cave/novelty blocks) PLUS id 62 (`flowing_
+// water`, contract §13a's liquid-flow fix — registered here on behalf of a
+// sibling agent's world.js, which needed this id but has no public hook
+// into this file's registry; see the add() call for id 62 for the full
+// cross-agent coordination note). Ids are stable and never renumbered — new
+// ids only ever append. Every def carries the full flag set the mesher,
 // physics and HUD need:
 //   def = { id, key, name, i18nKey, solid, opaque, liquid, cross, cutout,
 //           translucent, hardness, emissive, placeable, drops,
@@ -14,7 +23,8 @@
 // (16×16 tiles of 16×16 px, hand-crafted pixel patterns + deterministic
 // per-pixel hash noise — no external images, ever). Blocks.buildAtlas(gl)
 // uploads it NEAREST/NEAREST without mips and returns half-texel-inset tile
-// UVs so neighbouring tiles never bleed.
+// UVs so neighbouring tiles never bleed. 63 tiles now used of the 256-slot
+// (16×16 tile) grid — ATLAS_TILES stays 16, there was already headroom.
 //
 // Depends on: nothing (I18n is optional and guarded — only Blocks.nameOf
 // touches it; consumers normally call I18n.t(def.i18nKey, def.name) directly).
@@ -58,7 +68,28 @@ var Blocks = (function () {
     WOOL_YELLOW: 27, WOOL_BLACK: 28,
     FLOWER_RED: 29, FLOWER_YELLOW: 30, TALLGRASS: 31,
     SANDSTONE_TOP: 32, SANDSTONE_SIDE: 33, OBSIDIAN: 34,
-    TUX_FACE: 35, TUX_TOP: 36, LOZENGE: 37
+    TUX_FACE: 35, TUX_TOP: 36, LOZENGE: 37,
+
+    // -- Part III additions (§3): new ids 34-61, new tiles 38+ --
+    REDSTONE_ORE: 38, LAPIS_ORE: 39, EMERALD_ORE: 40, ANCIENT_DEBRIS: 41,
+    GRANITE: 42, DIORITE: 43, ANDESITE: 44,
+    CLAY: 45, TERRACOTTA: 46, MOSSY_COBBLE: 47,
+    ICE: 48, PACKED_ICE: 49,
+    CACTUS_TOP: 50, CACTUS_SIDE: 51,
+    MELON_TOP: 52, MELON_SIDE: 53,
+    PUMPKIN_TOP: 54, PUMPKIN_SIDE: 55,
+    MUSHROOM_RED_TOP: 56, MUSHROOM_RED_SIDE: 57,
+    MUSHROOM_BROWN_TOP: 58, MUSHROOM_BROWN_SIDE: 59,
+    VINE: 60,
+    WOOL_ORANGE: 61, WOOL_PURPLE: 62, WOOL_CYAN: 63,
+    WOOL_PINK: 64, WOOL_GRAY: 65, WOOL_LIGHTGRAY: 66,
+    TNT_LOZENGE: 67, END_STONE: 68, BASALT: 69, QUARTZ_BLOCK: 70,
+
+    // -- §13a liquid-flow fix: flowing_water is block id 62 (next free id
+    // after this section's own top, 61 = quartz_block) -- see the big
+    // integration note in world.js (owned by a sibling agent in this build
+    // wave) for why the id landed here; this IS that coordination landing. --
+    FLOWING_WATER: 71
   };
 
   // ================================================================
@@ -253,6 +284,23 @@ var Blocks = (function () {
       var f = 1 + (R(x, y, 45) - 0.5) * 0.06;
       put(x, y, sh(col, f));
       if (R(x, y, 46) > 0.97) put(x, y, [168, 204, 250]); // sparkle
+    }
+  }
+
+  // -- flowing_water (id 62, §13a liquid-flow fix): same water palette, but
+  // a higher-frequency, two-axis wave interference + extra jitter/sparkle
+  // reads as visibly more agitated/turbulent than calm source water, per
+  // the contract's "same tile art tinted slightly more turbulent" note. --
+  function paintFlowingWater(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var w = Math.sin((y * 1.6 + Math.sin(x * 1.3) * 2.4) * 1.7) * 0.6 +
+              Math.sin((x * 1.4 - y * 0.5) * 1.9) * 0.4;             // choppier interference
+      var col = [62, 111, 216];
+      if (w > 0.45) col = [100, 150, 244];         // brighter, more frequent crests
+      else if (w < -0.45) col = [44, 80, 172];      // deeper troughs
+      var f = 1 + (R(x, y, 145) - 0.5) * 0.10;      // wider jitter than still water
+      put(x, y, sh(col, f));
+      if (R(x, y, 146) > 0.93) put(x, y, [176, 210, 252]); // more frequent sparkle/foam
     }
   }
 
@@ -546,6 +594,288 @@ var Blocks = (function () {
     }
   }
 
+  // ================================================================
+  // ---- Part III tile painters (contract §3, new ids 34-61) -------
+  // Same procedural hand-drawn-in-code style + palette philosophy as
+  // the block above: speckle/blotch bases, deterministic hash jitter,
+  // half-texel-inset UVs (handled globally by tileUV(), unchanged).
+  // ================================================================
+
+  // -- redstone/lapis/emerald/ancient-debris ore: reuse the ore cluster
+  //    layout but on top of a stone base painted fresh (own salts so the
+  //    blotch pattern differs slightly from the vanilla-tier ores). --
+  function orePainterAlt(base, hi, saltOff) {
+    return function (put, R) {
+      paintStone(put, function (x, y, salt) { return R(x, y, salt + saltOff); });
+      for (var c = 0; c < ORE_CLUSTERS.length; c++) {
+        var cl = ORE_CLUSTERS[c];
+        for (var i = 0; i < cl.length; i++) {
+          var col = (i === 0) ? hi : base;
+          put(cl[i][0], cl[i][1], sh(col, 1 + (R(cl[i][0], cl[i][1], 18 + saltOff) - 0.5) * 0.12));
+        }
+      }
+    };
+  }
+
+  // ancient debris: darker, sparser stone base (deep-cave feel) + a couple
+  // of warm bronze fleck clusters rather than a bright gem cluster.
+  function paintAncientDebris(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var q = R(x >> 2, y >> 2, 201) + (R(x, y, 202) - 0.5) * 0.25;
+      var col = [58, 48, 46];
+      if (q < 0.33) col = [44, 36, 35];
+      else if (q > 0.75) col = [70, 58, 55];
+      put(x, y, sh(col, 1 + (R(x, y, 203) - 0.5) * 0.08));
+    }
+    var clusters = [[3, 3], [4, 4], [11, 3], [12, 4], [4, 11], [11, 12], [12, 11]];
+    for (var c = 0; c < clusters.length; c++) {
+      var cx2 = clusters[c][0], cy2 = clusters[c][1];
+      put(cx2, cy2, sh([168, 118, 74], 1 + (R(cx2, cy2, 204) - 0.5) * 0.15));
+    }
+  }
+
+  // -- granite/diorite/andesite: stone-family blotch base recolored per
+  //    variant, plus a scatter of contrasting mineral flecks. --
+  function stoneVariantPainter(base, dark, light, fleck, saltOff) {
+    return function (put, R) {
+      for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+        var q = R(x >> 1, y >> 1, 210 + saltOff) + (R(x, y, 211 + saltOff) - 0.5) * 0.3;
+        var col = base;
+        if (q < 0.32) col = dark;
+        else if (q > 0.72) col = light;
+        var f = 1 + (R(x, y, 212 + saltOff) - 0.5) * 0.1;
+        put(x, y, sh(col, f));
+        if (R(x, y, 213 + saltOff) > 0.9) put(x, y, sh(fleck, 0.9 + R(x, y, 214 + saltOff) * 0.2));
+      }
+    };
+  }
+
+  // -- clay: cool pale-gray-blue, tight speckle --
+  function paintClay(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var r = R(x, y, 220);
+      var col = [163, 173, 186];
+      if (r < 0.25) col = [147, 158, 172];
+      else if (r > 0.85) col = [181, 190, 201];
+      put(x, y, sh(col, 1 + (R(x, y, 221) - 0.5) * 0.07));
+    }
+  }
+
+  // -- terracotta: warm baked-clay orange with darker mortar-like flecks --
+  function paintTerracotta(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var q = R(x >> 1, y >> 1, 222);
+      var col = [178, 103, 73];
+      if (q < 0.3) col = [156, 86, 60];
+      else if (q > 0.75) col = [196, 122, 89];
+      var f = 1 + (R(x, y, 223) - 0.5) * 0.1;
+      put(x, y, sh(col, f));
+      if (R(x, y, 224) > 0.965) put(x, y, [122, 66, 46]); // fired specks
+    }
+  }
+
+  // -- mossy cobble: the existing cobble pattern with patches of moss green
+  //    painted into the mortar seams and onto some stones. --
+  function paintMossyCobble(put, R) {
+    paintCobble(put, R);
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var m = R(x >> 1, y >> 1, 230);
+      if (m > 0.62) {
+        var moss = mix([69, 128, 48], [98, 168, 62], R(x, y, 231));
+        put(x, y, sh(moss, 1 + (R(x, y, 232) - 0.5) * 0.14));
+      }
+    }
+  }
+
+  // -- ice: pale translucent-blue with faint crack fracture lines --
+  function paintIce(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var r = R(x, y, 240);
+      var col = [178, 220, 244];
+      if (r < 0.25) col = [156, 202, 232];
+      else if (r > 0.85) col = [206, 236, 251];
+      put(x, y, sh(col, 1 + (R(x, y, 241) - 0.5) * 0.06), 235); // slightly translucent look
+    }
+    // faint diagonal fracture streaks
+    var lines = [[2, 1, 5], [9, 3, 6], [4, 9, 5], [11, 10, 4]];
+    for (var l = 0; l < lines.length; l++) {
+      var lx = lines[l][0], ly = lines[l][1], ln = lines[l][2];
+      for (var k = 0; k < ln; k++) {
+        var xx = lx + k, yy = ly + ((k * 3) >> 2);
+        if (xx > 15 || yy > 15) break;
+        put(xx, yy, sh([225, 245, 253], 0.95), 235);
+      }
+    }
+  }
+
+  // -- packed ice: opaque, denser variant (brighter, no translucency) --
+  function paintPackedIce(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var q = R(x >> 1, y >> 1, 245);
+      var col = [191, 226, 247];
+      if (q < 0.3) col = [170, 210, 238];
+      else if (q > 0.75) col = [214, 238, 252];
+      put(x, y, sh(col, 1 + (R(x, y, 246) - 0.5) * 0.07));
+      if (R(x, y, 247) > 0.95) put(x, y, [232, 247, 255]); // glinting facets
+    }
+  }
+
+  // -- cactus: waxy green body with vertical rib shading + spine dots --
+  function paintCactusSide(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var rib = Math.abs(((x + 2) % 5) - 2);            // 0 at rib center
+      var col = [59, 140, 62];
+      if (rib === 0) col = [46, 116, 50];               // rib groove
+      else if (rib >= 2) col = [77, 168, 76];           // rib crest highlight
+      var f = 1 + (R(x, y, 250) - 0.5) * 0.08;
+      put(x, y, sh(col, f));
+      if (rib === 2 && (y & 3) === 1) put(x, y, [214, 224, 176]); // spines
+    }
+  }
+  function paintCactusTop(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var dx = x - 7.5, dy = y - 7.5;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      var col;
+      if (d > 7.2) col = [46, 116, 50];
+      else if (d > 5.8) col = [59, 140, 62];
+      else col = [82, 172, 78];
+      put(x, y, sh(col, 1 + (R(x, y, 251) - 0.5) * 0.07));
+    }
+  }
+
+  // -- melon: green rind with pale racing stripes on the side, mottled
+  //    yellow-green flesh top (cut face look, matches Minecraft's read) --
+  function paintMelonSide(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var band = ((x + 1) >> 1) & 1;
+      var col = band ? [58, 140, 46] : [78, 172, 58];
+      var f = 1 + (R(x, y, 255) - 0.5) * 0.08;
+      put(x, y, sh(col, f));
+      if (R(x, y, 256) > 0.96) put(x, y, [140, 214, 96]); // speckle
+    }
+  }
+  function paintMelonTop(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var q = R(x >> 1, y >> 1, 257);
+      var col = [96, 186, 68];
+      if (q < 0.3) col = [78, 166, 54];
+      else if (q > 0.75) col = [118, 206, 84];
+      put(x, y, sh(col, 1 + (R(x, y, 258) - 0.5) * 0.07));
+    }
+  }
+
+  // -- pumpkin: orange ribbed rind (side) + stem-and-rind top --
+  function paintPumpkinSide(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var rib = Math.abs(((x + 2) % 4) - 2);
+      var col = [219, 122, 32];
+      if (rib === 0) col = [186, 98, 22];                // groove
+      else if (rib >= 1.5) col = [237, 148, 52];         // ridge highlight
+      var f = 1 + (R(x, y, 260) - 0.5) * 0.08;
+      put(x, y, sh(col, f));
+    }
+  }
+  function paintPumpkinTop(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var dx = x - 7.5, dy = y - 7.5;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      var col;
+      if (d > 6.5) col = [186, 98, 22];
+      else if (x >= 6 && x <= 9 && y >= 2 && y <= 9) col = [111, 82, 40]; // stem
+      else col = [219, 122, 32];
+      put(x, y, sh(col, 1 + (R(x, y, 261) - 0.5) * 0.08));
+    }
+  }
+
+  // -- mushroom blocks: spotty cap top, pore-textured underside/side --
+  function mushroomTopPainter(base, dark, spot) {
+    return function (put, R) {
+      for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+        var f = 1 + (R(x, y, 265) - 0.5) * 0.08;
+        put(x, y, sh(base, f));
+      }
+      var spots = [[3, 3], [9, 2], [12, 6], [2, 9], [7, 8], [11, 12], [4, 13], [13, 13]];
+      for (var i = 0; i < spots.length; i++) {
+        var sx = spots[i][0], sy = spots[i][1];
+        put(sx, sy, sh(spot, 1 + (R(sx, sy, 266) - 0.5) * 0.1));
+        put((sx + 1) & 15, sy, sh(dark, 0.9));
+      }
+    };
+  }
+  function mushroomSidePainter(base) {
+    return function (put, R) {
+      for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+        var q = R(x >> 1, y >> 1, 270);
+        var f = (q > 0.6) ? 0.85 : 1.0;                  // pore dimples
+        put(x, y, sh(base, f * (1 + (R(x, y, 271) - 0.5) * 0.08)));
+      }
+    };
+  }
+
+  // -- vine: sparse hanging cutout, deep leafy green with gaps to alpha 0 --
+  function paintVine(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var strand = (x + ((y * 3) >> 2)) % 5;
+      if (strand > 1 && R(x, y, 275) > 0.35) continue;   // gaps -> cutout
+      var col = [42, 108, 40];
+      if (R(x, y, 276) > 0.8) col = [58, 138, 50];
+      put(x, y, sh(col, 1 + (R(x, y, 277) - 0.5) * 0.12));
+    }
+  }
+
+  // -- tnt lozenge: mint-and-red diagonal stripes (decorative, no explosion) --
+  function paintTntLozenge(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var stripe = ((x + y) >> 1) & 1;
+      var col = stripe ? [214, 62, 58] : [214, 240, 226];
+      var f = 1 + (R(x, y, 280) - 0.5) * 0.06;
+      put(x, y, sh(col, f));
+    }
+    // thin white lozenge outline band top/bottom (echoes T.LOZENGE branding)
+    for (var x2 = 0; x2 < 16; x2++) {
+      put(x2, 1, [248, 251, 250]);
+      put(x2, 14, [248, 251, 250]);
+    }
+  }
+
+  // -- sunset stone (reskinned end stone): pale gold-tan pitted rock --
+  function paintEndStone(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var q = R(x >> 1, y >> 1, 285);
+      var col = [223, 210, 164];
+      if (q < 0.28) col = [206, 190, 142];
+      else if (q > 0.75) col = [236, 226, 188];
+      var f = 1 + (R(x, y, 286) - 0.5) * 0.08;
+      put(x, y, sh(col, f));
+      if (R(x, y, 287) < 0.04) put(x, y, [178, 162, 116]); // pits
+    }
+  }
+
+  // -- basalt: dark banded volcanic rock, vertical striations --
+  function paintBasalt(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var band = Math.abs(((x + 1) % 6) - 3);
+      var col = [66, 65, 70];
+      if (band === 0) col = [50, 49, 54];
+      else if (band >= 2) col = [80, 79, 85];
+      var f = 1 + (R(x, y, 290) - 0.5) * 0.1;
+      put(x, y, sh(col, f));
+      if (R(x, y, 291) > 0.97) put(x, y, [110, 108, 116]); // mineral glints
+    }
+  }
+
+  // -- quartz block: bright clean white with faint vertical vein lines --
+  function paintQuartzBlock(put, R) {
+    for (var y = 0; y < 16; y++) for (var x = 0; x < 16; x++) {
+      var col = [235, 232, 224];
+      if (((x + 3) % 8) === 0) col = [219, 215, 205];    // subtle seam lines
+      var f = 1 + (R(x, y, 295) - 0.5) * 0.05;
+      put(x, y, sh(col, f));
+      if (R(x, y, 296) > 0.94) put(x, y, [248, 246, 240]); // sheen fleck
+    }
+  }
+
   // ---- painter table (tile index -> painter fn) ----
   var PAINTERS = {};
   PAINTERS[T.GRASS_TOP] = paintGrassTop;
@@ -600,6 +930,42 @@ var Blocks = (function () {
   PAINTERS[T.TUX_FACE] = mapPainter(TUX_ROWS, TUX_LEGEND);
   PAINTERS[T.TUX_TOP] = paintTuxTop;
   PAINTERS[T.LOZENGE] = paintLozenge;
+
+  // -- Part III additions --
+  PAINTERS[T.REDSTONE_ORE] = orePainterAlt([120, 22, 18], [214, 46, 34], 300);
+  PAINTERS[T.LAPIS_ORE] = orePainterAlt([32, 58, 148], [66, 108, 224], 320);
+  PAINTERS[T.EMERALD_ORE] = orePainterAlt([26, 138, 84], [64, 214, 138], 340);
+  PAINTERS[T.ANCIENT_DEBRIS] = paintAncientDebris;
+  PAINTERS[T.GRANITE] = stoneVariantPainter([149, 103, 88], [124, 80, 66], [178, 132, 112], [214, 168, 132], 0);
+  PAINTERS[T.DIORITE] = stoneVariantPainter([206, 206, 210], [180, 180, 186], [232, 232, 236], [150, 150, 158], 20);
+  PAINTERS[T.ANDESITE] = stoneVariantPainter([132, 133, 138], [110, 111, 116], [154, 155, 160], [96, 97, 102], 40);
+  PAINTERS[T.CLAY] = paintClay;
+  PAINTERS[T.TERRACOTTA] = paintTerracotta;
+  PAINTERS[T.MOSSY_COBBLE] = paintMossyCobble;
+  PAINTERS[T.ICE] = paintIce;
+  PAINTERS[T.PACKED_ICE] = paintPackedIce;
+  PAINTERS[T.CACTUS_TOP] = paintCactusTop;
+  PAINTERS[T.CACTUS_SIDE] = paintCactusSide;
+  PAINTERS[T.MELON_TOP] = paintMelonTop;
+  PAINTERS[T.MELON_SIDE] = paintMelonSide;
+  PAINTERS[T.PUMPKIN_TOP] = paintPumpkinTop;
+  PAINTERS[T.PUMPKIN_SIDE] = paintPumpkinSide;
+  PAINTERS[T.MUSHROOM_RED_TOP] = mushroomTopPainter([196, 62, 56], [158, 44, 40], [238, 232, 222]);
+  PAINTERS[T.MUSHROOM_RED_SIDE] = mushroomSidePainter([224, 220, 208]);
+  PAINTERS[T.MUSHROOM_BROWN_TOP] = mushroomTopPainter([150, 108, 78], [122, 86, 60], [180, 158, 132]);
+  PAINTERS[T.MUSHROOM_BROWN_SIDE] = mushroomSidePainter([224, 220, 208]);
+  PAINTERS[T.VINE] = paintVine;
+  PAINTERS[T.WOOL_ORANGE] = woolPainter([224, 138, 52]);
+  PAINTERS[T.WOOL_PURPLE] = woolPainter([132, 68, 178]);
+  PAINTERS[T.WOOL_CYAN] = woolPainter([56, 172, 178]);
+  PAINTERS[T.WOOL_PINK] = woolPainter([232, 154, 186]);
+  PAINTERS[T.WOOL_GRAY] = woolPainter([88, 90, 96]);
+  PAINTERS[T.WOOL_LIGHTGRAY] = woolPainter([164, 168, 172]);
+  PAINTERS[T.TNT_LOZENGE] = paintTntLozenge;
+  PAINTERS[T.END_STONE] = paintEndStone;
+  PAINTERS[T.BASALT] = paintBasalt;
+  PAINTERS[T.QUARTZ_BLOCK] = paintQuartzBlock;
+  PAINTERS[T.FLOWING_WATER] = paintFlowingWater;
 
   // ================================================================
   // ---- atlas canvas + GL upload ----------------------------------
@@ -732,6 +1098,50 @@ var Blocks = (function () {
   add({ id: 31, key: 'obsidian', name: 'Obsidian', hardness: 15.0, tiles: T.OBSIDIAN });
   add({ id: 32, key: 'tux_block', name: 'Tux Block', hardness: 1.5, tiles: { top: T.TUX_TOP, side: T.TUX_FACE, bottom: T.TUX_TOP } });
   add({ id: 33, key: 'lozenge', name: "Fisherman's Block", hardness: 1.0, emissive: 0.3, tiles: T.LOZENGE });
+
+  // -- Part III additions (§3): new stable ids 34-61, never renumbered --
+  add({ id: 34, key: 'redstone_ore', name: 'Redstone Ore', hardness: 3.5, emissive: 0.15, tiles: T.REDSTONE_ORE });
+  add({ id: 35, key: 'lapis_ore', name: 'Lapis Ore', hardness: 3.5, tiles: T.LAPIS_ORE });
+  add({ id: 36, key: 'emerald_ore', name: 'Emerald Ore', hardness: 4.5, tiles: T.EMERALD_ORE });
+  add({ id: 37, key: 'netherite_scrap_ore', name: 'Ancient Debris', hardness: 6.0, tiles: T.ANCIENT_DEBRIS });
+  add({ id: 38, key: 'granite', name: 'Granite', hardness: 2.5, tiles: T.GRANITE });
+  add({ id: 39, key: 'diorite', name: 'Diorite', hardness: 2.5, tiles: T.DIORITE });
+  add({ id: 40, key: 'andesite', name: 'Andesite', hardness: 2.5, tiles: T.ANDESITE });
+  add({ id: 41, key: 'clay', name: 'Clay', hardness: 0.6, tiles: T.CLAY });
+  add({ id: 42, key: 'terracotta', name: 'Terracotta', hardness: 1.25, tiles: T.TERRACOTTA });
+  add({ id: 43, key: 'mossy_cobble', name: 'Mossy Cobblestone', hardness: 3.0, tiles: T.MOSSY_COBBLE });
+  add({ id: 44, key: 'ice', name: 'Ice', opaque: false, translucent: true, hardness: 0.5, tiles: T.ICE });
+  add({ id: 45, key: 'packed_ice', name: 'Packed Ice', hardness: 0.5, tiles: T.PACKED_ICE });
+  add({ id: 46, key: 'cactus', name: 'Cactus', opaque: false, cutout: true, hardness: 0.4, tiles: { top: T.CACTUS_TOP, side: T.CACTUS_SIDE, bottom: T.CACTUS_TOP } });
+  add({ id: 47, key: 'melon', name: 'Melon Block', hardness: 1.0, tiles: { top: T.MELON_TOP, side: T.MELON_SIDE, bottom: T.MELON_TOP } });
+  add({ id: 48, key: 'pumpkin', name: 'Pumpkin', hardness: 1.0, tiles: { top: T.PUMPKIN_TOP, side: T.PUMPKIN_SIDE, bottom: T.PUMPKIN_TOP } });
+  add({ id: 49, key: 'mushroom_red', name: 'Red Mushroom Block', hardness: 0.2, tiles: { top: T.MUSHROOM_RED_TOP, side: T.MUSHROOM_RED_SIDE, bottom: T.MUSHROOM_RED_SIDE } });
+  add({ id: 50, key: 'mushroom_brown', name: 'Brown Mushroom Block', hardness: 0.2, tiles: { top: T.MUSHROOM_BROWN_TOP, side: T.MUSHROOM_BROWN_SIDE, bottom: T.MUSHROOM_BROWN_SIDE } });
+  add({ id: 51, key: 'vine', name: 'Vines', solid: false, opaque: false, cutout: true, hardness: 0.2, drops: 0, tiles: T.VINE });
+  add({ id: 52, key: 'wool_orange', name: 'Orange Wool', hardness: 1.0, tiles: T.WOOL_ORANGE });
+  add({ id: 53, key: 'wool_purple', name: 'Purple Wool', hardness: 1.0, tiles: T.WOOL_PURPLE });
+  add({ id: 54, key: 'wool_cyan', name: 'Cyan Wool', hardness: 1.0, tiles: T.WOOL_CYAN });
+  add({ id: 55, key: 'wool_pink', name: 'Pink Wool', hardness: 1.0, tiles: T.WOOL_PINK });
+  add({ id: 56, key: 'wool_gray', name: 'Gray Wool', hardness: 1.0, tiles: T.WOOL_GRAY });
+  add({ id: 57, key: 'wool_lightgray', name: 'Light Gray Wool', hardness: 1.0, tiles: T.WOOL_LIGHTGRAY });
+  add({ id: 58, key: 'tnt_lozenge', name: 'Lozenge Charge', hardness: 0, tiles: T.TNT_LOZENGE });
+  add({ id: 59, key: 'end_stone', name: 'Sunset Stone', hardness: 4.0, tiles: T.END_STONE });
+  add({ id: 60, key: 'basalt', name: 'Basalt', hardness: 3.0, tiles: T.BASALT });
+  add({ id: 61, key: 'quartz_block', name: 'Quartz Block', hardness: 2.0, tiles: T.QUARTZ_BLOCK });
+
+  // -- §13a liquid-flow fix (cross-agent coordination): `flowing_water`,
+  // id 62, the next free id after this section's own top (61). world.js
+  // (owned by a sibling agent building the water-flow simulation) needed
+  // this id registered here — it left a detailed integration note in its
+  // own header explaining it could only hardcode id 62 as an ASSUMED
+  // constant (blocks.js's add() is a private closure, not a public
+  // extension point) and asked for this exact shape: same liquid/physics/
+  // rendering flags as `water` (mirrors id 11 exactly for solid/opaque/
+  // liquid/translucent/hardness/placeable/drops) so flowing water swims,
+  // collides and meshes identically to source water, but with its own
+  // slightly-more-turbulent tile art so it reads as the spreading, lower-
+  // strength liquid it represents rather than a duplicate of calm water.
+  add({ id: 62, key: 'flowing_water', name: 'Flowing Water', solid: false, opaque: false, liquid: true, translucent: true, hardness: Infinity, placeable: false, drops: 0, tiles: T.FLOWING_WATER });
 
   // ---- public API ----
   return {
