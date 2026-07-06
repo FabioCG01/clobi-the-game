@@ -364,10 +364,56 @@ var Physics = (function () {
       body.fallDistance += -movedY;
     }
 
-    var dx = body.vel.x * dt;
+    // Sneak edge-guard (Minecraft behaviour): while sneaking on solid
+    // ground, horizontal movement that would push the WHOLE foot area past
+    // the supporting block edge is clamped so the player can lean over an
+    // edge but never fall off. Per-axis (X clamped independently of Z) so
+    // sliding along an edge still works; each axis backs off in halves
+    // toward the largest still-supported distance instead of hard-zeroing,
+    // which keeps the approach to the lip smooth. Never active in water or
+    // flight (sneak means "descend" there).
+    function hasSupportAt(offX, offZ) {
+      // Any solid block directly under any foot corner of the AABB shifted
+      // by (offX, offZ)? Sampled a hair below the feet. The corners are
+      // inset by EDGE_INSET: the Y-sweep's own cell iteration applies an
+      // internal epsilon, so it "loses" the ground fractionally EARLIER
+      // than an exact corner test would predict — without the inset the
+      // guard let the body lean to the mathematically-last supported
+      // millimeter, the sweep then dropped onGround one frame early at
+      // that same spot, the guard disengaged, and the residual push
+      // carried the sneaker over the lip (found by frame-tracing the exact
+      // edge frames). Stopping 5cm shy of the exact cell boundary keeps
+      // the guard's idea of "supported" strictly inside the sweep's.
+      var m = 0.05;
+      var y = min[1] - 0.05;
+      return isSolidAt(world, min[0] + m + offX, y, min[2] + m + offZ) ||
+             isSolidAt(world, max[0] - m + offX, y, min[2] + m + offZ) ||
+             isSolidAt(world, min[0] + m + offX, y, max[2] - m + offZ) ||
+             isSolidAt(world, max[0] - m + offX, y, max[2] - m + offZ);
+    }
+
+    // Decoupled from body.onGround on purpose: the guard also stays armed
+    // when the sweep's epsilon briefly reports airborne right at a lip
+    // while the (inset) foot area still has real support.
+    var edgeGuard = !!input.sneak && mode !== 'fly' && !body.inWater &&
+                    (body.onGround || hasSupportAt(0, 0));
+
+    function clampToSupported(d, axisIsX) {
+      if (!edgeGuard || d === 0) return d;
+      var test = d;
+      for (var it = 0; it < 4; it++) {
+        if (axisIsX ? hasSupportAt(test, 0) : hasSupportAt(0, test)) return test;
+        test *= 0.5;
+      }
+      return 0;
+    }
+
+    var dx = clampToSupported(body.vel.x * dt, true);
+    if (edgeGuard && dx !== body.vel.x * dt) body.vel.x = 0;
     if (sweepAxis(world, min, max, 0, dx) !== dx) body.vel.x = 0;
 
-    var dz = body.vel.z * dt;
+    var dz = clampToSupported(body.vel.z * dt, false);
+    if (edgeGuard && dz !== body.vel.z * dt) body.vel.z = 0;
     if (sweepAxis(world, min, max, 2, dz) !== dz) body.vel.z = 0;
 
     body.pos.x = (min[0] + max[0]) * 0.5;

@@ -129,6 +129,7 @@ var Game = (function () {
   var skin = null, skinTex = null, skinModel = 'classic';
 
   var renderDist = 6, fovDeg = 70, lutAmount = 0.85;
+  var exposure = 0.82;   // user-tunable brightness (Settings); <1 = darker than the old always-1.0 look
   var dev = false;
 
   var paused = false, dead = false;
@@ -1248,6 +1249,7 @@ var Game = (function () {
     if (player.perspective === 0 && skinTex && active && !uiBlocked()) drawArm(env);
     Renderer.endFrame({
       lutAmount: lutAmount,
+      exposure: exposure,
       vibrance: 0.18,
       gamma: 1.0,
       underwater: under,
@@ -1270,6 +1272,7 @@ var Game = (function () {
       ((typeof Input !== 'undefined' && Input.isTouch) ? 4 : 6), 2, 10);
     fovDeg = clamp(s.fov || 70, 30, 110);
     lutAmount = clamp((typeof s.lut === 'number' ? s.lut : 85) / 100, 0, 1);
+    exposure = clamp((typeof s.exp === 'number' ? s.exp : 82) / 100, 0.5, 1.3);
   }
 
   // GPU-side one-time boot shared by start() and startMultiplayer() (Part II):
@@ -1885,6 +1888,10 @@ var Game = (function () {
       fovDeg = clamp(deg, 30, 110);
       persistSettings({ fov: fovDeg });
     },
+    setExposure: function (e) {
+      exposure = clamp(+e || 0.82, 0.5, 1.3);
+    },
+
     setLutAmount: function (a) {
       lutAmount = clamp(a, 0, 1);
       persistSettings({ lut: Math.round(lutAmount * 100) });

@@ -352,7 +352,7 @@ const Renderer = (function () {
       'in vec2 vNDC;',
       'uniform sampler2D uScene;',
       'uniform sampler2D uLut;',
-      'uniform float uLutAmount, uVibrance, uGamma, uUnderwater, uVignette, uTime;',
+      'uniform float uLutAmount, uVibrance, uGamma, uUnderwater, uVignette, uTime, uExposure;',
       'out vec4 outColor;',
       lutFn,
       'void main() {',
@@ -375,6 +375,10 @@ const Renderer = (function () {
       // for already-saturated up-close pixels (where 1-sat is small either
       // way): distant haze stays gently hazy instead of blowing out, and
       // up-close color keeps its full vivid punch.
+      // user-tunable exposure (Settings "Brightness"): applied BEFORE the
+      // tonemap so darkening compresses the whole curve naturally instead
+      // of just dimming the final image (which would murk the shadows).
+      '  c *= uExposure;',
       '  c = c / (c + 0.35) * 1.22;',                              // filmic tonemap
       '  float l = dot(c, vec3(0.299, 0.587, 0.114));',            // vibrance
       '  float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));',
@@ -905,6 +909,7 @@ const Renderer = (function () {
     const vibrance = opts.vibrance !== undefined ? opts.vibrance : 0.18;
     const gamma = opts.gamma !== undefined ? opts.gamma : 1.0;
     const vignette = opts.vignette !== undefined ? opts.vignette : 0.15;
+    const exposure = opts.exposure !== undefined ? opts.exposure : 1.0;
     const underwater = opts.underwater ? 1.0 : 0.0;
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -926,6 +931,7 @@ const Renderer = (function () {
     u1f(us, 'uGamma', gamma);
     u1f(us, 'uUnderwater', underwater);
     u1f(us, 'uVignette', vignette);
+    u1f(us, 'uExposure', exposure);
     u1f(us, 'uTime', nowSec());
     fsq.draw(progs.post);
 

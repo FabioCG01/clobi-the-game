@@ -749,6 +749,7 @@ var HUD = (function () {
       dist: (g && g.dist) || s.dist || 6,
       fov: (g && g.fov) || s.fov || 70,
       lut: (g && typeof g.lut === 'number') ? g.lut : (typeof s.lut === 'number' ? s.lut : 85),
+      exp: (typeof s.exp === 'number') ? s.exp : 82,
       touch: s.touch || 'm'
     };
   }
@@ -825,6 +826,11 @@ var HUD = (function () {
       function (v) {
         if (game && game.setLutAmount) game.setLutAmount(v / 100);
         saveSettings({ lut: v });
+      });
+    sliderRow(dom.settings, t('vox.settings.brightness', 'Brightness'), 50, 130, 1, cur.exp,
+      function (v) {
+        if (game && game.setExposure) game.setExposure(v / 100);
+        saveSettings({ exp: v });
       });
 
     if (isTouch()) {
