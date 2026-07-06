@@ -60,6 +60,16 @@ const Renderer = (function () {
   const CLOUD_Y = 118;
   const CLOUD_RANGE = 640;
 
+  // ---- polish tuning (Part III smoothness pass) -----------------------------
+  // Selection/crack/sky feel tweaks -- uniforms + one shader literal only, no
+  // new textures, all deliberately subtle.
+  const SEL_PULSE_AMP = 0.05;      // wireframe pulse: adds 0..2*amp grey shimmer
+  const SEL_PULSE_HZ = 1.6;        // wireframe pulse speed (cycles/s)
+  const CRACK_ALPHA_BASE = 0.35;   // crack decal alpha as breaking starts...
+  const CRACK_ALPHA_RAMP = 0.50;   // ...ramping to base+ramp at full progress
+                                   // (base+ramp = 0.85, the old fixed alpha)
+  const SKY_DITHER = 1.0 / 255.0;  // sky gradient banding dither amplitude
+
   // ---- day/night keyframe states (see ARCHITECTURE-3D.md section 7, polished
   // per ARCHITECTURE-COMBAT.md §13/§14) ----------
   const ENV_DAY = {
@@ -172,6 +182,10 @@ const Renderer = (function () {
     '    float tw = 0.7 + 0.3 * sin(uTicks * 0.02 + hh * 40.0);',
     '    col += vec3(star * tw) * duskDepth * smoothstep(0.0, 0.20, dir.y) * 0.85;',
     '  }',
+    // +/-0.5-LSB hash dither on the final gradient so the smooth sky doesn't
+    // band on 8-bit backbuffers (cheap, no texture; SKY_DITHER tunes/disables).
+    '  float dith = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;',
+    '  col += dith * float(' + SKY_DITHER + ');',
     '  outColor = vec4(col, 1.0);',
     '}'
   ].join('\n');
@@ -256,8 +270,9 @@ const Renderer = (function () {
     '#version 300 es',
     'precision highp float;',
     'uniform vec3 uColor;',
-    'out vec4 outColor;',
-    'void main() { outColor = vec4(uColor, 1.0); }'
+    'uniform float uPulse;',    // subtle emissive pulse, CPU-computed per frame
+    'out vec4 outColor;',       // (additive so it shows on the black wire too)
+    'void main() { outColor = vec4(clamp(uColor + vec3(uPulse), 0.0, 1.0), 1.0); }'
   ].join('\n');
 
   const VS_CRACK = [
@@ -280,11 +295,12 @@ const Renderer = (function () {
     'precision highp float;',
     'in vec2 vUV;',
     'uniform sampler2D uCrack;',
+    'uniform float uAlpha;',    // progress-blended decal alpha (see drawSelection)
     'out vec4 outColor;',
     'void main() {',
     '  vec4 t = texture(uCrack, vUV);',
     '  if (t.a < 0.1) discard;',
-    '  outColor = vec4(t.rgb, t.a * 0.85);',
+    '  outColor = vec4(t.rgb, t.a * uAlpha);',
     '}'
   ].join('\n');
 
@@ -822,6 +838,9 @@ const Renderer = (function () {
     uM4(us, 'uProjView', camera.projView);
     u3f(us, 'uOffset', target.x, target.y, target.z);
     u3f(us, 'uColor', 0.0, 0.0, 0.0);
+    // very subtle sin pulse (0..2*SEL_PULSE_AMP added grey) so the targeted
+    // block reads clearly without turning the outline into a beacon
+    u1f(us, 'uPulse', SEL_PULSE_AMP * (1.0 + Math.sin(nowSec() * SEL_PULSE_HZ * Math.PI * 2)));
     try { gl.lineWidth(2); } catch (e) { /* clamped to 1 on many GPUs */ }
     selVao.draw(24, gl.LINES);
 
@@ -834,6 +853,9 @@ const Renderer = (function () {
       uM4(uc, 'uProjView', camera.projView);
       u3f(uc, 'uOffset', target.x, target.y, target.z);
       u1f(uc, 'uUVOff', stage * 0.2);
+      // alpha rides TOTAL break progress so mining reads as continuous
+      // between the 5 discrete crack stages instead of stepping
+      u1f(uc, 'uAlpha', CRACK_ALPHA_BASE + CRACK_ALPHA_RAMP * Math.min(1, progress));
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, crackTex);
       u1i(uc, 'uCrack', 0);

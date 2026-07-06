@@ -55,6 +55,7 @@ var Physics = (function () {
   var WATER_VDRAG = 3;        // vertical drag rate in water (1/s)
   var SWIM_UP_SPEED = 3.9;    // max upward swim speed
   var SWIM_ACCEL = 25;        // upward accel while holding jump in water
+  var CLIMB_OUT_SPEED = 8.5;  // vertical boost when swimming against a mountable ledge (edge climb-out)
   var MAX_SINK = 3.2;         // terminal sink speed in water
 
   var EYE_STAND = 1.62;
@@ -270,6 +271,32 @@ var Physics = (function () {
       if (input.jump) {
         body.vel.y = Math.min(body.vel.y + SWIM_ACCEL * dt, SWIM_UP_SPEED);
       }
+
+      // Edge climb-out assist (the "can't jump out of water at a land edge"
+      // bug): swimming, holding jump AND pushing toward a solid ledge whose
+      // top is standable (two clear cells above it) gets a strong upward
+      // boost so the body actually clears the lip. Plain SWIM_ACCEL alone
+      // tops out with the feet ~1.6 blocks below the eye line — physically
+      // never enough to mount land that sits a block above the surface, so
+      // without this a swimmer just bobs against the shore forever.
+      // Minecraft solves the same situation with its fluid-collision jump;
+      // this is the equivalent: probe half a block ahead in the wish
+      // direction at foot level and one above (shore is usually +1 over the
+      // water surface), and require headroom so we never boost into a wall.
+      if (input.jump && wishMag > 0.1) {
+        var aheadX = body.pos.x + wx * (body.width * 0.5 + 0.35);
+        var aheadZ = body.pos.z + wz * (body.width * 0.5 + 0.35);
+        var footY = Math.floor(body.pos.y);
+        var ledgeY = -1;
+        if (isSolidAt(world, aheadX, footY, aheadZ)) ledgeY = footY;
+        else if (isSolidAt(world, aheadX, footY + 1, aheadZ)) ledgeY = footY + 1;
+        if (ledgeY >= 0 &&
+            !isSolidAt(world, aheadX, ledgeY + 1, aheadZ) &&
+            !isSolidAt(world, aheadX, ledgeY + 2, aheadZ)) {
+          if (body.vel.y < CLIMB_OUT_SPEED) body.vel.y = CLIMB_OUT_SPEED;
+        }
+      }
+
       if (body.vel.y < -MAX_SINK) body.vel.y = -MAX_SINK;
     } else {
       // ---- walking / falling (also: grounded-in-shallow-water, per the

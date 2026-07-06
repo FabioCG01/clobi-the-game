@@ -71,7 +71,11 @@
 /* Reset + base                                                     */
 /* ---------------------------------------------------------------- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; }
+/* The app is a stack of full-viewport screens: the DOCUMENT must never
+   scroll, no matter where an absolutely-positioned HUD/modal element ends
+   up ("UI renders past the screen"). Screens that need scrolling
+   self-scroll via overflow:auto on their own #screen-* box below. */
+html, body { height: 100%; overflow: hidden; }
 
 body {
   font-family: var(--font-display);
@@ -331,6 +335,14 @@ body::after {
 /* ---------------------------------------------------------------- */
 /* MODALS + POPUPS (live in #modal-root)                            */
 /* ---------------------------------------------------------------- */
+/* #modal-root itself: fixed, full-viewport, click-through. Modal DOM can
+   therefore never contribute to document flow or page scroll; children
+   (the injected .modal-overlay / .mk-overlay) opt back into pointer
+   events. z aligns with the modal stratum of the Z-INDEX SCALE (see the
+   3D VOXEL ERA banner below). */
+#modal-root { position: fixed; inset: 0; z-index: 9000; pointer-events: none; }
+#modal-root > * { pointer-events: auto; }
+
 #modal-root .modal-overlay {
   background: rgba(5, 6, 12, .76);
   -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
@@ -479,20 +491,23 @@ body::after {
 #screen-studio input[type="range"],
 #screen-wardrobe input[type="range"],
 #screen-market input[type="range"],
-#modal-root input[type="range"] {
+#modal-root input[type="range"],
+#hud-root input[type="range"] {
   -webkit-appearance: none; appearance: none;
   height: 16px; background: transparent; cursor: pointer; accent-color: var(--cy);
 }
 #screen-studio input[type="range"]::-webkit-slider-runnable-track,
 #screen-wardrobe input[type="range"]::-webkit-slider-runnable-track,
 #screen-market input[type="range"]::-webkit-slider-runnable-track,
-#modal-root input[type="range"]::-webkit-slider-runnable-track {
+#modal-root input[type="range"]::-webkit-slider-runnable-track,
+#hud-root input[type="range"]::-webkit-slider-runnable-track {
   height: 8px; background: var(--bg-deep); border: 2px solid var(--ink);
 }
 #screen-studio input[type="range"]::-webkit-slider-thumb,
 #screen-wardrobe input[type="range"]::-webkit-slider-thumb,
 #screen-market input[type="range"]::-webkit-slider-thumb,
-#modal-root input[type="range"]::-webkit-slider-thumb {
+#modal-root input[type="range"]::-webkit-slider-thumb,
+#hud-root input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 16px; height: 16px; margin-top: -6px;
   background: var(--cy); border: 2px solid var(--ink); box-shadow: 2px 2px 0 0 var(--ink);
@@ -500,13 +515,15 @@ body::after {
 #screen-studio input[type="range"]::-moz-range-track,
 #screen-wardrobe input[type="range"]::-moz-range-track,
 #screen-market input[type="range"]::-moz-range-track,
-#modal-root input[type="range"]::-moz-range-track {
+#modal-root input[type="range"]::-moz-range-track,
+#hud-root input[type="range"]::-moz-range-track {
   height: 8px; background: var(--bg-deep); border: 2px solid var(--ink);
 }
 #screen-studio input[type="range"]::-moz-range-thumb,
 #screen-wardrobe input[type="range"]::-moz-range-thumb,
 #screen-market input[type="range"]::-moz-range-thumb,
-#modal-root input[type="range"]::-moz-range-thumb {
+#modal-root input[type="range"]::-moz-range-thumb,
+#hud-root input[type="range"]::-moz-range-thumb {
   width: 14px; height: 14px; border-radius: 0;
   background: var(--cy); border: 2px solid var(--ink);
 }
@@ -547,6 +564,25 @@ body::after {
 /* Mobile-first: every block is checked at phone widths + safe-area */
 /* insets (the viewport meta uses viewport-fit=cover).              */
 /* ================================================================ */
+
+/* ---------------------------------------------------------------- */
+/* Z-INDEX SCALE — the ONE place that defines stacking. Every .vox-* */
+/* and modal z-index in this file aligns to it; never invent values. */
+/*                                                                   */
+/*   inside #hud-root (its own stacking context):                    */
+/*     0    .vox-hitflash (damage pulse, under all HUD)              */
+/*     auto HUD core: hotbar / bars / armor / badge / labels / debug */
+/*     30   .vox-touch          40  .vox-chat                        */
+/*     50   .vox-inv-panel      60  .vox-paused / .vox-death         */
+/*     70   .vox-title-toast    80  .vox-tooltip                     */
+/*     90   .vox-webgl-error (baseline-owned in hud.js)              */
+/*   page level:                                                     */
+/*     0    #game-canvas        10  #hud-root                        */
+/*     120  CRT body::before/::after                                 */
+/*     9000 #modal-root / .vox-modal-overlay / injected overlays     */
+/*     9500 #menu-toast (menu.js)                                    */
+/*     2147483647 #gag-overlay (gag.js) — ALWAYS on top; never top it*/
+/* ---------------------------------------------------------------- */
 
 /* ---------------------------------------------------------------- */
 /* GAME SCREEN — fullscreen WebGL canvas + DOM HUD overlay          */
@@ -599,10 +635,22 @@ body::after {
   transform: translate(-50%, -50%);
   pointer-events: none;
   mix-blend-mode: difference;        /* readable on any block color */
+  font-size: 0;                      /* hide hud.js's fallback '+' glyph —
+                                        the ::before/::after cross below is
+                                        the one true crosshair */
 }
 .vox-crosshair::before, .vox-crosshair::after { content: ''; position: absolute; background: #fff; }
 .vox-crosshair::before { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
 .vox-crosshair::after  { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+
+/* ---- HUD BOTTOM STACK (LAYOUT CONTRACT) -------------------------
+   One centered vertical column; nothing overlaps at any width ≥320px:
+     bottom  10px  .vox-hotbar    (top edge ≈72px: 48 slot + 10 pad + 4 bd)
+     bottom  78px  .vox-bars      (hearts left | air bubbles right)
+     bottom 102px  .vox-armor-row (4 slots above hearts, COMBAT §8)
+     bottom 140px  .vox-chat      (left-anchored, grows upward)
+   The ≤560px media query moves the whole stack down in lockstep
+   (38px slots -> hotbar top ≈62px). Change these numbers together only. */
 
 /* ---- hotbar (bottom-center) ---- */
 .vox-hotbar {
@@ -625,7 +673,10 @@ body::after {
   border: 2px solid rgba(255, 255, 255, .28);
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
+  /* polish: selection ring / hover glide instead of snapping */
+  transition: border-color .12s ease-out, box-shadow .12s ease-out;
 }
+.vox-slot:hover { border-color: rgba(255, 255, 255, .55); }
 .vox-slot canvas, .vox-slot img { max-width: 100%; max-height: 100%; }
 .vox-slot.sel {
   border-color: var(--gold);
@@ -640,45 +691,82 @@ body::after {
   pointer-events: none;
 }
 
-/* ---- hearts + air bubbles (above the hotbar, survival only) ---- */
-.vox-hearts {
+/* ---- hearts + air bubbles (survival only) ----
+   hud.js nests BOTH inside the .vox-bars wrapper — style them as ONE
+   centered row as wide as the hotbar (hearts left, bubbles right), not
+   as free-floating absolutes: positioning them against the zero-height
+   wrapper is exactly what scattered them across the screen before. */
+.vox-bars {
   position: absolute;
   left: 50%;
-  bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(78px + env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%);
-  display: flex; gap: 3px;
+  width: min(478px, calc(100vw - 12px));   /* = hotbar width */
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
   pointer-events: none;
 }
+.vox-hearts { display: flex; gap: 3px; pointer-events: none; }
 .vox-heart {
   width: 16px; height: 16px;
+  font-size: 0;                      /* hide hud.js's fallback ♥ glyph */
   background: var(--rd);
   clip-path: polygon(50% 100%, 6% 52%, 0 30%, 8% 10%, 30% 2%, 50% 18%, 70% 2%, 92% 10%, 100% 30%, 94% 52%);
   filter: drop-shadow(1px 1px 0 rgba(0, 0, 0, .8));
 }
 .vox-heart.half  { background: linear-gradient(90deg, var(--rd) 0 50%, #3a3f52 50% 100%); }
 .vox-heart.empty { background: #3a3f52; }
-
-.vox-bubbles {
-  position: absolute;
-  left: 50%;
-  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
-  display: flex; gap: 3px;
-  pointer-events: none;
+/* damage pulse — hud.js toggles .hurt on the hearts row when hp drops */
+.vox-heart.hurt,
+.vox-hearts.hurt .vox-heart { animation: vox-heart-hurt .18s ease-out; }
+@keyframes vox-heart-hurt {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.3); }
+  100% { transform: scale(1); }
 }
+
+.vox-bubbles { display: flex; gap: 3px; pointer-events: none; }
 .vox-bubble {
   width: 13px; height: 13px;
+  font-size: 0;                      /* hide hud.js's fallback ● glyph */
   border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, #d9f3ff 0 25%, #6fc5ff 60%, #2a72b8 100%);
   border: 2px solid rgba(5, 6, 12, .8);
 }
+.vox-bubble.empty { background: #3a3f52; opacity: .55; }
 
-/* ---- chat (bottom-left, above the hotbar) ---- */
+/* ---- armor row (Part III §8): 4 small slots above the hearts row ---- */
+.vox-armor-row {
+  position: absolute;
+  left: 50%;
+  bottom: calc(102px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  display: flex; gap: 4px;
+  pointer-events: none;
+}
+.vox-armor-slot {
+  width: 28px; height: 28px;
+  background: rgba(5, 6, 12, .4);
+  border: 2px dashed rgba(255, 255, 255, .25);   /* empty = dim outline */
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  transition: border-color .12s ease-out, background .12s ease-out;
+}
+.vox-armor-slot.filled {
+  border-style: solid;
+  border-color: rgba(255, 255, 255, .45);
+  background: rgba(5, 6, 12, .6);
+}
+.vox-armor-slot canvas { width: 22px; height: 22px; }
+
+/* ---- chat (bottom-left, above the armor row) ---- */
 .vox-chat {
   position: absolute;
   left: calc(8px + env(safe-area-inset-left, 0px));
-  bottom: calc(94px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(140px + env(safe-area-inset-bottom, 0px));
   width: min(480px, calc(100vw - 120px));
+  z-index: 40;                       /* z-scale: chat */
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -703,6 +791,11 @@ body::after {
   font-size: 9px;
   line-height: 1.6;
   word-break: break-word;
+  animation: vox-line-in .14s ease-out;   /* polish: new lines slide in */
+}
+@keyframes vox-line-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: none; }
 }
 .vox-chat-line.err { color: #ff8b96; }
 .vox-chat-line.sys { color: var(--gold); }
@@ -735,6 +828,23 @@ body::after {
   text-shadow: 1px 1px 0 #000;
 }
 
+/* ---- target block/mob name (top-center, under the mode badge) ----
+   Moved out of the bottom stack: at its old bottom:96px it sat right on
+   top of the hearts/armor rows. */
+.vox-target-label {
+  position: absolute;
+  left: 50%;
+  top: calc(44px + env(safe-area-inset-top, 0px));
+  transform: translateX(-50%);
+  max-width: 92vw;
+  text-align: center;
+  font-size: 9px;
+  color: #fff;
+  opacity: .9;
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
 /* ---- low-health / breaking vignette (optional per contract) ---- */
 .vox-break-vignette {
   position: absolute;
@@ -760,25 +870,33 @@ body::after {
   padding: 5px 9px;
   box-shadow: 2px 2px 0 0 rgba(0, 0, 0, .6);
   pointer-events: none;
+  transition: opacity .16s ease-out;   /* hud.js fades via inline opacity */
 }
 
-/* ---- pause / death overlays ---- */
+/* ---- pause / death overlays ----
+   NO `display` here on purpose: the hud.js baseline hides them
+   (.vox-overlay display:none) and hud.js toggles inline flex. A
+   display:flex at this cascade position would show BOTH overlays the
+   moment the game screen loads. */
 .vox-paused, .vox-death {
   position: absolute;
   inset: 0;
-  z-index: 60;
+  z-index: 60;                        /* z-scale: overlays */
   pointer-events: auto;
-  display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  justify-content: safe center;       /* short screens: keep the top reachable */
   gap: 16px;
   padding: 20px;
+  overflow-y: auto;                   /* buttons stay reachable on tiny viewports */
   background: rgba(5, 6, 12, .72);
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
   text-align: center;
+  animation: vox-fade-in .14s ease-out;   /* polish: soft open */
 }
+@keyframes vox-fade-in { from { opacity: 0; } to { opacity: 1; } }
 .vox-death { background: rgba(64, 4, 8, .66); }
 .vox-paused h1, .vox-paused h2, .vox-death h1, .vox-death h2 {
   font-size: clamp(14px, 4vw, 22px);
@@ -799,9 +917,56 @@ body::after {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  transition: background .08s, color .08s;
 }
 .vox-paused button:hover, .vox-death button:hover { background: var(--cy); color: var(--ink); }
 .vox-paused button:active, .vox-death button:active { transform: translate(3px, 3px); box-shadow: 2px 2px 0 0 var(--ink); }
+
+/* pause views: main column + settings panel (hud.js toggles their
+   display; each self-scrolls so the centered overlay never clips) */
+.vox-pause-main {
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 4px;
+  animation: vox-rise-in .14s ease-out;
+}
+.vox-settings {
+  flex-direction: column;
+  gap: 12px;
+  min-width: min(340px, 90vw);
+  max-width: min(92vw, 480px);
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--panel-grad);
+  border: var(--bd) solid var(--ink);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  text-align: left;
+  animation: vox-rise-in .14s ease-out;
+}
+@keyframes vox-rise-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+.vox-set-row { font-family: var(--font-body); font-size: var(--tx-md); color: var(--text); }
+.vox-set-row .vox-set-val { font-family: Consolas, 'Courier New', monospace; color: var(--cy); }
+/* the small touch-size buttons must NOT inherit the big overlay-button
+   sizing that `.vox-paused button` above hands out */
+.vox-paused .vox-touch-sizes button {
+  min-width: 0;
+  flex: 1;
+  padding: 9px 6px;
+  font-size: 8px;
+  box-shadow: var(--shadow-sm);
+}
+.vox-paused .vox-touch-sizes button.sel { background: var(--cy); color: var(--ink); }
+/* death overlay: cause-of-death line under the title (Part III §8) */
+.vox-death-by {
+  font-family: var(--font-body);
+  font-size: var(--tx-lg);
+  color: #ffc4ca;
+  text-shadow: 1px 1px 0 var(--ink);
+}
 
 /* ---- inventory panel (creative palette / survival backpack) ---- */
 .vox-inv-panel {
@@ -817,7 +982,29 @@ body::after {
   width: min(92vw, 560px);
   max-height: min(80vh, 80svh);
   overflow-y: auto;
+  animation: vox-panel-in .14s ease-out;   /* replays on display:none -> block */
 }
+@keyframes vox-panel-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.96); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.vox-inv-title {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: var(--cy);
+  text-shadow: 2px 2px 0 var(--ink);
+}
+.vox-inv-close {
+  width: 34px; height: 34px;
+  font-family: var(--font-display); font-size: 14px; line-height: 1;
+  color: var(--muted);
+  background: var(--bg-deep);
+  border: 2px solid var(--line);
+  cursor: pointer;
+  transition: background .08s, color .08s;
+}
+.vox-inv-close:hover { background: var(--rd); color: var(--ink); border-color: var(--ink); }
 .vox-inv-grid, .vox-hotbar-row {
   display: grid;
   grid-template-columns: repeat(9, minmax(34px, 48px));
@@ -837,6 +1024,7 @@ body::after {
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
   cursor: pointer;
+  transition: border-color .12s ease-out, box-shadow .12s ease-out;
 }
 .vox-inv-cell:hover { border-color: var(--cy); }
 .vox-inv-cell.sel { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold) inset; }
@@ -846,7 +1034,7 @@ body::after {
 /* ---- item tooltip ---- */
 .vox-tooltip {
   position: absolute;
-  z-index: 80;
+  z-index: 80;                       /* z-scale: tooltip (over panels) */
   pointer-events: none;
   font-size: 8px;
   line-height: 1.5;
@@ -856,29 +1044,33 @@ body::after {
   border: 2px solid var(--cy);
   padding: 5px 8px;
   box-shadow: 3px 3px 0 0 rgba(0, 0, 0, .6);
+  animation: vox-tip-in .12s ease-out;    /* replays on display:none -> block */
+}
+@keyframes vox-tip-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
 }
 
-/* ---- big center toast (gamemode changes etc.) ---- */
+/* ---- big center toast (gamemode changes etc.) ----
+   Shown by hud.js toggling .show — NOT inline opacity: the previous
+   always-on `animation … forwards` ran once at init (empty, unseen) and
+   its fill-state then swallowed every later toast permanently. */
 .vox-title-toast {
   position: absolute;
   left: 50%; top: 30%;
-  transform: translate(-50%, -50%);
-  z-index: 70;
+  transform: translate(-50%, -50%) scale(.94);
+  z-index: 70;                       /* z-scale: toast */
   pointer-events: none;
   font-size: clamp(14px, 4vw, 26px);
   letter-spacing: 2px;
   text-align: center;
   color: var(--gold);
   text-shadow: 3px 3px 0 #000, 0 0 22px rgba(255, 210, 74, .45);
-  animation: vox-toast-fade 2.4s ease forwards;
   max-width: 92vw;
+  opacity: 0;
+  transition: opacity .16s ease-out, transform .16s ease-out;
 }
-@keyframes vox-toast-fade {
-  0%   { opacity: 0; transform: translate(-50%, -50%) scale(.82); }
-  12%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  72%  { opacity: 1; }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.04); }
-}
+.vox-title-toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 
 /* ---------------------------------------------------------------- */
 /* TOUCH CONTROLS (§8) — all buttons ≥ 48px, safe-area aware.       */
@@ -895,78 +1087,84 @@ body::after {
 }
 .vox-touch button { pointer-events: auto; touch-action: none; }
 
-/* floating joystick: ring + knob (round on purpose — the app-wide
-   border-radius kill deliberately excludes #screen-game) */
-.vox-joy {
-  position: absolute;
-  width: 128px; height: 128px;
-  margin-left: -64px; margin-top: -64px;   /* centered on its inline left/top */
-  border-radius: 50%;
-  background: rgba(255, 255, 255, .07);
-  border: 2px solid rgba(255, 255, 255, .34);
-  pointer-events: none;
-}
-.vox-joy-knob {
-  position: absolute;
-  left: 50%; top: 50%;
-  width: 54px; height: 54px;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);         /* input.js offsets via transform/left-top */
-  background: rgba(255, 255, 255, .32);
-  border: 2px solid rgba(255, 255, 255, .62);
-  box-shadow: 0 0 14px rgba(0, 0, 0, .35);
-}
+/* Floating joystick (.vox-joy / .vox-joy-knob): DOM, position AND skin are
+   fully owned by input.js inline styles — its size must match the
+   JOY_CAP_PX math there. NO rules here on purpose: the previous duplicate
+   set (128px ring vs the inline 124px, 54px knob vs 48px) was pure dead
+   weight that could only ever drift. Round on purpose — the app-wide
+   border-radius kill deliberately excludes #screen-game. */
 
-/* bottom-right action cluster. Position (left/top/right/bottom) comes from
-   inline styles set in input.js's mkButton()/bottomRight() -- this stylesheet
-   only owns size/color/border so JS stays the single source of truth for
-   layout and never fights a CSS position value set here. */
+/* Touch buttons: POSITION + SIZE are owned by input.js inline styles
+   (mkButton/styleButton + bottomRight()/topRight()). This stylesheet owns
+   THEME only (colors/border/shape/feedback). Never re-add position or
+   size values here: inline styles always win, and the duplicated
+   bookkeeping already caused a silent drift (CSS said pause right:12 /
+   inv right:120 / persp right:174 while input.js said 10/122/178). */
+
+/* bottom-right action cluster: jump / sneak / sprint / fly up / fly down */
 .vox-btn-jump, .vox-btn-sneak, .vox-btn-sprint, .vox-btn-fly-up, .vox-btn-fly-down {
-  position: absolute;
-  min-width: 48px; min-height: 48px;
-  border-radius: 50%;
+  border-radius: 50%;                /* round thumb targets, on purpose */
   display: flex; align-items: center; justify-content: center;
   font-family: var(--font-display);
-  font-size: 9px;
   color: #fff;
   background: rgba(255, 255, 255, .13);
   border: 2px solid rgba(255, 255, 255, .5);
   text-shadow: 1px 1px 0 #000;
   -webkit-user-select: none; user-select: none;
+  transition: background .1s ease-out, transform .1s ease-out;
 }
 .vox-btn-jump:active, .vox-btn-sneak:active, .vox-btn-sprint:active,
-.vox-btn-fly-up:active, .vox-btn-fly-down:active { background: rgba(255, 255, 255, .32); }
+.vox-btn-fly-up:active, .vox-btn-fly-down:active {
+  background: rgba(255, 255, 255, .32);
+  transform: translateY(1px);        /* pressed-in feedback */
+}
 .vox-btn-sneak.on, .vox-btn-sneak.active { background: var(--cy); color: var(--ink); border-color: var(--ink); }
 .vox-btn-sprint.on, .vox-btn-sprint.active { background: var(--am); color: var(--ink); border-color: var(--ink); }
 
-/* top-right utility bar: pause / chat / inventory / perspective / drop */
+/* top-right utility bar: pause / chat / inventory / perspective / drop
+   (square blocks to match the HUD's chunky pixel framing) */
 .vox-btn-pause, .vox-btn-chat, .vox-btn-inv, .vox-btn-persp, .vox-btn-drop {
-  position: absolute;
-  top: calc(10px + env(safe-area-inset-top, 0px));
-  width: 48px; height: 48px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 17px;
-  line-height: 1;
   color: #fff;
   background: rgba(5, 6, 12, .55);
   border: 2px solid rgba(255, 255, 255, .4);
+  transition: background .1s ease-out, transform .1s ease-out;
 }
 .vox-btn-pause:active, .vox-btn-chat:active,
-.vox-btn-inv:active, .vox-btn-persp:active, .vox-btn-drop:active { background: rgba(255, 255, 255, .3); }
-.vox-btn-pause { right: calc(12px + env(safe-area-inset-right, 0px)); }
-.vox-btn-chat  { right: calc(66px + env(safe-area-inset-right, 0px)); }
-.vox-btn-inv   { right: calc(120px + env(safe-area-inset-right, 0px)); }
-.vox-btn-persp { right: calc(174px + env(safe-area-inset-right, 0px)); }
-.vox-btn-drop  { right: calc(234px + env(safe-area-inset-right, 0px)); }
+.vox-btn-inv:active, .vox-btn-persp:active, .vox-btn-drop:active {
+  background: rgba(255, 255, 255, .3);
+  transform: translateY(1px);        /* pressed-in feedback */
+}
 
-/* phones: tighter hotbar so 9 slots always fit, HUD nudges up a bit */
+/* phones: tighter hotbar so 9 slots always fit; the WHOLE bottom stack
+   (hotbar -> bars -> armor -> chat, see LAYOUT CONTRACT above) shifts
+   down in lockstep, and the top-center badges duck under the top-right
+   touch-button row (5 × 48px + gaps ≈ 282px, right-anchored). */
 @media (max-width: 560px) {
   .vox-slot { width: 38px; height: 38px; flex-basis: 38px; }
-  .vox-hearts { bottom: calc(62px + env(safe-area-inset-bottom, 0px)); }
-  .vox-bubbles { bottom: calc(82px + env(safe-area-inset-bottom, 0px)); }
-  .vox-chat { bottom: calc(84px + env(safe-area-inset-bottom, 0px)); width: min(480px, calc(100vw - 96px)); }
+  /* hotbar top edge is now ≈62px */
+  .vox-bars { bottom: calc(66px + env(safe-area-inset-bottom, 0px)); width: min(392px, calc(100vw - 12px)); }
+  .vox-hearts { gap: 2px; }
+  .vox-heart { width: 14px; height: 14px; }
+  .vox-bubbles { gap: 2px; }
+  .vox-bubble { width: 12px; height: 12px; }
+  .vox-armor-row { bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }
+  .vox-chat { bottom: calc(124px + env(safe-area-inset-bottom, 0px)); width: min(480px, calc(100vw - 96px)); }
+  .vox-chat-log { max-height: 26vh; }
+  .vox-mode-badge { top: calc(64px + env(safe-area-inset-top, 0px)); }
+  .vox-target-label { top: calc(92px + env(safe-area-inset-top, 0px)); }
   .vox-debug { font-size: 10px; }
   .vox-inv-grid, .vox-hotbar-row { grid-template-columns: repeat(9, minmax(28px, 1fr)); }
+}
+
+/* Motion accessibility: collapse all HUD polish motion to ~0. Durations
+   (not `none`) so end-states — chat auto-fade, toast .show — still land. */
+@media (prefers-reduced-motion: reduce) {
+  #hud-root *, #hud-root *::before, #hud-root *::after,
+  .vox-modal, .vox-modal-overlay {
+    transition-duration: .01ms !important;
+    animation-duration: .01ms !important;
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -991,7 +1189,7 @@ body::after {
   box-shadow: 0 0 0 3px var(--cy), 9px 9px 0 0 var(--ink);
   width: 100%;
   max-width: 420px;
-  max-height: 90vh;
+  max-height: min(92vh, 92svh);   /* svh: keep buttons reachable under mobile URL bars */
   overflow-y: auto;
   padding: 16px;
   display: flex;

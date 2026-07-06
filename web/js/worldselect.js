@@ -848,7 +848,10 @@ var WorldSelect = (function () {
     connectAndStart(roomId, pin || null);
   }
 
+  var connectInFlight = false; // double-click/double-tap guard for Join/Play/Host
+
   function connectAndStart(roomId, pin) {
+    if (connectInFlight) return; // a connect is already running -- ignore repeat clicks
     if (typeof Net === 'undefined' || !Net.connect) {
       toast(t('mp.err.noNet', 'Multiplayer networking failed to load.'), 'danger');
       return;
@@ -858,14 +861,23 @@ var WorldSelect = (function () {
       return;
     }
     var skinRec = currentSkin();
+    connectInFlight = true;
     toast(t('worlds.connecting', 'Connecting…'), 'info');
     stopRoomsPolling();
     var connectOpts = { roomId: roomId, skinRec: skinRec, mode: 'survival', nick: nickFor() };
     if (pin) connectOpts.pin = pin;
     Net.connect(connectOpts).then(function (welcome) {
+      connectInFlight = false;
       return Game.startMultiplayer({ welcome: welcome, skinRec: skinRec });
     }).catch(function (err) {
+      connectInFlight = false;
       toast((err && err.message) || t('mp.err.joinFail', 'Could not join the room.'), 'danger');
+      // The join failed and we are still ON this screen: bring the room-list
+      // polling back to life (it was stopped above in anticipation of
+      // leaving), otherwise the Join tab silently goes stale after one
+      // failed attempt. Visibility is implicit (no flag): the screen is
+      // still active and the Join tab is the one that polls.
+      if (activeTab === 'join' && rootEl && rootEl.classList.contains('active')) startRoomsPolling();
     });
   }
 

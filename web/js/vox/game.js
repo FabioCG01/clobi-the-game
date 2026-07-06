@@ -61,6 +61,21 @@ var Game = (function () {
   var SETTINGS_KEY = 'clobi3d.settings';
   var WATER_ID = 11;
 
+  // ---- feel/polish tuning (Part III smoothness pass) ------------------------
+  // All of these are frame-rate independent (exp-smoothed with dt) and kept
+  // deliberately conservative -- polish, not a theme park.
+  var EYE_EASE_RATE = 8;        // /s -- sneak eye-height ease toward its target
+  var BOB_AMP_Y = 0.035;        // blocks -- first-person walk-bob vertical amp
+  var BOB_AMP_X = 0.012;        // blocks -- walk-bob lateral sway amp (subtle)
+  var BOB_SPEED_REF = 4.3;      // m/s of horizontal speed for full bob amp
+                                //   (same reference the arm bob already uses)
+  var SPRINT_FOV_BOOST = 8;     // deg -- added ON TOP of the user's /fov base
+  var FOV_EASE_RATE = 6;        // /s -- sprint FOV kick ease in/out
+  var CAM_DIST_EASE_RATE = 10;  // /s -- third-person boom distance ease
+  var LAND_DIP_AMOUNT = 0.08;   // blocks -- camera dip depth after a real fall
+  var LAND_DIP_SEC = 0.15;      // s -- landing dip duration
+  var LAND_DIP_MIN_FALL = 2;    // blocks -- never dip on a 1-block step
+
   // ---- helpers ----------------------------------------------------------------
 
   function t(key, en) {
@@ -150,6 +165,13 @@ var Game = (function () {
 
   // animation trackers
   var walkPhase = 0, swingAmp = 0, bobPhase = 0, armSwingT = 99, wasBreaking = false;
+
+  // feel/polish trackers (smoothness pass): eased sneak eye height, eased
+  // sprint FOV kick (deg, modulates AROUND fovDeg -- never written back to
+  // it), eased third-person boom length, seconds since the last landing dip
+  // started (large value = no dip playing).
+  var currentEyeH = EYE_STAND, fovKick = 0;
+  var camDistCur = THIRD_PERSON_DIST, landDipT = 1e9;
 
   // one-time hooks
   var inputWired = false, inputInited = false;
@@ -402,39 +424,70 @@ var Game = (function () {
   function fillCam(cam, pos, yaw, pitch, dir, view, proj, pv) {
     cam.pos[0] = pos[0]; cam.pos[1] = pos[1]; cam.pos[2] = pos[2];
     cam.yaw = yaw; cam.pitch = pitch;
-    cam.fovDeg = fovDeg; cam.aspect = aspect;
+    // sprint FOV kick: fovKick eases toward SPRINT_FOV_BOOST/0 in frame() and
+    // modulates around the user's /fov base -- fovDeg itself is never touched.
+    var fovEff = fovDeg + fovKick;
+    cam.fovDeg = fovEff; cam.aspect = aspect;
     var far = Math.max(96, (renderDist + 2) * 16 + 16);
-    M3.mat4Perspective(proj, fovDeg * Math.PI / 180, aspect, 0.05, far);
+    M3.mat4Perspective(proj, fovEff * Math.PI / 180, aspect, 0.05, far);
     M3.mat4LookDir(view, pos, dir, _up);
     M3.mat4Multiply(pv, proj, view);
   }
 
   // Computes eyeCam (always first-person, used for interaction rays) and
-  // renderCam (respects player.perspective). Returns renderCam.
-  function computeCameras() {
+  // renderCam (respects player.perspective). Returns renderCam. dt drives the
+  // exp-smoothed feel effects (sneak dip, walk bob, landing dip, boom ease) --
+  // all of them touch renderCam ONLY, so eyeCam raycasts stay clean.
+  function computeCameras(dt) {
+    dt = dt || 0;
+    // sneak dip: ease the eye height toward its target instead of snapping
+    currentEyeH += (eyeHeight() - currentEyeH) * (1 - Math.exp(-EYE_EASE_RATE * dt));
     readVec(player.body.pos, _p);
-    _eye[0] = _p[0]; _eye[1] = _p[1] + eyeHeight(); _eye[2] = _p[2];
+    _eye[0] = _p[0]; _eye[1] = _p[1] + currentEyeH; _eye[2] = _p[2];
     lookDir(player.yaw, player.pitch, _dir);
 
     fillCam(eyeCam, _eye, player.yaw, player.pitch, _dir, _eView, _eProj, _ePv);
 
     var persp = player.perspective;
     if (persp === 0) {
-      fillCam(renderCam, _eye, player.yaw, player.pitch, _dir, _view, _proj, _pv);
+      // first person: renderCam gets a subtle walk bob (on ground + moving
+      // only, zero when flying/swimming, scaled by horizontal speed) plus the
+      // brief landing dip -- eyeCam above is untouched by either.
+      var bobY = 0, bobX = 0;
+      readVec(player.body.vel, _v);
+      var hs = Math.sqrt(_v[0] * _v[0] + _v[2] * _v[2]);
+      if (player.body.onGround && !player.flying && !player.body.inWater && hs > 0.05) {
+        var k = Math.min(1, hs / BOB_SPEED_REF);
+        var ang = bobPhase * Math.PI * 2;
+        bobY = Math.sin(ang * 2) * BOB_AMP_Y * k;
+        bobX = Math.sin(ang) * BOB_AMP_X * k;
+      }
+      if (landDipT < LAND_DIP_SEC) {
+        bobY -= Math.sin((landDipT / LAND_DIP_SEC) * Math.PI) * LAND_DIP_AMOUNT;
+      }
+      // lateral sway rides the camera-right axis (yaw only, stays horizontal)
+      _camPos[0] = _eye[0] + Math.cos(player.yaw) * bobX;
+      _camPos[1] = _eye[1] + bobY;
+      _camPos[2] = _eye[2] - Math.sin(player.yaw) * bobX;
+      fillCam(renderCam, _camPos, player.yaw, player.pitch, _dir, _view, _proj, _pv);
     } else if (persp === 1) {
-      // behind the player, looking the same way
+      // behind the player, looking the same way (boom eased so wall pull-in
+      // glides instead of popping; cameraDist's own 0.9 margin absorbs the
+      // small transient overshoot while the ease catches up)
       _camDir[0] = -_dir[0]; _camDir[1] = -_dir[1]; _camDir[2] = -_dir[2];
       var d1 = cameraDist(_eye, _camDir, THIRD_PERSON_DIST);
-      _camPos[0] = _eye[0] + _camDir[0] * d1;
-      _camPos[1] = _eye[1] + _camDir[1] * d1;
-      _camPos[2] = _eye[2] + _camDir[2] * d1;
+      camDistCur += (d1 - camDistCur) * (1 - Math.exp(-CAM_DIST_EASE_RATE * dt));
+      _camPos[0] = _eye[0] + _camDir[0] * camDistCur;
+      _camPos[1] = _eye[1] + _camDir[1] * camDistCur;
+      _camPos[2] = _eye[2] + _camDir[2] * camDistCur;
       fillCam(renderCam, _camPos, player.yaw, player.pitch, _dir, _view, _proj, _pv);
     } else {
-      // in front of the player, looking back at it
+      // in front of the player, looking back at it (same eased boom)
       var d2 = cameraDist(_eye, _dir, THIRD_PERSON_DIST);
-      _camPos[0] = _eye[0] + _dir[0] * d2;
-      _camPos[1] = _eye[1] + _dir[1] * d2;
-      _camPos[2] = _eye[2] + _dir[2] * d2;
+      camDistCur += (d2 - camDistCur) * (1 - Math.exp(-CAM_DIST_EASE_RATE * dt));
+      _camPos[0] = _eye[0] + _dir[0] * camDistCur;
+      _camPos[1] = _eye[1] + _dir[1] * camDistCur;
+      _camPos[2] = _eye[2] + _dir[2] * camDistCur;
       _camDir[0] = -_dir[0]; _camDir[1] = -_dir[1]; _camDir[2] = -_dir[2];
       fillCam(renderCam, _camPos, player.yaw + Math.PI, -player.pitch, _camDir, _view, _proj, _pv);
     }
@@ -519,6 +572,9 @@ var Game = (function () {
       if (!wasOnGround && fallDist > 0) {
         var dmg = Physics.fallDamage(fallDist);
         if (dmg > 0) damage(dmg);
+        // feel: a real fall (>= LAND_DIP_MIN_FALL blocks -- never a 1-block
+        // step) kicks off the brief eased camera dip (see computeCameras)
+        if (fallDist >= LAND_DIP_MIN_FALL) landDipT = 0;
       }
       fallDist = 0;
     }
@@ -983,7 +1039,14 @@ var Game = (function () {
   }
 
   function drawArm(env) {
-    var swing01 = armSwingT < 0.3 ? armSwingT / 0.3 : 0;
+    // ease-out (1-(1-t)^3) on the swing phase: the arm snaps out fast and
+    // settles softly instead of ramping linearly. Combat.swingPhase() still
+    // max-merges below, unchanged.
+    var swing01 = 0;
+    if (armSwingT < 0.3) {
+      var st01 = 1 - armSwingT / 0.3;
+      swing01 = 1 - st01 * st01 * st01;
+    }
     if (typeof Combat !== 'undefined' && Combat.swingPhase) {
       var attackSwing = Combat.swingPhase();
       if (attackSwing > swing01) swing01 = attackSwing;
@@ -1063,8 +1126,16 @@ var Game = (function () {
       if (steps === MAX_PHYS_STEPS) physAcc = 0;   // dropped time on heavy frames
     }
 
+    // -- feel: sprint FOV kick target + landing-dip clock (smoothness pass) --
+    var sprinting = active && !uiBlocked() && player.body &&
+        Input.state && !!Input.state.sprint && Input.move.forward > 0 &&
+        player.body.onGround && !player.body.inWater && !player.flying;
+    fovKick += ((sprinting ? SPRINT_FOV_BOOST : 0) - fovKick) *
+               (1 - Math.exp(-FOV_EASE_RATE * dt));
+    if (landDipT < 1) landDipT += dt;   // 1 s cap: dip only lasts LAND_DIP_SEC
+
     // -- cameras (eyeCam for interaction, renderCam for drawing) --
-    computeCameras();
+    computeCameras(dt);
 
     // -- interaction --
     var actions = Input.consumeActions();
@@ -1081,6 +1152,17 @@ var Game = (function () {
     streamChunks();
     meshChunks();
     if ((frameNo & 31) === 0) dropFarMeshes();
+
+    // -- Part III (§13a): pump the water-flow simulation. This was the
+    // missing wiring that made water never flow: world.js owns the whole
+    // liquid tick queue (queueLiquidTick fires automatically on block edits
+    // near water) but only processes it when THIS budget call runs. Solo/
+    // offline only: in multiplayer each client simulating liquids locally
+    // would diverge (edits sync over the wire, tick timing doesn't), so MP
+    // water stays static until a server-authoritative liquid pass exists.
+    if (active && !isMultiplayer && world && world.processLiquidTicks) {
+      world.processLiquidTicks(64);
+    }
 
     // -- Part II: send our own move state, advance remote-player interpolation --
     if (isMultiplayer) {
@@ -1338,6 +1420,8 @@ var Game = (function () {
       lastW = 0; lastH = 0; lastDpr = 0;
       fallDist = 0; wasOnGround = true; drownAcc = 0; regenAcc = 0;
       lastDamageMs = -1e9; armSwingT = 99; wasBreaking = false;
+      currentEyeH = EYE_STAND; fovKick = 0;
+      camDistCur = THIRD_PERSON_DIST; landDipT = 1e9;
       running = true;
       starting = false;
       rafId = requestAnimationFrame(frame);
@@ -1610,6 +1694,8 @@ var Game = (function () {
       lastW = 0; lastH = 0; lastDpr = 0;
       fallDist = 0; wasOnGround = true; drownAcc = 0; regenAcc = 0;
       lastDamageMs = -1e9; armSwingT = 99; wasBreaking = false;
+      currentEyeH = EYE_STAND; fovKick = 0;
+      camDistCur = THIRD_PERSON_DIST; landDipT = 1e9;
       running = true;
       starting = false;
       rafId = requestAnimationFrame(frame);

@@ -78,65 +78,62 @@ var HUD = (function () {
   }
 
   // ---- injected baseline CSS -----------------------------------------------
-  // Functional layout only, so the HUD works even before the central stylesheet
-  // lands; the pinned class names let dedicated CSS refine/override everything.
+  // STRUCTURE ONLY: position/display/sizing/pointer-events plus the few
+  // functional bits (display:none defaults, the fade transitions JS drives,
+  // the 16px iOS-zoom guard). ALL theme -- colors, borders, fonts, shadows --
+  // lives in css/style.css, which sits AFTER this sheet in the cascade and is
+  // the single source of visual truth: any visual property added here leaks
+  // into the final look wherever style.css doesn't override it. Exceptions
+  // that this sheet fully owns (style.css has no rules for them, on purpose):
+  // .vox-webgl-error and the .vox-hitflash gradient.
 
   var CSS = [
-    '.vox-hud{position:absolute;inset:0;pointer-events:none;user-select:none;-webkit-user-select:none;color:#fff;font-family:inherit;overflow:hidden;z-index:5;}',
-    '.vox-crosshair{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:22px;line-height:1;mix-blend-mode:difference;color:#fff;}',
+    '.vox-hud{position:absolute;inset:0;pointer-events:none;user-select:none;-webkit-user-select:none;color:#fff;font-family:inherit;overflow:hidden;}',
+    '.vox-crosshair{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:22px;line-height:1;}',
     '.vox-hotbar{position:absolute;left:50%;bottom:calc(10px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:4px;pointer-events:auto;}',
-    '.vox-slot{position:relative;width:46px;height:46px;background:rgba(10,14,20,.55);border:2px solid rgba(255,255,255,.25);border-radius:4px;box-sizing:border-box;}',
-    '.vox-slot.sel{border-color:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.35);}',
-    '.vox-slot canvas{position:absolute;inset:1px;width:40px;height:40px;image-rendering:pixelated;}',
-    '.vox-slot-count{position:absolute;right:2px;bottom:0;font-size:12px;font-weight:bold;text-shadow:1px 1px 0 #000;z-index:1;}',
+    '.vox-slot{position:relative;width:46px;height:46px;box-sizing:border-box;overflow:hidden;}',
+    '.vox-slot canvas{display:block;image-rendering:pixelated;}',
+    '.vox-slot-count{position:absolute;right:2px;bottom:1px;pointer-events:none;z-index:1;}',
     '.vox-bars{position:absolute;left:50%;bottom:calc(64px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);width:min(462px,94vw);display:flex;justify-content:space-between;pointer-events:none;}',
-    '.vox-hearts,.vox-bubbles{display:flex;gap:1px;font-size:16px;line-height:1;text-shadow:1px 1px 0 rgba(0,0,0,.6);}',
-    '.vox-heart{color:#ff3b3b;}.vox-heart.empty{color:rgba(255,255,255,.28);}',
-    '.vox-heart.half{background:linear-gradient(90deg,#ff3b3b 50%,rgba(255,255,255,.28) 50%);-webkit-background-clip:text;background-clip:text;color:transparent;}',
-    '.vox-bubble{color:#9fd8ff;}.vox-bubble.empty{color:rgba(255,255,255,.15);}',
+    '.vox-hearts,.vox-bubbles{display:flex;gap:2px;}',
     '.vox-chat{position:absolute;left:8px;bottom:calc(118px + env(safe-area-inset-bottom,0px));width:min(520px,72vw);pointer-events:none;}',
     '.vox-chat-log{display:flex;flex-direction:column;gap:2px;max-height:38vh;overflow:hidden;justify-content:flex-end;}',
-    '.vox-chat-line{background:rgba(0,0,0,.45);padding:2px 8px;border-radius:3px;font-size:14px;line-height:1.35;word-break:break-word;transition:opacity .6s;}',
-    '.vox-chat-line.err{color:#ff7b7b;}.vox-chat-line.sys{color:#ffe08a;}',
-    '.vox-chat-input{display:none;width:100%;margin-top:4px;padding:8px;font-size:16px;font-family:inherit;color:#fff;background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.35);border-radius:4px;outline:none;box-sizing:border-box;pointer-events:auto;}',
-    '.vox-debug{display:none;position:absolute;top:8px;left:8px;padding:6px 10px;background:rgba(0,0,0,.55);font:12px/1.5 monospace;white-space:pre;border-radius:4px;}',
-    '.vox-mode-badge{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));right:calc(10px + env(safe-area-inset-right,0px));padding:4px 12px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.3);border-radius:12px;font-size:13px;opacity:0;transition:opacity .4s;}',
-    '.vox-title-toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);font-size:30px;font-weight:bold;text-shadow:2px 2px 0 rgba(0,0,0,.6);opacity:0;transition:opacity .5s;white-space:nowrap;}',
-    '.vox-target-label{position:absolute;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);font-size:13px;opacity:.85;text-shadow:1px 1px 0 #000;}',
+    '.vox-chat-line{word-break:break-word;transition:opacity .6s;}',   // transition = the 8s auto-fade mechanism
+    '.vox-chat-input{display:none;width:100%;margin-top:4px;font-size:16px;box-sizing:border-box;pointer-events:auto;}',   // 16px: no iOS focus zoom
+    '.vox-debug{display:none;position:absolute;top:8px;left:8px;white-space:pre;pointer-events:none;}',
+    '.vox-mode-badge{position:absolute;top:calc(10px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);opacity:0;transition:opacity .4s;pointer-events:none;}',
+    '.vox-title-toast{position:absolute;left:50%;top:22%;transform:translateX(-50%);opacity:0;pointer-events:none;white-space:nowrap;}',
+    '.vox-title-toast.show{opacity:1;}',
+    '.vox-target-label{position:absolute;left:50%;top:calc(44px + env(safe-area-inset-top,0px));transform:translateX(-50%);pointer-events:none;}',
     '.vox-overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:14px;pointer-events:auto;}',
-    '.vox-paused{background:rgba(6,10,16,.6);}',
-    '.vox-death{background:rgba(110,0,0,.5);}',
-    '.vox-overlay h2{margin:0 0 10px;font-size:32px;text-shadow:2px 2px 0 rgba(0,0,0,.5);}',
-    '.vox-ui-btn{min-width:220px;padding:11px 22px;font:inherit;font-size:16px;color:#fff;background:rgba(30,42,58,.9);border:2px solid rgba(255,255,255,.35);border-radius:6px;cursor:pointer;}',
-    '.vox-ui-btn:hover{background:rgba(52,70,94,.95);}',
-    '.vox-settings{display:none;flex-direction:column;gap:12px;min-width:min(340px,90vw);background:rgba(12,18,26,.85);padding:18px;border-radius:8px;border:1px solid rgba(255,255,255,.2);}',
-    '.vox-set-row{display:flex;align-items:center;gap:10px;font-size:14px;}',
+    '.vox-overlay h2{margin:0;}',
+    '.vox-pause-main{display:flex;flex-direction:column;gap:14px;align-items:center;}',
+    '.vox-ui-btn{min-width:220px;padding:11px 22px;font:inherit;cursor:pointer;pointer-events:auto;}',
+    '.vox-settings{display:none;flex-direction:column;gap:12px;min-width:min(340px,90vw);}',
+    '.vox-set-row{display:flex;align-items:center;gap:10px;}',
     '.vox-set-row label{flex:0 0 42%;}',
     '.vox-set-row input[type=range]{flex:1;pointer-events:auto;}',
-    '.vox-set-row .vox-set-val{flex:0 0 44px;text-align:right;font-family:monospace;}',
+    '.vox-set-row .vox-set-val{flex:0 0 44px;text-align:right;}',
     '.vox-touch-sizes{display:flex;gap:6px;}',
-    '.vox-touch-sizes button{flex:1;padding:6px;font:inherit;color:#fff;background:rgba(30,42,58,.9);border:1px solid rgba(255,255,255,.3);border-radius:4px;cursor:pointer;}',
-    '.vox-touch-sizes button.sel{border-color:#fff;background:rgba(70,95,125,.95);}',
-    '.vox-inv-panel{display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:94vw;max-height:80vh;overflow:auto;background:rgba(14,20,28,.94);border:2px solid rgba(255,255,255,.25);border-radius:8px;padding:14px;pointer-events:auto;}',
-    '.vox-inv-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:16px;font-weight:bold;}',
-    '.vox-inv-close{width:32px;height:32px;font:inherit;font-size:18px;color:#fff;background:rgba(30,42,58,.9);border:1px solid rgba(255,255,255,.3);border-radius:4px;cursor:pointer;}',
+    '.vox-touch-sizes button{flex:1;font:inherit;cursor:pointer;}',
+    '.vox-inv-panel{display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:94vw;max-height:80vh;overflow:auto;pointer-events:auto;}',
+    '.vox-inv-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}',
+    '.vox-inv-close{width:32px;height:32px;font:inherit;cursor:pointer;}',
     '.vox-inv-grid{display:grid;grid-template-columns:repeat(9,46px);gap:4px;margin-bottom:10px;}',
-    '.vox-inv-cell{position:relative;width:46px;height:46px;background:rgba(255,255,255,.06);border:2px solid rgba(255,255,255,.18);border-radius:4px;box-sizing:border-box;cursor:pointer;}',
-    '.vox-inv-cell.sel{border-color:#ffd76b;}',
-    '.vox-inv-cell canvas{position:absolute;inset:1px;width:40px;height:40px;image-rendering:pixelated;}',
-    '.vox-inv-cell .vox-slot-count{z-index:1;}',
-    '.vox-hotbar-row{display:grid;grid-template-columns:repeat(9,46px);gap:4px;padding-top:8px;border-top:1px solid rgba(255,255,255,.2);}',
-    '.vox-tooltip{display:none;position:absolute;padding:3px 8px;background:rgba(0,0,0,.85);border:1px solid rgba(255,255,255,.3);border-radius:4px;font-size:12px;pointer-events:none;z-index:20;white-space:nowrap;}',
-    '.vox-webgl-error{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#101820;color:#fff;text-align:center;padding:24px;pointer-events:auto;z-index:50;}',
-    '@media (max-width:520px){.vox-inv-grid,.vox-hotbar-row{grid-template-columns:repeat(9,minmax(30px,1fr));}.vox-inv-cell{width:auto;height:auto;aspect-ratio:1;}.vox-inv-cell canvas{width:86%;height:86%;}}',
+    '.vox-inv-cell{position:relative;box-sizing:border-box;overflow:hidden;cursor:pointer;}',
+    '.vox-inv-cell canvas{display:block;image-rendering:pixelated;}',
+    '.vox-hotbar-row{display:grid;grid-template-columns:repeat(9,46px);gap:4px;padding-top:8px;}',
+    '.vox-tooltip{display:none;position:absolute;pointer-events:none;white-space:nowrap;z-index:80;}',   // z-scale: tooltip
+    '.vox-webgl-error{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#101820;color:#fff;text-align:center;padding:24px;pointer-events:auto;z-index:90;}',
+    '@media (max-width:520px){.vox-inv-grid,.vox-hotbar-row{grid-template-columns:repeat(9,minmax(30px,1fr));}}',
     /* ---- Part III combat additions (ARCHITECTURE-COMBAT.md §8) ---- */
-    '.vox-hitflash{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(200,0,0,0) 40%,rgba(180,0,0,.55) 100%);opacity:0;pointer-events:none;transition:opacity .12s ease-out;z-index:6;}',
+    // z:0 (not 6): an explicit positive z lifted the flash ABOVE the
+    // auto-stacked HUD siblings, contradicting the "sits low" contract.
+    '.vox-hitflash{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(200,0,0,0) 40%,rgba(180,0,0,.55) 100%);opacity:0;pointer-events:none;transition:opacity .12s ease-out;z-index:0;}',
     '.vox-hitflash.on{opacity:1;transition:opacity 0s;}',
-    '.vox-armor-row{position:absolute;left:50%;bottom:calc(60px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:4px;pointer-events:none;}',
-    '.vox-armor-slot{position:relative;width:28px;height:28px;background:rgba(10,14,20,.4);border:2px dashed rgba(255,255,255,.22);border-radius:4px;box-sizing:border-box;}',
-    '.vox-armor-slot.filled{border-style:solid;border-color:rgba(255,255,255,.4);}',
-    '.vox-armor-slot canvas{position:absolute;inset:1px;width:22px;height:22px;image-rendering:pixelated;}',
-    '.vox-death-by{margin-top:-4px;font-size:15px;opacity:.85;text-shadow:1px 1px 0 rgba(0,0,0,.5);}'
+    '.vox-armor-row{position:absolute;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:4px;pointer-events:none;}',
+    '.vox-armor-slot{position:relative;width:28px;height:28px;box-sizing:border-box;overflow:hidden;}',
+    '.vox-armor-slot canvas{display:block;width:100%;height:100%;image-rendering:pixelated;}'
   ].join('\n');
 
   function injectCSS() {
@@ -144,7 +141,14 @@ var HUD = (function () {
     var s = document.createElement('style');
     s.id = 'vox-hud-style';
     s.textContent = CSS;
-    document.head.appendChild(s);
+    // Insert BEFORE the first stylesheet <link>, not appendChild: this sheet
+    // is a works-without-any-CSS fallback, and the central style.css must win
+    // every equal-specificity conflict. Appended at the end of <head> it came
+    // AFTER style.css in the cascade and silently overrode the themed HUD
+    // styles (the "some UIs look broken" bug).
+    var firstSheet = document.head.querySelector('link[rel="stylesheet"]');
+    if (firstSheet) document.head.insertBefore(s, firstSheet);
+    else document.head.appendChild(s);
   }
 
   // ---- module state ----------------------------------------------------------
@@ -183,6 +187,7 @@ var HUD = (function () {
   // Part III (§8/§9/§10) state
   var lastArmorSig = '';
   var hitflashTimer = 0;
+  var heartsPulseTimer = 0;         // clears the .hurt damage-pulse class
   var hotbarTooltipTimer = 0;
   var hotbarTooltipSelected = -1;   // last selection we already showed a tooltip for
   var combatWired = false;
@@ -507,9 +512,12 @@ var HUD = (function () {
 
   function toast(text) {
     dom.toast.textContent = String(text);
-    dom.toast.style.opacity = '1';
+    // class toggle, not inline opacity: style.css owns the fade/scale-in
+    // transition on .vox-title-toast.show (baseline has a plain opacity
+    // fallback for the same class).
+    dom.toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { dom.toast.style.opacity = '0'; }, 1800);
+    toastTimer = setTimeout(function () { dom.toast.classList.remove('show'); }, 1800);
   }
 
   function showBadge(text) {
@@ -771,9 +779,9 @@ var HUD = (function () {
   function buildPauseOverlay() {
     dom.paused.innerHTML = '';
 
-    // main view
-    dom.pauseMain = el('div', null, dom.paused);
-    dom.pauseMain.style.cssText = 'display:flex;flex-direction:column;gap:14px;align-items:center;';
+    // main view (flex-column layout comes from the .vox-pause-main class;
+    // showPaused/closeSettingsView only toggle inline display flex/none)
+    dom.pauseMain = el('div', 'vox-pause-main', dom.paused);
     var h = el('h2', null, dom.pauseMain);
     h.textContent = t('vox.pause.title', 'Paused');
     var bResume = el('button', 'vox-ui-btn', dom.pauseMain);
@@ -802,7 +810,6 @@ var HUD = (function () {
 
     var h = el('h2', null, dom.settings);
     h.textContent = t('vox.settings.title', 'Settings');
-    h.style.fontSize = '22px';
 
     sliderRow(dom.settings, t('vox.settings.dist', 'Render distance'), 2, 10, 1, cur.dist,
       function (v) {
@@ -916,6 +923,17 @@ var HUD = (function () {
     if (creative) return;
     var hp = Math.max(0, Math.min(20, Math.round(state.health)));
     if (hp === lastHealth) return;
+    // damage pulse (§8 polish): only on a real decrease, never on the first
+    // frame / respawn refill (lastHealth is -1 after init or a mode change).
+    if (lastHealth >= 0 && hp < lastHealth) {
+      dom.hearts.classList.remove('hurt');
+      void dom.hearts.offsetWidth;   // restart the animation on rapid hits
+      dom.hearts.classList.add('hurt');
+      clearTimeout(heartsPulseTimer);
+      heartsPulseTimer = setTimeout(function () {
+        if (dom.hearts) dom.hearts.classList.remove('hurt');
+      }, 240);
+    }
     lastHealth = hp;
     for (var i = 0; i < 10; i++) {
       var v = hp - i * 2;
@@ -1114,6 +1132,7 @@ var HUD = (function () {
       clearTimeout(toastTimer);
       clearTimeout(badgeTimer);
       clearTimeout(hitflashTimer);
+      clearTimeout(heartsPulseTimer);
       clearTimeout(hotbarTooltipTimer);
       unwireHotbarSelectionTooltip();
       if (chatOpen) closeChat(false);

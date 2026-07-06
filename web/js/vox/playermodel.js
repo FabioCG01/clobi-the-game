@@ -547,12 +547,23 @@ var PlayerModel = (function () {
     if (!mesh) return;
     // Blocks sit flatter/lower (as if resting on the palm); tools/items are
     // angled more upright (as if gripped like a handle) -- §9.
+    //
+    // handBase transforms PIVOT-LOCAL coordinates: it is the same transform
+    // the right-arm geometry is drawn with, and per Skins.NET's own comment
+    // the part boxes are "local box bounds relative to the part pivot" --
+    // the arm spans y [+2,-10] with the SHOULDER at the origin and the fist
+    // at (0,-10,0); the model's front is +Z (draw() adds the yaw+PI flip).
+    // So "in the fist" is y≈-10 with a small +Z push so the item sits in
+    // front of the palm instead of inside the arm box. The old offsets
+    // (0,-1,4)/(0,-2,3) hovered the item up at SHOULDER height -- visibly
+    // "held" next to the elbow rather than in the hand (the reported
+    // "blocks don't sit right in the hand" bug).
     if (kind === 'item') {
-      M3.mat4Translate(scratchA, handBase, 0, -2, 3);
+      M3.mat4Translate(scratchA, handBase, 0, -10, 3);
       M3.mat4RotateX(scratchB, scratchA, 0.35);
       rotZ(scratchA, scratchB, 0.5);
     } else {
-      M3.mat4Translate(scratchA, handBase, 0, -1, 4);
+      M3.mat4Translate(scratchA, handBase, 0, -9, 3.5);
       M3.mat4RotateY(scratchB, scratchA, 0.5);
       rotZ(scratchA, scratchB, 0.15);
     }

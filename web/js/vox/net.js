@@ -153,7 +153,19 @@ var Net = (function () {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     var q = sendQueue;
     sendQueue = [];
-    for (var i = 0; i < q.length; i++) rawSend(q[i]);
+    // Belt-and-suspenders vs the flood window: even though sendMove no
+    // longer queues at all, if any 'move' frames ever end up here (e.g. a
+    // future caller using send('move',...) directly), collapse them to only
+    // the newest one -- flushing a backlog of stale positions in one burst
+    // is both useless and a server-side rate-limit breach.
+    var lastMoveIdx = -1;
+    for (var i = q.length - 1; i >= 0; i--) {
+      if (q[i] && q[i].t === 'move') { lastMoveIdx = i; break; }
+    }
+    for (var j = 0; j < q.length; j++) {
+      if (q[j] && q[j].t === 'move' && j !== lastMoveIdx) continue;
+      rawSend(q[j]);
+    }
   }
 
   // Opens a fresh socket for `params` and wires it up. `isReconnectAttempt`
@@ -188,6 +200,22 @@ var Net = (function () {
       clearHelloTimer();
       if (reject) reject(err);
     }
+
+    // Arm the timeout IMMEDIATELY, not first at onopen: if the underlying
+    // TCP/WS connection never establishes (dead tunnel hop, server busy,
+    // blackholed SYN), onopen never fires and the browser's own connect
+    // timeout can take 20-60s or effectively forever behind a proxy — the
+    // connect() promise would hang and the UI would sit on "Connecting…"
+    // indefinitely (the reported stuck-join bug). One timer covers both the
+    // CONNECTING phase and the hello->welcome phase; onopen re-arms it so a
+    // slow-but-successful open still gets the full window for the hello.
+    clearHelloTimer();
+    helloTimer = setTimeout(function () {
+      if (!settled) {
+        settleReject(new Error('Connection timed out.'));
+        try { socket.close(); } catch (e) { /* ignore */ }
+      }
+    }, HELLO_TIMEOUT_MS);
 
     socket.onopen = function () {
       rawSend(buildHello(params));
@@ -362,6 +390,15 @@ var Net = (function () {
 
   function sendMove(state) {
     if (!state) return;
+    // Moves are ephemeral realtime state: NEVER let them enter the
+    // CONNECTING queue. While a (re)connect is in flight the player keeps
+    // walking, so queued moves pile up at 10/s and the open-flush then
+    // fires them all in one burst -- blowing straight through the server's
+    // 15/s window and producing "You're sending messages too fast"
+    // warnings (and eventually a flood kick) for a player who did nothing
+    // wrong. A stale move is worthless anyway; the next frame sends a
+    // fresh one the moment the socket is actually OPEN.
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
     var t = nowMs();
     if (t - lastMoveSentAt < MOVE_INTERVAL_MS) return;
     if (!moveChanged(lastMoveSnapshot, state)) return;

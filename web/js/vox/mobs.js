@@ -64,6 +64,20 @@ var Mobs = (function () {
   var MOB_HALF_WIDTH = 0.3;       // rough mob footprint half-width for step-avoid checks
   var MOB_HEIGHT = 1.8;
 
+  // Motion-smoothing tunables (render polish only — AI decisions never read
+  // these). All easing is frame-rate independent via factor = 1 - e^(-k*dt).
+  var YAW_EASE_RATE = 10;          // ~rad/s: visible yaw eases toward the wish direction
+  var SWING_EASE_RATE = 10;        // walk-cycle amplitude ease-in/out speed (start/stop walking)
+  var SWING_CYCLES_PER_BLOCK = 0.85; // walk-cycle phase advance per block actually traveled
+  var STAND_SPEED_EPS = 0.2;       // blocks/s under which a mob counts as standing still
+  var LUNGE_DURATION_S = 0.25;     // zombie attack telegraph: brief full-amplitude whip
+  var LUNGE_SWING_RATE = 2.5;      // extra swing-phase cycles/s while the telegraph plays
+  var GRAZE_ROLL_MIN = 5, GRAZE_ROLL_MAX = 11;      // seconds between pig graze-pause rolls
+  var GRAZE_PAUSE_MIN = 1.2, GRAZE_PAUSE_MAX = 2.6; // seconds a grazing pig stands still
+  var GRAZE_CHANCE = 0.6;          // probability a graze roll actually pauses the pig
+  var IDLE_SWAY_SPEED = 1.7;       // rad/s of the idle pig head-sway sine
+  var IDLE_SWAY_RAD = 0.12;        // amplitude (rad) of that sway — subtle, head only
+
   // ---- tiny helpers ---------------------------------------------------------
 
   function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -319,16 +333,26 @@ var Mobs = (function () {
 
   function update(dt) {
     var target = nowMs() - RENDER_DELAY_MS;
+    // Same smoothing rates as the local sim so both rosters read identically:
+    // yaw eases toward the interpolated sample (low snapshot rates can still
+    // jump several degrees between samples) and swing amplitude follows REAL
+    // horizontal movement of the pose, so a mob the server parks stops
+    // swinging its legs instead of marching in place.
+    var step = (typeof dt === 'number' && dt > 0 && dt < 1) ? dt : 0.016;
+    var yawEase = 1 - Math.exp(-YAW_EASE_RATE * step);
+    var ampEase = 1 - Math.exp(-SWING_EASE_RATE * step);
     for (var id in mobs) {
       var st = mobs[id];
       var sample = interpolate(st.history, target);
       if (!sample) continue;
+      var px = st.pose.p[0], pz = st.pose.p[2];
       st.pose.p[0] = sample.p[0]; st.pose.p[1] = sample.p[1]; st.pose.p[2] = sample.p[2];
-      st.pose.yaw = sample.yaw;
+      st.pose.yaw = lerpAngle(st.pose.yaw, sample.yaw, yawEase);
       // `anim` is a 0..1-ish walk-cycle phase the server advances; treat it
       // the same way RemotePlayers treats `swing` (already-scaled phase).
       st.pose.swing = sample.anim || 0;
-      st.pose.swingAmp = 1;
+      var speed = Math.sqrt(dist2(st.pose.p[0], st.pose.p[2], px, pz)) / step;
+      st.pose.swingAmp += ((speed > STAND_SPEED_EPS ? 1 : 0) - st.pose.swingAmp) * ampEase;
     }
   }
 
@@ -348,7 +372,8 @@ var Mobs = (function () {
       viewProj: camera.projView,
       pos: st.pose.p,
       yaw: st.pose.yaw,
-      headYaw: st.pose.yaw,
+      // headYaw may carry a small idle-sway offset (pigs); default = body yaw.
+      headYaw: (typeof st.pose.headYaw === 'number') ? st.pose.headYaw : st.pose.yaw,
       headPitch: 0,
       swing: st.pose.swing,
       swingAmp: st.pose.swingAmp,
@@ -414,10 +439,13 @@ var Mobs = (function () {
   var _lastSpawnCheckAt = 0;   // seconds (accumulated dt clock)
   var _localClock = 0;         // seconds, monotonic accumulation of dt
 
-  // LocalMob: { id, kind, pos:[x,y,z], vel:[x,z], yaw, hp, maxHp,
+  // LocalMob: { id, kind, pos:[x,y,z], vel:[x,z], yaw (eased visible),
+  //             targetYaw (instant wish direction), hp, maxHp,
   //             wanderTarget:[x,z]|null, wanderAt (s), fleeUntil (s),
   //             attackCooldownUntil (s), lastPlayerNearAt (s),
-  //             render: {pose:{p,yaw,swing,swingAmp}} }  -- reuses drawOne()
+  //             swingAmp, swingPhase, lungeT (s), fallVel, idlePhase,
+  //             grazeUntil (s), nextGrazeAt (s),
+  //             render: {pose:{p,yaw,headYaw,swing,swingAmp}} } -- drawOne()
 
   function isSolidBlock(world, x, y, z) {
     if (!world || !world.getBlock) return false;
@@ -484,19 +512,28 @@ var Mobs = (function () {
   }
 
   function makeRenderPose(pos, yaw) {
-    return { pose: { p: [pos[0], pos[1], pos[2]], yaw: yaw, swing: 0, swingAmp: 1 } };
+    // swingAmp starts at 0 so a fresh mob eases INTO its first steps instead
+    // of popping in mid-stride; headYaw defaults to the body yaw.
+    return { pose: { p: [pos[0], pos[1], pos[2]], yaw: yaw, headYaw: yaw, swing: 0, swingAmp: 0 } };
   }
 
   function spawnLocalMob(kind, pos) {
     var id = 'local' + (_localIdSeq++);
     var hp = HP_BY_KIND[kind] || 20;
+    var yaw0 = Math.random() * TWO_PI;
     var lm = {
-      id: id, kind: kind, pos: pos.slice(), vel: [0, 0], yaw: Math.random() * TWO_PI,
+      id: id, kind: kind, pos: pos.slice(), vel: [0, 0], yaw: yaw0, targetYaw: yaw0,
       hp: hp, maxHp: hp,
       wanderTarget: null, wanderAt: 0,
       fleeUntil: 0, attackCooldownUntil: 0,
       lastPlayerNearAt: _localClock,
-      render: makeRenderPose(pos, 0)
+      // Visual-smoothing state (AI never reads these): eased walk-cycle
+      // amplitude + phase, attack-telegraph countdown, settle fall speed,
+      // per-mob idle-sway phase seed, and pig grazing-pause timers.
+      swingAmp: 0, swingPhase: 0, lungeT: 0, fallVel: 0,
+      idlePhase: Math.random() * TWO_PI,
+      grazeUntil: 0, nextGrazeAt: _localClock + randRange(GRAZE_ROLL_MIN, GRAZE_ROLL_MAX),
+      render: makeRenderPose(pos, yaw0)
     };
     _localMobs[id] = lm;
     return lm;
@@ -570,26 +607,43 @@ var Mobs = (function () {
       var footY = Math.floor(lm.pos[1]);
       if (!blocked(nx, nz, footY)) {
         lm.pos[0] = nx; lm.pos[2] = nz;
-        lm.yaw = Math.atan2(-dx, -dz); // §3 yaw convention: forward = (-sin(yaw),0,-cos(yaw))
+        // §3 yaw convention: forward = (-sin(yaw),0,-cos(yaw)). Only the
+        // TARGET is snapped here — localTick eases the visible yaw toward it
+        // so zigzag course corrections turn over several frames.
+        lm.targetYaw = Math.atan2(-dx, -dz);
         return true;
       }
       // Try a 1-block step-up: same XZ, foot level +1, only if that cell and
       // the one above it are clear.
       if (!blocked(nx, nz, footY + 1) && isSolidBlock(world, nx, footY, nz)) {
         lm.pos[0] = nx; lm.pos[1] = footY + 1; lm.pos[2] = nz;
-        lm.yaw = Math.atan2(-dx, -dz);
+        lm.targetYaw = Math.atan2(-dx, -dz);
         return true;
       }
     }
     return false; // fully stuck this tick — just stand still, no crash/loop
   }
 
-  function settleToGround(world, lm) {
-    // Cheap vertical settle so mobs don't float/sink when their column's
-    // terrain height differs from spawn (no real gravity integration needed
-    // for this v1 heuristic — walking mobs snap to the surface each tick).
+  function settleToGround(world, lm, dt) {
+    // Vertical settle so mobs don't float/sink when their column's terrain
+    // height differs from spawn. groundYBelow returns the FEET cell (the air
+    // cell resting ON the ground) — same convention as trySpawn — so the
+    // target is g itself, NOT g+1 (g+1 floats the mob a full block up, the
+    // exact off-by-one that made mobs walk on air).
+    //
+    // Downward moves ease with a gravity-ish acceleration instead of
+    // snapping (a mob walking off a ledge visibly falls); upward moves
+    // (stepping onto higher terrain) stay instant since stepToward already
+    // gates 1-block step-ups and a visible "pop" upward reads as a step.
     var g = groundYBelow(world, lm.pos[0], lm.pos[2], lm.pos[1] + 3);
-    lm.pos[1] = g + 1;
+    if (lm.pos[1] > g) {
+      lm.fallVel = (lm.fallVel || 0) + 24 * (dt || 0.016);
+      lm.pos[1] = Math.max(g, lm.pos[1] - lm.fallVel * (dt || 0.016));
+      if (lm.pos[1] === g) lm.fallVel = 0;
+    } else {
+      lm.pos[1] = g;
+      lm.fallVel = 0;
+    }
   }
 
   function tickZombie(lm, dt, world, playerPos, opts) {
@@ -600,14 +654,20 @@ var Mobs = (function () {
       if (d > ATTACK_RANGE) {
         var dx = (playerPos[0] - lm.pos[0]) / d, dz = (playerPos[2] - lm.pos[2]) / d;
         stepToward(world, lm, dx, dz, MOB_SPEED.zombie, dt);
-      } else if (_localClock >= lm.attackCooldownUntil) {
-        lm.attackCooldownUntil = _localClock + ATTACK_COOLDOWN_S;
-        var dmgBase = randRange(2, 4);
-        var diffMult = { peaceful: 0, easy: 0.5, normal: 1.0, hard: 1.5 };
-        var mult = (opts && diffMult[opts.difficulty] != null) ? diffMult[opts.difficulty] : 1.0;
-        var amount = dmgBase * mult;
-        if (amount > 0 && opts && typeof opts.onPlayerDamage === 'function') {
-          try { opts.onPlayerDamage(amount, lm.kind); } catch (e) { /* caller's bug, not ours */ }
+      } else {
+        // In melee range: keep tracking the player with the eased yaw even
+        // while standing, so the zombie squares up between swings.
+        if (d > 0.001) lm.targetYaw = Math.atan2(-(playerPos[0] - lm.pos[0]), -(playerPos[2] - lm.pos[2]));
+        if (_localClock >= lm.attackCooldownUntil) {
+          lm.attackCooldownUntil = _localClock + ATTACK_COOLDOWN_S;
+          lm.lungeT = LUNGE_DURATION_S; // attack telegraph: pose whips through a fast swing
+          var dmgBase = randRange(2, 4);
+          var diffMult = { peaceful: 0, easy: 0.5, normal: 1.0, hard: 1.5 };
+          var mult = (opts && diffMult[opts.difficulty] != null) ? diffMult[opts.difficulty] : 1.0;
+          var amount = dmgBase * mult;
+          if (amount > 0 && opts && typeof opts.onPlayerDamage === 'function') {
+            try { opts.onPlayerDamage(amount, lm.kind); } catch (e) { /* caller's bug, not ours */ }
+          }
         }
       }
     } else {
@@ -637,6 +697,17 @@ var Mobs = (function () {
       var dx = (lm.pos[0] - playerPos[0]) / d, dz = (lm.pos[2] - playerPos[2]) / d;
       stepToward(world, lm, dx, dz, MOB_SPEED.pigFlee, dt);
       return;
+    }
+    // Occasional grazing pause: every few seconds a pig may stop mid-wander
+    // and stand for a moment (the idle head-sway applied in localTick's pose
+    // pass makes the pause read as grazing, not as a stuck mob).
+    if (_localClock < lm.grazeUntil) return;
+    if (_localClock >= lm.nextGrazeAt) {
+      lm.nextGrazeAt = _localClock + randRange(GRAZE_ROLL_MIN, GRAZE_ROLL_MAX);
+      if (Math.random() < GRAZE_CHANCE) {
+        lm.grazeUntil = _localClock + randRange(GRAZE_PAUSE_MIN, GRAZE_PAUSE_MAX);
+        return;
+      }
     }
     tickWander(lm, dt, world, MOB_SPEED.pig);
   }
@@ -670,10 +741,11 @@ var Mobs = (function () {
     // ---- per-mob AI + despawn bookkeeping ----
     for (var id in _localMobs) {
       var lm = _localMobs[id];
+      var prevX = lm.pos[0], prevZ = lm.pos[2];
       if (lm.kind === 'zombie') tickZombie(lm, dt, world, playerPos, opts);
       else tickPig(lm, dt, world, playerPos);
 
-      if (world) settleToGround(world, lm);
+      if (world) settleToGround(world, lm, dt);
 
       var near = dist2(lm.pos[0], lm.pos[2], playerPos[0], playerPos[2]) <= DESPAWN_DIST * DESPAWN_DIST;
       if (near) lm.lastPlayerNearAt = _localClock;
@@ -682,11 +754,46 @@ var Mobs = (function () {
         continue;
       }
 
+      // ---- render-pose smoothing (visual only; nothing above reads it) ----
+      // Real horizontal speed this tick drives everything: the walk-cycle
+      // phase advances with distance actually covered (legs stop the instant
+      // the mob does) and the amplitude eases 0<->1 so starts/stops look
+      // weighted instead of binary.
+      var moved = Math.sqrt(dist2(lm.pos[0], lm.pos[2], prevX, prevZ));
+      var speed = dt > 0 ? moved / dt : 0;
+      var yawEase = 1 - Math.exp(-YAW_EASE_RATE * dt);
+      var ampEase = 1 - Math.exp(-SWING_EASE_RATE * dt);
+
+      // Visible yaw eases toward the wish direction stepToward/tickZombie
+      // recorded in targetYaw (the value the old code snapped to raw), then
+      // is re-wrapped so it can't drift unbounded over long circling paths.
+      lm.yaw = lerpAngle(lm.yaw, lm.targetYaw, yawEase);
+      if (lm.yaw > Math.PI) lm.yaw -= TWO_PI; else if (lm.yaw < -Math.PI) lm.yaw += TWO_PI;
+
+      lm.swingAmp += ((speed > STAND_SPEED_EPS ? 1 : 0) - lm.swingAmp) * ampEase;
+      lm.swingPhase = (lm.swingPhase + moved * SWING_CYCLES_PER_BLOCK) % 1;
+
+      // Zombie attack telegraph: for LUNGE_DURATION_S after a hit the pose
+      // whips through a fast full-amplitude swing, then eases back out.
+      var amp = lm.swingAmp;
+      if (lm.lungeT > 0) {
+        lm.lungeT = Math.max(0, lm.lungeT - dt);
+        amp = Math.max(amp, lm.lungeT / LUNGE_DURATION_S); // 1 -> 0 over the telegraph
+        lm.swingPhase = (lm.swingPhase + dt * LUNGE_SWING_RATE) % 1;
+      }
+
+      // Pig idle life: a slow head sway while standing (head only — the body
+      // stays planted) so parked pigs read as grazing, not as statues.
+      var headYaw = lm.yaw;
+      if (lm.kind === 'pig' && speed < STAND_SPEED_EPS) {
+        headYaw += Math.sin(_localClock * IDLE_SWAY_SPEED + lm.idlePhase) * IDLE_SWAY_RAD;
+      }
+
       lm.render.pose.p[0] = lm.pos[0]; lm.render.pose.p[1] = lm.pos[1]; lm.render.pose.p[2] = lm.pos[2];
       lm.render.pose.yaw = lm.yaw;
-      // Cheap walk-cycle phase from distance traveled this tick keeps legs
-      // animating without a full velocity-tracking system.
-      lm.render.pose.swing = (lm.render.pose.swing + dt * 2.2) % 1;
+      lm.render.pose.headYaw = headYaw;
+      lm.render.pose.swing = lm.swingPhase;
+      lm.render.pose.swingAmp = clamp(amp, 0, 1);
     }
 
     // ---- spawn attempts (throttled) ----
@@ -703,7 +810,9 @@ var Mobs = (function () {
     var out = [];
     for (var id in _localMobs) {
       var lm = _localMobs[id];
-      out.push({ id: lm.id, kind: lm.kind, hp: lm.hp, maxHp: lm.maxHp, pos: lm.pos.slice(), yaw: lm.yaw });
+      // yaw here is the eased VISIBLE yaw; swingAmp is exposed for debugging
+      // (0 = standing pose, 1 = full walk cycle) — both additive fields.
+      out.push({ id: lm.id, kind: lm.kind, hp: lm.hp, maxHp: lm.maxHp, pos: lm.pos.slice(), yaw: lm.yaw, swingAmp: lm.render.pose.swingAmp });
     }
     return out;
   }

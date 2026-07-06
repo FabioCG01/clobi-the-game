@@ -127,6 +127,7 @@ var Input = (function () {
       touchDom.btns.sprint.classList.remove('on');
     }
     if (breakHeld) { actions.push({ type: 'breakStop' }); breakHeld = false; }
+    stopPlaceRepeat();
     stopAllTouches();
     resetJoystick();
     lookDX = 0;
@@ -249,6 +250,7 @@ var Input = (function () {
       actions.push({ type: 'pick' });
     } else if (e.button === 2) {
       actions.push({ type: 'place' });
+      startPlaceRepeat();
     }
   }
 
@@ -257,6 +259,26 @@ var Input = (function () {
       breakHeld = false;
       actions.push({ type: 'breakStop' });
     }
+    if (e.button === 2) stopPlaceRepeat();
+  }
+
+  // Hold-to-place (Minecraft-style, ~4 blocks/s): while RMB stays down,
+  // re-emit 'place' on an interval so building long rows doesn't require
+  // click-spamming. The repeat rides the EXISTING 'place' action type, so
+  // Interact needs zero changes (each repeat is a normal place attempt with
+  // all its usual validation). Cleared on mouseup, releaseAll and UI mode.
+  var PLACE_REPEAT_MS = 240;
+  var placeRepeatId = 0;
+
+  function startPlaceRepeat() {
+    stopPlaceRepeat();
+    placeRepeatId = setInterval(function () {
+      if (uiMode) { stopPlaceRepeat(); return; }
+      actions.push({ type: 'place' });
+    }, PLACE_REPEAT_MS);
+  }
+  function stopPlaceRepeat() {
+    if (placeRepeatId) { clearInterval(placeRepeatId); placeRepeatId = 0; }
   }
 
   function onMouseMove(e) {
@@ -447,15 +469,15 @@ var Input = (function () {
   }
 
   // ---- touch: DOM construction (only when Input.isTouch) ----
+  // Inline styles own POSITION + SIZE only (plus the functional touch
+  // props). All THEME -- colors, borders, shape -- lives in style.css under
+  // the .vox-btn-* classes: inline theme always wins the cascade, and the
+  // old inline skin silently blanked the stylesheet's :active/.on states.
   function styleButton(el, size) {
     var s = el.style;
     s.position = 'absolute';
     s.width = size + 'px';
     s.height = size + 'px';
-    s.borderRadius = '50%';
-    s.border = '2px solid rgba(255,255,255,0.35)';
-    s.background = 'rgba(18,22,32,0.45)';
-    s.color = '#fff';
     s.fontSize = Math.round(size * 0.42) + 'px';
     s.lineHeight = size + 'px';
     s.textAlign = 'center';
