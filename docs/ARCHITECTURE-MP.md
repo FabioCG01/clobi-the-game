@@ -112,9 +112,15 @@ func (m *Manager) Get(roomID string) (*Instance, bool)
 (conn, username, guest flag, skin record, pos/look/anim, mode), timeTicks
 (advances 20/s server-side), hostUsername, access/pinHash, createdAt, lastEmpty.
 Lifecycle: created by `Open` (loads deltas from `worlds.Store`); closed by
-explicit Close, or by a janitor when **empty for 60 s**; on close: flush deltas +
-settings (spawn/time), release lock. Server shutdown flushes all instances.
-Autoflush ticker: 10 s, dirty chunks only (Delta Saving).
+explicit Close, or by a janitor polling on a 5 s tick that closes the instance
+once it has been continuously empty for **at least 60 s** (so in practice a
+room disappears from `/api/rooms` somewhere in the 60-65 s range after the
+last player leaves, not at exactly 60.000 s — this is the expected behavior
+of a periodic check, not a bug; do not build a per-room precise timer to
+shave off the few seconds of tick-alignment slack, it isn't worth the added
+complexity). On close: flush deltas + settings (spawn/time), release lock.
+Server shutdown flushes all instances. Autoflush ticker: 10 s, dirty chunks
+only (Delta Saving).
 
 Join permission (`CanJoin(user, guest bool)`): banned=no v1. Members and the
 owner ALWAYS pass, at ANY access level, including `private` — "private" means
