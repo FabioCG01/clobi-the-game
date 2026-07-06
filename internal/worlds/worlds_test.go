@@ -111,6 +111,22 @@ func TestDeltasWireRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRandomSeedInInt32Range pins the contract §3.2 default-seed shape:
+// "seed default: crypto-random int32".
+func TestRandomSeedInInt32Range(t *testing.T) {
+	seen := map[int64]bool{}
+	for i := 0; i < 50; i++ {
+		s := RandomSeed()
+		if s > 2147483647 || s < -2147483648 {
+			t.Fatalf("RandomSeed() = %d out of int32 range", s)
+		}
+		seen[s] = true
+	}
+	if len(seen) < 2 {
+		t.Fatal("RandomSeed() should not return the same value every call")
+	}
+}
+
 // ---- store tests (need live PostgreSQL; skipped without TEST_DATABASE_URL) --
 
 // newDBStore opens a throwaway store against TEST_DATABASE_URL (same pattern
@@ -167,7 +183,7 @@ func TestCreateGetDefaults(t *testing.T) {
 	if err := json.Unmarshal(w.Settings, &settings); err != nil {
 		t.Fatalf("settings not valid json: %v", err)
 	}
-	if cap, _ := settings["cap"].(float64); cap != DefaultCap {
+	if capVal, _ := settings["cap"].(float64); capVal != DefaultCap {
 		t.Fatalf("default cap = %v, want %d", settings["cap"], DefaultCap)
 	}
 
@@ -518,7 +534,7 @@ func TestUpdateSettings(t *testing.T) {
 	if err := json.Unmarshal(got.Settings, &settings); err != nil {
 		t.Fatalf("settings not valid json: %v", err)
 	}
-	if cap, _ := settings["cap"].(float64); cap != 4 {
+	if capVal, _ := settings["cap"].(float64); capVal != 4 {
 		t.Fatalf("cap not updated: %v", settings)
 	}
 	if err := s.UpdateSettings("wnonexistent", json.RawMessage(`{}`)); !errors.Is(err, ErrNotFound) {

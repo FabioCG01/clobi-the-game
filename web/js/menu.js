@@ -5,8 +5,11 @@
 //   - Hero: game logo + a large live 3D turntable of the currently-worn skin
 //     (PlayerModel.attachTurntable; falls back to a friendly message when the
 //     browser has no WebGL2).
-//   - [PLAY] continues the saved world ('Continue' + a 'New world' seed/mode
-//     modal when a save exists, plain 'Play' otherwise) via Game.start.
+//   - [PLAY] routes to the Worlds screen (Part II, ARCHITECTURE-MP.md §4.7:
+//     App.showScreen('worlds') -> WorldSelect). The old local-only
+//     'Continue'/'New world' flow now lives there as the always-first "Local
+//     world" card (My Worlds tab) — ported verbatim so guests keep the exact
+//     same offline experience.
 //   - [WARDROBE] / [SKIN STUDIO] / [MARKETPLACE] routed through App.showScreen.
 //   - Wardrobe (#screen-wardrobe, owned by this module): grid of the skin
 //     library with 3D thumbnails (PlayerModel.preview), per-skin actions
@@ -14,9 +17,10 @@
 //     default), Import PNG (file picker + drag-drop, any Minecraft skin,
 //     model auto-detect with manual override), New skin (-> Skin Studio).
 //   - A SUBTLE top-right corner: language switcher, sound toggle, About (lore,
-//     with the "Activate Windows" gag easter egg wired to Gag), and Sign in
-//     (account modal: register / login / logout via Store; on login the cloud
-//     skin library + active skin are pulled).
+//     with the "Activate Windows" gag easter egg wired to Gag), Friends
+//     (Part II: badge = pending incoming requests, Friends.showModal()), and
+//     Sign in (account modal: register / login / logout via Store; on login
+//     the cloud skin library + active skin are pulled).
 //   - Menu.showLanguagePopup(): the first-visit / on-demand language chooser.
 //
 // A respectful TRIBUTE to Clobi delivered through comedy: vim, Fisherman's
@@ -26,7 +30,8 @@
 //
 // Exposes exactly one global: window.Menu
 // Depends on globals (all typeof-guarded): I18n, Store, App, Skins,
-// PlayerModel, World, Game, SkinStudio, Market, Sound, Gag.
+// PlayerModel, World, Game, SkinStudio, Market, Sound, Gag, WorldSelect,
+// Friends (the last two are Part II additions).
 
 const Menu = (function () {
   'use strict';
@@ -41,9 +46,8 @@ const Menu = (function () {
   let skinWired = false;      // App/Store skin-change listener attached once
 
   let heroTT = null;          // PlayerModel.attachTurntable handle
-  let hasSave = false;        // a saved world exists (World.load('default'))
-  let saveMeta = null;        // its meta (for continuing in the saved mode)
   let inWardShow = false;     // re-entrancy guard for showWardrobe()
+  let friendsWired = false;   // 'clobi:friends-changed' listener attached once (Part II)
 
   const skinCache = {};       // rec.id|png -> Promise<skin> (thumbnail loads)
 
@@ -140,7 +144,14 @@ const Menu = (function () {
     download: ['M12 4 V15', 'M7 10 L12 15 L17 10', 'M4 19 H20'],
     upload: ['M12 15 V4', 'M7 9 L12 4 L17 9', 'M4 19 H20'],
     trash: ['M5 7 H19', 'M9 7 V4 H15 V7', 'M7 7 L8 20 H16 L17 7'],
-    star: ['M12 3 L14.6 9 L21 9.6 L16 13.8 L17.6 20.4 L12 16.8 L6.4 20.4 L8 13.8 L3 9.6 L9.4 9 Z']
+    star: ['M12 3 L14.6 9 L21 9.6 L16 13.8 L17.6 20.4 L12 16.8 L6.4 20.4 L8 13.8 L3 9.6 L9.4 9 Z'],
+    // Part II: two overlapping people, for the Friends corner button.
+    friends: [
+      'M2 21 L2 19 Q2 15.5 7 15.5 Q12 15.5 12 19 L12 21',
+      'M4 9.5 A3.5 3.5 0 1 0 11 9.5 A3.5 3.5 0 1 0 4 9.5',
+      'M13.5 21 L13.5 19.2 Q13.5 16.5 18 16 Q22.5 16.5 22.5 19.2 L22.5 21',
+      'M15.5 6.2 A3 3 0 1 0 21.5 6.2 A3 3 0 1 0 15.5 6.2'
+    ]
   };
 
   // ---- WebGL2 availability (for the hero turntable + thumbnails) ---------
@@ -170,7 +181,7 @@ const Menu = (function () {
     ensureRoot();
     clear(rootEl);
 
-    // ---------- Top-right corner: about + sound + language + sign-in ------
+    // ---------- Top-right corner: about + sound + language + friends + sign-in --
     const aboutBtn = el('button', {
       id: 'menu-about-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
       title: t('nav.about', 'About'),
@@ -189,6 +200,14 @@ const Menu = (function () {
       onclick: showLanguagePopup
     }, [icon('globe', 13), el('span', { class: 'corner-lang-label', text: currentLangName() })]);
 
+    // Part II (§4.7): Friends corner button, badge = pending incoming count.
+    const friendsBadge = el('span', { id: 'menu-friends-badge', class: 'corner-badge', style: 'display:none' });
+    const friendsBtn = el('button', {
+      id: 'menu-friends-btn', class: 'corner-btn pixbtn-ghost', type: 'button',
+      title: t('friends.title', 'Friends'),
+      onclick: function () { click(); openFriends(); }
+    }, [icon('friends', 13), el('span', { class: 'corner-lang-label', text: t('friends.title', 'Friends') }), friendsBadge]);
+
     const signLabel = el('span', { class: 'signin-label', text: t('nav.signIn', 'Sign in') });
     const signBtn = el('button', {
       id: 'menu-signin-btn', class: 'corner-btn signin-btn pixbtn-ghost', type: 'button',
@@ -196,7 +215,7 @@ const Menu = (function () {
       onclick: openAccountModal
     }, [icon('user', 13), signLabel]);
 
-    const corner = el('div', { class: 'menu-corner' }, [aboutBtn, muteBtn, langBtn, signBtn]);
+    const corner = el('div', { class: 'menu-corner' }, [aboutBtn, muteBtn, langBtn, friendsBtn, signBtn]);
 
     // ---------- Title ------------------------------------------------------
     const title = el('div', { class: 'menu-title' }, [
@@ -227,17 +246,14 @@ const Menu = (function () {
       nickInput
     ]);
 
-    // ---------- PLAY (Continue / Play) + New world -------------------------
+    // ---------- PLAY -> Worlds screen (Part II §4.3/§4.7) -------------------
+    // Local "Continue"/"New world" and server worlds all live one screen
+    // further in now, inside WorldSelect's "My Worlds" tab.
     const playBtn = el('button', {
       id: 'menu-play-btn', class: 'pixbtn pixbtn-primary', type: 'button', onclick: onClickPlay
     }, [icon('play', 18), el('span', { text: t('menu.play', 'Play') })]);
 
-    const newWorldBtn = el('button', {
-      id: 'menu-newworld-btn', class: 'pixbtn-ghost', type: 'button', style: 'display:none',
-      onclick: function () { click(); openNewWorldModal(); }
-    }, [icon('plus', 12), el('span', { text: t('menu.newWorld', 'New world') })]);
-
-    const playRow = el('div', { class: 'menu-play-row' }, [playBtn, newWorldBtn]);
+    const playRow = el('div', { class: 'menu-play-row' }, [playBtn]);
 
     // ---------- Secondary actions: Wardrobe / Studio / Market --------------
     const wardBtn = el('button', {
@@ -289,17 +305,20 @@ const Menu = (function () {
     setText('menu-tagline', t('menu.tagline3d', "Clobi's Arena went full 3D — mine, build, and dress your blocky self."));
     setText('menu-nick-label', t('menu.nickname', 'Display name'));
     setPlaceholder('menu-nickname', t('menu.nicknamePh', 'Your penguin name'));
+    setBtnLabel('menu-play-btn', t('menu.play', 'Play'));
     setBtnLabel('menu-ward-btn', t('menu.wardrobe', 'Wardrobe'));
     setBtnLabel('menu-studio-btn', t('menu.skinStudio', 'Skin Studio'));
     setBtnLabel('menu-market-btn', t('nav.marketplace', 'Marketplace'));
-    setBtnLabel('menu-newworld-btn', t('menu.newWorld', 'New world'));
-    updatePlayRow();
     updateHeroCaption();
 
     const langLabel = rootEl && rootEl.querySelector('#menu-lang-btn .corner-lang-label');
     if (langLabel) langLabel.textContent = currentLangName();
     const aboutLabel = rootEl && rootEl.querySelector('#menu-about-btn .corner-lang-label');
     if (aboutLabel) aboutLabel.textContent = t('nav.about', 'About');
+    const friendsLabel = rootEl && rootEl.querySelector('#menu-friends-btn .corner-lang-label');
+    if (friendsLabel) friendsLabel.textContent = t('friends.title', 'Friends');
+    const friendsBtnEl = byId('menu-friends-btn');
+    if (friendsBtnEl) friendsBtnEl.title = t('friends.title', 'Friends');
     refreshAccountUi();
 
     if (wardBuilt) rebuildWardrobeStaticText();
@@ -318,9 +337,10 @@ const Menu = (function () {
     wireI18n();
     wireAuthExpiry();
     wireSkinSync();
+    wireFriendsSync();
     syncNickname();
     refreshAccountUi();
-    probeSave();
+    refreshFriendsBadge();
     mountHero();
 
     // Ensure visibility when called directly (no-op when routed by App).
@@ -462,119 +482,65 @@ const Menu = (function () {
   function onNicknameInput(e) { setNickname(e.target.value); }
 
   // =========================================================================
-  // PLAY — saved world probe, Continue/Play, New world modal
+  // PLAY — routes to the Worlds screen (Part II §4.3/§4.7). The local-play
+  // "Continue"/"New world" flow (World.load/World.wipe probing, FNV-1a seed
+  // parsing, the seed+mode "New world" modal, Game.start) that used to live
+  // here now lives in WorldSelect's "My Worlds" tab as the always-first
+  // "Local world" card — ported there verbatim so guests keep the exact same
+  // fully-offline experience, just one screen further in.
   // =========================================================================
-  function probeSave() {
-    if (typeof World === 'undefined' || !World.load) { hasSave = false; updatePlayRow(); return; }
-    try {
-      World.load('default').then(function (saved) {
-        hasSave = !!saved;
-        saveMeta = (saved && saved.meta) || null;
-        updatePlayRow();
-      }).catch(function () { hasSave = false; saveMeta = null; updatePlayRow(); });
-    } catch (e) { hasSave = false; updatePlayRow(); }
-  }
-
-  function updatePlayRow() {
-    const playBtn = byId('menu-play-btn');
-    if (playBtn) {
-      const span = playBtn.querySelector('span');
-      if (span) span.textContent = hasSave ? t('menu.continue', 'Continue') : t('menu.play', 'Play');
-      playBtn.title = span ? span.textContent : '';
-    }
-    const nw = byId('menu-newworld-btn');
-    if (nw) nw.style.display = hasSave ? '' : 'none';
-  }
-
-  function startGame(opts) {
-    if (typeof Game === 'undefined' || !Game.start) {
-      toast(t('vox.err.noEngine', 'The voxel engine failed to load — check the console.'), 'warn');
-      return;
-    }
-    try {
-      Promise.resolve(Game.start(opts)).catch(function (err) {
-        toast((err && err.message) || t('vox.err.startFail', 'Could not start the world.'), 'danger');
-      });
-    } catch (e) {
-      toast(t('vox.err.startFail', 'Could not start the world.'), 'danger');
-    }
-  }
-
   function onClickPlay() {
     click();
-    if (hasSave) startGame(saveMeta && saveMeta.mode ? { mode: saveMeta.mode } : {});
-    else startGame({ mode: 'survival' });
+    if (typeof App !== 'undefined' && App.showScreen) App.showScreen('worlds');
+    else if (typeof WorldSelect !== 'undefined' && WorldSelect.show) WorldSelect.show();
   }
 
-  // Seed input: plain integers pass through; any other text is FNV-1a hashed
-  // so "clobi forever" is a perfectly good (and shareable) seed.
-  function parseSeed(str) {
-    str = (str || '').trim();
-    if (!str) return undefined;
-    if (/^[+-]?\d+$/.test(str)) {
-      const n = parseInt(str, 10);
-      if (isFinite(n)) return n | 0;
+  // =========================================================================
+  // Friends (Part II §4.4/§4.7): corner button + pending-count badge.
+  // The modal itself lives in friends.js (Friends.showModal) — this module
+  // only owns the corner button's DOM and keeps its badge in sync.
+  // =========================================================================
+  function openFriends() {
+    if (typeof Friends === 'undefined' || !Friends.showModal) {
+      toast(t('friends.unavailable', 'Friends are unavailable right now.'), 'warn');
+      return;
     }
-    let h = 2166136261;
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 16777619);
+    if (!(typeof Store !== 'undefined' && Store.isLoggedIn && Store.isLoggedIn())) {
+      toast(t('friends.needLogin', 'Sign in to add friends.'), 'warn');
+      openAccountModal();
+      return;
     }
-    return h | 0;
+    Friends.showModal();
   }
 
-  function openNewWorldModal() {
-    let mode = 'survival';
-
-    const seedInput = el('input', {
-      class: 'pixinput', type: 'text', maxlength: '48', autocomplete: 'off', spellcheck: 'false',
-      placeholder: t('menu.seedPh', 'a number, or any words')
-    });
-
-    function makeModeBtn(id, key, fallback) {
-      return el('button', {
-        class: 'tab-btn' + (mode === id ? ' tab-btn-active' : ''), type: 'button', dataset: { mode: id },
-        onclick: function () { mode = id; syncTabs(); }
-      }, [el('span', { text: t(key, fallback) })]);
+  // Pulls the pending-incoming count via Friends.refreshBadge() (resolves a
+  // number) and paints #menu-friends-badge. Guests never fetch (no account,
+  // no friends) — the badge just stays hidden. Called once at boot and
+  // whenever friends.js fires 'clobi:friends-changed' (request sent/accepted/
+  // removed, or its modal closed) so the count never goes stale.
+  function refreshFriendsBadge() {
+    const badge = byId('menu-friends-badge');
+    if (!badge) return;
+    const signedIn = (typeof Store !== 'undefined' && Store.isLoggedIn && Store.isLoggedIn());
+    if (!signedIn || typeof Friends === 'undefined' || !Friends.refreshBadge) {
+      badge.style.display = 'none';
+      return;
     }
-    const tabs = el('div', { class: 'tab-row' }, [
-      makeModeBtn('survival', 'vox.mode.survival', 'Survival'),
-      makeModeBtn('creative', 'vox.mode.creative', 'Creative')
-    ]);
-    function syncTabs() {
-      const btns = tabs.querySelectorAll('.tab-btn');
-      btns[0].classList.toggle('tab-btn-active', mode === 'survival');
-      btns[1].classList.toggle('tab-btn-active', mode === 'creative');
-    }
+    Promise.resolve(Friends.refreshBadge()).then(function (n) {
+      const count = (typeof n === 'number' && n > 0) ? Math.round(n) : 0;
+      badge.textContent = count > 99 ? '99+' : String(count);
+      badge.style.display = count > 0 ? 'flex' : 'none';
+    }).catch(function () { /* offline — leave the last-known badge alone */ });
+  }
 
-    const warn = hasSave
-      ? el('p', { class: 'form-err', text: t('menu.newWorldWarn', 'Careful: this replaces your saved world!') })
-      : null;
-
-    const createBtn = el('button', {
-      class: 'pixbtn pixbtn-primary', type: 'button',
-      onclick: function () {
-        click();
-        const opts = { fresh: true, mode: mode };
-        const seed = parseSeed(seedInput.value);
-        if (seed !== undefined) opts.seed = seed;
-        closeAnyModal();
-        startGame(opts);
-      }
-    }, [icon('play', 14), el('span', { text: t('menu.createWorld', 'Create world') })]);
-
-    const body = [
-      formRow(t('menu.seed', 'Seed (optional)'), seedInput,
-        t('menu.seedHint', 'Same seed = same world. Empty = random.')),
-      formRow(t('menu.mode', 'Mode'), tabs),
-      warn,
-      el('div', { class: 'modal-actions' }, [
-        el('button', { class: 'pixbtn-ghost', type: 'button', onclick: closeAnyModal }, [el('span', { text: t('common.cancel', 'Cancel') })]),
-        createBtn
-      ])
-    ];
-    openModal(modalShell(t('menu.newWorldTitle', 'New world'), body));
-    setTimeout(function () { seedInput.focus(); }, 30);
+  // friends.js dispatches this DOM event (its modal lives in a different
+  // closure, so it can't call refreshFriendsBadge directly) whenever the
+  // pending count could have changed — same cross-module pattern as the
+  // existing 'clobi:auth-expired' listener below.
+  function wireFriendsSync() {
+    if (friendsWired || typeof window === 'undefined') return;
+    window.addEventListener('clobi:friends-changed', refreshFriendsBadge);
+    friendsWired = true;
   }
 
   // ---- secondary navigation -----------------------------------------------
@@ -1459,9 +1425,11 @@ const Menu = (function () {
       '.menu-actions .pixbtn{min-width:180px;padding:16px 18px;font-size:12px;}',
       // top-right corner
       '.menu-corner{position:absolute;top:12px;right:14px;z-index:30;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}',
-      '.corner-btn{font-size:9px;padding:6px 10px;color:#9aa3bf;}',
+      '.corner-btn{position:relative;font-size:9px;padding:6px 10px;color:#9aa3bf;}',
       '.corner-lang-label,.signin-label{letter-spacing:1px;}',
       '.signin-btn.signed-in{color:#7ff9e0;border-color:#7ff9e0;}',
+      // Part II: friends pending-count badge
+      '.corner-badge{position:absolute;top:-5px;right:-5px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:#ff6b6b;color:#1a1d2e;font-family:"Press Start 2P",monospace;font-size:7px;line-height:15px;text-align:center;box-shadow:0 0 0 2px #181b2c;display:none;align-items:center;justify-content:center;}',
       // about
       '.about-p{font-size:9px;color:#cfd4e8;line-height:1.9;margin:0 0 10px;}',
       '.about-egg-wrap{margin-top:8px;display:flex;flex-direction:column;gap:8px;align-items:center;text-align:center;}',

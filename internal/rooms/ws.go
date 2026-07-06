@@ -22,7 +22,7 @@ type wsConn interface {
 	ReadMessage() ([]byte, error)
 	WriteMessage([]byte) error
 	Close() error
-	CloseWithReason(code int, reason string) error
+	CloseWithReason(code uint16, reason string) error
 	SetReadDeadline(t time.Time) error
 }
 
@@ -34,10 +34,10 @@ const MaxFrameBytes = 64 * 1024
 // first 'hello' frame before being dropped (contract §3.3).
 const helloDeadline = 5 * time.Second
 
-// wsHandshakeTimeout is the deadline applied to the read loop generally
-// after hello succeeds (kept generous — the game itself pings/pongs to
-// detect dead peers; this is a backstop against a peer that stops sending
-// entirely without closing cleanly).
+// idleReadDeadline is the deadline applied to the read loop generally after
+// hello succeeds (kept generous — the game itself pings/pongs to detect dead
+// peers; this is a backstop against a peer that stops sending entirely
+// without closing cleanly).
 const idleReadDeadline = 90 * time.Second
 
 // clipChat is the chat message character clip (contract §3.3: "clipped 200").
@@ -249,9 +249,11 @@ func (inst *Instance) tryJoin(username string, guest bool, name, mode string, sk
 	return p, mustMarshal(welcome), true
 }
 
-// deltasSnapshotB64Locked is deltasSnapshotB64's body without re-acquiring
-// the lock (caller already holds inst.mu). Kept separate from the exported
-// deltasSnapshotB64 (which locks) to avoid self-deadlock from tryJoin.
+// deltasSnapshotB64Locked returns the FULL welcome payload: every chunk's
+// compacted records, base64-encoded, keyed "cx,cz" — the contract's "ALL
+// deltas of the world" join payload. Caller must already hold inst.mu (it is
+// only ever called from tryJoin, which builds the whole 'welcome' frame
+// under one critical section).
 func (inst *Instance) deltasSnapshotB64Locked() map[string]string {
 	out := make(map[string]string, len(inst.deltas))
 	for key, chunk := range inst.deltas {
@@ -263,11 +265,17 @@ func (inst *Instance) deltasSnapshotB64Locked() map[string]string {
 	return out
 }
 
-// playerView is the JSON-safe roster/join entry for one player.
+// playerView is the JSON-safe roster/join entry for one player. Skin is set
+// once at join time (in tryJoin, before p is ever published to another
+// goroutine) and never mutated afterwards, so it is safe to read here
+// without locking; Mode and the transform fields DO mutate concurrently
+// (via handleMode / handleMove on the player's own read-loop goroutine)
+// while this function may run from another connection's goroutine (e.g.
+// building a join roster), so both go through their locked accessors.
 func playerView(p *Player) map[string]interface{} {
 	pos, yaw, pitch, _, _, _ := p.snapshot()
 	return map[string]interface{}{
-		"id": p.ID, "name": p.Name, "guest": p.Guest, "skin": p.Skin, "mode": p.Mode,
+		"id": p.ID, "name": p.Name, "guest": p.Guest, "skin": p.Skin, "mode": p.modeSnapshot(),
 		"p": pos, "yaw": yaw, "pitch": pitch,
 	}
 }
@@ -690,7 +698,7 @@ func (inst *Instance) floodBreach(p *Player) bool {
 // close sends a 'kick' frame (when reason indicates flood; other reasons —
 // room closed, forced disconnect — still get a kick/close as appropriate)
 // then closes the underlying connection exactly once.
-func (p *Player) close(code int, reason string) {
+func (p *Player) close(code uint16, reason string) {
 	p.closeOnce.Do(func() {
 		p.closed.Store(true)
 		_ = p.conn.WriteMessage(mustMarshal(wsFrame{"t": "kick", "reason": reason}))

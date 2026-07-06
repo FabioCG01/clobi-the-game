@@ -47,6 +47,12 @@
   <div id="screen-market" class="screen"></div>
 
   <!-- ============================================================= -->
+  <!-- SCREEN: WORLDS — "Select World" (Part II, rendered/populated  -->
+  <!-- by worldselect.js): My Worlds + Join a Game tabs.             -->
+  <!-- ============================================================= -->
+  <div id="screen-worlds" class="screen"></div>
+
+  <!-- ============================================================= -->
   <!-- ACTIVATE WINDOWS GAG OVERLAY (populated by gag.js)            -->
   <!-- Always on top, outside the screens, ignores pointer events.   -->
   <!-- ============================================================= -->
@@ -59,7 +65,10 @@
 
   <!-- ============================================================= -->
   <!-- SCRIPTS — exact dependency load order per                     -->
-  <!-- docs/ARCHITECTURE-3D.md §2. Each file assigns ONE global.     -->
+  <!-- docs/ARCHITECTURE-3D.md §2 (Part I) and docs/ARCHITECTURE-MP.md -->
+  <!-- §4 (Part II: net.js/remoteplayers.js after game.js;           -->
+  <!-- worldselect.js/friends.js before menu.js). Each file assigns  -->
+  <!-- ONE global.                                                   -->
   <!-- ============================================================= -->
   <script src="js/i18n.js"></script>
   <script src="js/gag.js"></script>
@@ -82,8 +91,12 @@
   <script src="js/vox/hud.js"></script>
   <script src="js/vox/renderer.js"></script>
   <script src="js/vox/game.js"></script>
+  <script src="js/vox/net.js"></script>
+  <script src="js/vox/remoteplayers.js"></script>
   <script src="js/skinstudio.js"></script>
   <script src="js/market.js"></script>
+  <script src="js/worldselect.js"></script>
+  <script src="js/friends.js"></script>
   <script src="js/menu.js"></script>
   <script src="js/main.js"></script>
 </body>

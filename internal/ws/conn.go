@@ -191,13 +191,17 @@ func (c *Conn) failRead(err error) error {
 }
 
 // WriteMessage sends one text message, fragmenting internally into frames of
-// at most MaxFramePayload bytes each if the payload is larger (correctness
-// for completeness; in practice every message this server sends is far
-// smaller than that limit). Safe to call concurrently with itself and with
-// other WriteMessage/Close calls — a single mutex serializes all outgoing
-// frames so interleaved writers can never corrupt the stream.
+// at most MaxFramePayload bytes each if the payload is larger than that
+// (correctness for completeness; in practice every message this server sends
+// is far smaller than that limit). The overall message may be up to
+// MaxOutgoingMessage, well beyond the stricter MaxMessageSize this package
+// enforces on incoming reads — see MaxOutgoingMessage's doc comment for why
+// outgoing traffic gets a more generous ceiling. Safe to call concurrently
+// with itself and with other WriteMessage/Close calls — a single mutex
+// serializes all outgoing frames so interleaved writers can never corrupt the
+// stream.
 func (c *Conn) WriteMessage(data []byte) error {
-	if len(data) > MaxMessageSize {
+	if len(data) > MaxOutgoingMessage {
 		return ErrMessageTooBig
 	}
 	c.writeMu.Lock()

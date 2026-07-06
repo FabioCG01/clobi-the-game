@@ -10,6 +10,8 @@
 package server
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -69,7 +71,7 @@ func Run(addr, webDir, dsn string) error {
 	if err != nil {
 		return err
 	}
-	rms := rooms.NewManager(wld, acc.VerifyToken, soc)
+	rms := rooms.NewManager(wld, soc, acc.VerifyToken)
 
 	absWeb, err := filepath.Abs(webDir)
 	if err != nil {
@@ -781,23 +783,13 @@ func (s *server) mktReturn(w http.ResponseWriter, r *http.Request, id, user stri
 
 // ---- REST: worlds ----
 
-// worldView is the wire shape for one world in GET /api/worlds, per contract
-// §3.2. Live is populated by cross-referencing rooms.Manager for an instance
-// currently hosting this world — worlds.Store has no notion of live rooms, and
-// rooms.Manager has no notion of ownership/membership, so the merge happens
-// here in the handler.
-type worldView struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Seed      int64      `json:"seed"`
-	Owner     string     `json:"owner"`
-	Role      string     `json:"role"` // "owner" | "member"
-	Members   []string   `json:"members"`
-	UpdatedAt string     `json:"updatedAt"`
-	Live      *liveWorld `json:"live"`
-}
-
-// liveWorld is the "world is currently hosted" summary embedded in worldView.
+// liveWorld is the "world is currently hosted" summary merged into a
+// worlds.WorldView's Live field (contract §3.2: `live:null|{roomId,host,
+// players,access}`). worlds.Store has no notion of live rooms (that's
+// rooms.Manager's job) and rooms.Manager has no notion of ownership/
+// membership, so this merge happens here in the handler, per world, after
+// worlds.Store has already built the base view (id/name/seed/owner/role/
+// members/updatedAt).
 type liveWorld struct {
 	RoomID  string `json:"roomId"`
 	Host    string `json:"host"`
@@ -805,27 +797,34 @@ type liveWorld struct {
 	Access  string `json:"access"`
 }
 
-// worldViewOf builds the wire view for a world the requesting user owns or is
-// a member of, merging in live-room info from rooms.Manager when present.
-func (s *server) worldViewOf(w worlds.World, viewer string) worldView {
-	role := "member"
-	if w.Owner == viewer {
-		role = "owner"
-	}
-	v := worldView{
-		ID:        w.ID,
-		Name:      w.Name,
-		Seed:      w.Seed,
-		Owner:     w.Owner,
-		Role:      role,
-		Members:   w.Members,
-		UpdatedAt: w.UpdatedAt,
-	}
-	if inst, ok := s.rms.FindByWorld(w.ID); ok {
-		info := inst.Info()
-		v.Live = &liveWorld{RoomID: info.RoomID, Host: info.Host, Players: info.Players, Access: info.Access}
+// withLive fills in v.Live (left nil by worlds.Store) by checking
+// rooms.Manager for a live instance hosting this world.
+func (s *server) withLive(v worlds.WorldView) worlds.WorldView {
+	if inst, ok := s.rms.GetByWorld(v.ID); ok {
+		v.Live = liveWorld{
+			RoomID: inst.RoomID, Host: inst.HostUsername(),
+			Players: inst.PlayerCount(), Access: inst.Access(),
+		}
 	}
 	return v
+}
+
+// viewByID re-lists username's worlds and returns the merged view for one id
+// — the mutation endpoints (create/rename/members/import) share this instead
+// of hand-rolling a second "single world + role + members" query, since
+// worlds.Store's only view-shaped read is ListForUser (Get returns the bare
+// World, without role/members).
+func (s *server) viewByID(username, id string) (worlds.WorldView, bool) {
+	list, err := s.wld.ListForUser(username)
+	if err != nil {
+		return worlds.WorldView{}, false
+	}
+	for _, v := range list {
+		if v.ID == id {
+			return s.withLive(v), true
+		}
+	}
+	return worlds.WorldView{}, false
 }
 
 func (s *server) handleWorldsList(w http.ResponseWriter, r *http.Request) {
@@ -843,9 +842,9 @@ func (s *server) handleWorldsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list worlds")
 		return
 	}
-	views := make([]worldView, 0, len(list))
-	for _, wd := range list {
-		views = append(views, s.worldViewOf(wd, username))
+	views := make([]worlds.WorldView, 0, len(list))
+	for _, v := range list {
+		views = append(views, s.withLive(v))
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"worlds": views})
 }
@@ -853,6 +852,18 @@ func (s *server) handleWorldsList(w http.ResponseWriter, r *http.Request) {
 type worldsCreateBody struct {
 	Name string `json:"name"`
 	Seed *int64 `json:"seed"`
+}
+
+// randomSeed returns a crypto-random value in the int32 range (contract §3.2:
+// "seed default: crypto-random int32"), safe to round-trip through a JS
+// Number on the client (contract §1: "seed bigint NOT NULL -- int32 range
+// (JS-safe)").
+func randomSeed() int64 {
+	var b [4]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return time.Now().UnixNano() & 0x7fffffff
+	}
+	return int64(int32(binary.LittleEndian.Uint32(b[:])))
 }
 
 func (s *server) handleWorldsCreate(w http.ResponseWriter, r *http.Request) {
@@ -870,18 +881,21 @@ func (s *server) handleWorldsCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	var seed int64
+	seed := randomSeed()
 	if body.Seed != nil {
 		seed = *body.Seed
-	} else {
-		seed = worlds.RandomSeed()
 	}
 	wd, err := s.wld.Create(username, body.Name, seed)
 	if err != nil {
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.worldViewOf(wd, username))
+	view, ok := s.viewByID(username, wd.ID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "could not load created world")
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 type worldsIDBody struct {
@@ -908,12 +922,12 @@ func (s *server) handleWorldsRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	wd, ok := s.wld.Get(body.ID)
+	view, ok := s.viewByID(username, body.ID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "world not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.worldViewOf(wd, username))
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *server) handleWorldsDelete(w http.ResponseWriter, r *http.Request) {
@@ -931,7 +945,7 @@ func (s *server) handleWorldsDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if _, hosted := s.rms.FindByWorld(body.ID); hosted {
+	if _, hosted := s.rms.GetByWorld(body.ID); hosted {
 		writeError(w, http.StatusConflict, "close the room first")
 		return
 	}
@@ -966,12 +980,12 @@ func (s *server) handleWorldsMemberAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	wd, ok := s.wld.Get(body.ID)
+	view, ok := s.viewByID(username, body.ID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "world not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.worldViewOf(wd, username))
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *server) handleWorldsMemberRemove(w http.ResponseWriter, r *http.Request) {
@@ -993,12 +1007,12 @@ func (s *server) handleWorldsMemberRemove(w http.ResponseWriter, r *http.Request
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	wd, ok := s.wld.Get(body.ID)
+	view, ok := s.viewByID(username, body.ID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "world not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.worldViewOf(wd, username))
+	writeJSON(w, http.StatusOK, view)
 }
 
 type worldsImportBody struct {
@@ -1009,9 +1023,10 @@ type worldsImportBody struct {
 
 // handleWorldsImport (POST, auth) creates a new server world seeded from a
 // local (offline) world's edits. The body carries per-chunk base64 delta blobs
-// keyed "cx,cz" (contract §2 encoding); worlds.Store validates every record
-// (index range, block id, immutable y==0 edits) and rejects the whole import on
-// the first bad record.
+// keyed "cx,cz" (contract §2 encoding); worlds.DeltasFromWire decodes the wire
+// base64 to raw record bytes, and worlds.Store.Import validates + compacts
+// every record (index range, well-formed length) and rejects the whole import
+// on the first bad record.
 func (s *server) handleWorldsImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1032,12 +1047,22 @@ func (s *server) handleWorldsImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	wd, err := s.wld.Import(username, body.Name, body.Seed, body.Deltas)
+	deltas, err := worlds.DeltasFromWire(body.Deltas)
 	if err != nil {
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.worldViewOf(wd, username))
+	wd, err := s.wld.Import(username, body.Name, body.Seed, deltas)
+	if err != nil {
+		writeError(w, statusFor(err), err.Error())
+		return
+	}
+	view, ok := s.viewByID(username, wd.ID)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "could not load imported world")
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 // ---- REST: rooms ----
@@ -1048,8 +1073,18 @@ func (s *server) handleRoomsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	viewer, _ := s.optUser(r)
-	list := s.rms.List(viewer, s.soc.FriendsOf)
+	list := s.rms.List(viewer, s.friendsOf)
 	writeJSON(w, http.StatusOK, map[string]interface{}{"rooms": list})
+}
+
+// friendsOf adapts social.Store.ListFriends to the func(host string)[]string
+// shape rooms.Manager.List expects for its friends-visibility check.
+func (s *server) friendsOf(host string) []string {
+	friends, _, _, err := s.soc.ListFriends(host)
+	if err != nil {
+		return nil
+	}
+	return friends
 }
 
 type roomsOpenBody struct {
@@ -1083,14 +1118,10 @@ func (s *server) handleRoomsOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "world not found")
 		return
 	}
-	isMember := wd.Owner == username
-	if !isMember {
-		for _, m := range wd.Members {
-			if m == username {
-				isMember = true
-				break
-			}
-		}
+	isMember, err := s.wld.IsMember(body.WorldID, username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check membership")
+		return
 	}
 	if !isMember {
 		writeError(w, http.StatusForbidden, "not an owner or member of this world")
@@ -1110,7 +1141,7 @@ func (s *server) handleRoomsOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusFor(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"roomId": inst.Info().RoomID})
+	writeJSON(w, http.StatusOK, map[string]string{"roomId": inst.RoomID})
 }
 
 type roomsCloseBody struct {
@@ -1134,7 +1165,7 @@ func (s *server) handleRoomsClose(w http.ResponseWriter, r *http.Request) {
 	}
 	isOwner := false
 	if inst, ok := s.rms.Get(body.RoomID); ok {
-		if wd, ok := s.wld.Get(inst.Info().WorldID); ok {
+		if wd, ok := s.wld.Get(inst.World.ID); ok {
 			isOwner = wd.Owner == username
 		}
 	}
@@ -1157,7 +1188,7 @@ func (s *server) handleFriendsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "missing or invalid token")
 		return
 	}
-	friends, incoming, outgoing, err := s.soc.List(username)
+	friends, incoming, outgoing, err := s.soc.ListFriends(username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list friends")
 		return
@@ -1230,12 +1261,17 @@ func (s *server) friendsAuthBody(w http.ResponseWriter, r *http.Request) (string
 // ---- WebSocket: /ws/room ----
 
 // handleWSRoom upgrades the connection to a WebSocket and hands it to
-// rooms.Manager, which owns the entire client<->instance game protocol from
-// here (contract §3.3). Per contract §5, same-host origin is required (empty
-// Origin is allowed through for native/non-browser clients that don't send one
-// at all; browsers always send Origin on cross-origin AND same-origin requests
-// for WS upgrades, so this still blocks a page on another host from opening a
-// socket against this server on behalf of a visitor).
+// rooms.HandleConn, which owns the entire client<->instance game protocol
+// from here (contract §3.3) — it blocks for the lifetime of the connection,
+// so it is called directly on this handler's own goroutine (net/http already
+// runs each request, and thus each WS upgrade, on its own goroutine). Per
+// contract §5, same-host origin is required (empty Origin is allowed through
+// for native/non-browser clients that don't send one at all; browsers always
+// send Origin on WS upgrade requests, same-origin or not, so this still
+// blocks a page on another host from opening a socket against this server on
+// behalf of a visitor). ws.Accept() itself intentionally does not check
+// Origin (see its doc comment), so this check runs first, before the
+// handshake is allowed to proceed.
 func (s *server) handleWSRoom(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if !sameHostOrigin(origin, r.Host) {
@@ -1249,7 +1285,7 @@ func (s *server) handleWSRoom(w http.ResponseWriter, r *http.Request) {
 		// (e.g. 400 on a bad handshake); nothing more to do here.
 		return
 	}
-	s.rms.HandleConn(conn, r)
+	rooms.HandleConn(conn, s.rms)
 }
 
 // sameHostOrigin reports whether the Origin header's host matches r.Host,
@@ -1270,13 +1306,12 @@ func statusFor(err error) int {
 		errors.Is(err, social.ErrNotFound), errors.Is(err, rooms.ErrNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, market.ErrForbidden), errors.Is(err, worlds.ErrForbidden),
-		errors.Is(err, social.ErrForbidden), errors.Is(err, rooms.ErrForbidden):
+		errors.Is(err, rooms.ErrForbidden):
 		return http.StatusForbidden
 	case errors.Is(err, market.ErrBadInput), errors.Is(err, worlds.ErrBadInput),
-		errors.Is(err, social.ErrBadInput), errors.Is(err, rooms.ErrBadInput):
+		errors.Is(err, social.ErrBadInput), errors.Is(err, rooms.ErrBadAccess),
+		errors.Is(err, rooms.ErrBadPin):
 		return http.StatusBadRequest
-	case errors.Is(err, worlds.ErrHosted):
-		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

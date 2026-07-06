@@ -21,6 +21,27 @@
 //   Store.marketDelete/marketAdmin      thin /api/market/* fetch wrappers
 //   Store.setAdminDefaultSkin(rec)      POST /api/admin/default-skin (admin)
 //
+// Part II (ARCHITECTURE-MP.md §4.6): persistent worlds, rooms and friends —
+// thin fetch wrappers over the same REST client, same rules (Bearer token
+// when present, reject with Error(message-from-server), never throw sync):
+//   Store.worldsList()                  GET  /api/worlds            -> [WorldView]
+//   Store.worldsCreate({name,seed})     POST /api/worlds/create     -> WorldView
+//   Store.worldsRename(id,name)         POST /api/worlds/rename
+//   Store.worldsDelete(id)              POST /api/worlds/delete     (409 while hosted)
+//   Store.worldsMemberAdd(id,user)      POST /api/worlds/members/add
+//   Store.worldsMemberRemove(id,user)   POST /api/worlds/members/remove
+//   Store.worldsImport(payload)         POST /api/worlds/import     -> WorldView
+//     (payload: {name, seed, deltas:{"cx,cz":base64,…}} — pairs with
+//      world.exportLocalDeltas() in js/vox/world.js for "Upload to server")
+//   Store.roomsList()                   GET  /api/rooms             -> [RoomInfo]
+//   Store.roomsOpen({worldId,access,pin}) POST /api/rooms/open      -> {roomId}
+//     (409 ErrAlreadyHosted surfaces as err.data = {error,host,roomId})
+//   Store.roomsClose(roomId)            POST /api/rooms/close
+//   Store.friendsList()                 GET  /api/friends -> {friends,incoming,outgoing}
+//   Store.friendsRequest(u)             POST /api/friends/request
+//   Store.friendsAccept(u)              POST /api/friends/accept
+//   Store.friendsRemove(u)              POST /api/friends/remove
+//
 // Optional account REST client (talks to the Go server's /api/* endpoints via
 // fetch; Bearer-token auth):
 //   Store.register(u, p)         -> Promise<character>  (saves token, persists character)
@@ -602,6 +623,87 @@ var Store = (function () {
     marketAdmin: function (id, action) {
       var path = action === 'ban' ? '/api/market/admin/ban' : '/api/market/admin/revoke';
       return request('POST', path, { id: id }, true).then(it);
+    },
+
+    // -------- Part II (§4.6): persistent worlds --------------------------
+    // GET /api/worlds -> {worlds:[WorldView]}; unwrapped to the bare array
+    // (same convention as marketListSkins/market.list above).
+    worldsList: function () {
+      return request('GET', '/api/worlds', null, true).then(function (d) { return (d && d.worlds) || []; });
+    },
+    // POST /api/worlds/create {name, seed?} -> WorldView (bare object — the
+    // endpoint itself is not wrapped in an {item}/{world} envelope).
+    worldsCreate: function (opts) {
+      opts = opts || {};
+      var body = { name: opts.name || '' };
+      if (typeof opts.seed === 'number' && isFinite(opts.seed)) body.seed = opts.seed;
+      return request('POST', '/api/worlds/create', body, true);
+    },
+    worldsRename: function (id, name) {
+      return request('POST', '/api/worlds/rename', { id: id, name: name }, true);
+    },
+    // 409 while the world is currently hosted — surfaces as a rejected
+    // promise (Error) same as any other non-2xx response; the caller reads
+    // err.message for the "close the room first" text from the server.
+    worldsDelete: function (id) {
+      return request('POST', '/api/worlds/delete', { id: id }, true);
+    },
+    worldsMemberAdd: function (id, user) {
+      return request('POST', '/api/worlds/members/add', { id: id, username: user }, true);
+    },
+    worldsMemberRemove: function (id, user) {
+      return request('POST', '/api/worlds/members/remove', { id: id, username: user }, true);
+    },
+    // POST /api/worlds/import {name, seed, deltas:{"cx,cz":base64,…}} -> WorldView.
+    // `payload` is passed straight through — pairs with world.exportLocalDeltas()
+    // (js/vox/world.js), which already produces the deltas map in this shape.
+    worldsImport: function (payload) {
+      return request('POST', '/api/worlds/import', payload || {}, true);
+    },
+
+    // -------- Part II (§4.6): rooms (hosting) -----------------------------
+    // GET /api/rooms is public with optional auth (so signed-in viewers also
+    // see 'friends'-access rooms they're allowed into) — same "always attach
+    // the token when we have one" convention as market.list/marketListSkins.
+    roomsList: function () {
+      return request('GET', '/api/rooms', null, true).then(function (d) { return (d && d.rooms) || []; });
+    },
+    // POST /api/rooms/open {worldId, access, pin?} -> {roomId}. On 409
+    // ErrAlreadyHosted the rejected Error carries err.status===409 and
+    // err.data === {error:"already hosted", host, roomId} (the existing
+    // request() helper already attaches the full parsed body to err.data for
+    // any non-2xx response — nothing extra needed here for the "join
+    // instead?" UX to read host/roomId off the caught error).
+    roomsOpen: function (opts) {
+      opts = opts || {};
+      var body = { worldId: opts.worldId, access: opts.access };
+      if (opts.pin) body.pin = opts.pin;
+      return request('POST', '/api/rooms/open', body, true);
+    },
+    roomsClose: function (roomId) {
+      return request('POST', '/api/rooms/close', { roomId: roomId }, true);
+    },
+
+    // -------- Part II (§4.6): friends --------------------------------------
+    friendsList: function () {
+      return request('GET', '/api/friends', null, true).then(function (d) {
+        return {
+          friends: (d && d.friends) || [],
+          incoming: (d && d.incoming) || [],
+          outgoing: (d && d.outgoing) || []
+        };
+      });
+    },
+    friendsRequest: function (u) {
+      return request('POST', '/api/friends/request', { username: u }, true);
+    },
+    friendsAccept: function (u) {
+      return request('POST', '/api/friends/accept', { username: u }, true);
+    },
+    // Decline a pending incoming request OR unfriend an accepted one — same
+    // endpoint handles both per the server contract.
+    friendsRemove: function (u) {
+      return request('POST', '/api/friends/remove', { username: u }, true);
     },
 
     // GDPR: download all personal data we hold for this account.

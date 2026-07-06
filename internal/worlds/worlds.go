@@ -136,6 +136,20 @@ func defaultSettings() json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{"cap":%d}`, DefaultCap))
 }
 
+// RandomSeed returns a cryptographically random seed in the int32 range
+// (contract §3.2, POST /api/worlds/create: "seed default: crypto-random
+// int32" — int32 keeps the seed JS-safe end-to-end, since the client's
+// WorldGen consumes a plain JS number). Falls back to a time-derived seed in
+// the vanishingly unlikely case crypto/rand is unavailable, so world creation
+// never hard-fails just because a default seed couldn't be minted.
+func RandomSeed() int64 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return time.Now().UnixNano() & 0x7fffffff
+	}
+	return int64(int32(uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24))
+}
+
 // ---- create / read / rename / delete ------------------------------------
 
 // Create makes a new world owned by owner. name is clipped to MaxNameRunes; a

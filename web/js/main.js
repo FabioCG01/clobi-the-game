@@ -29,7 +29,9 @@ var App = (function () {
   'use strict';
 
   // ---- live shared state ---------------------------------------------------
-  var SCREENS = ['menu', 'game', 'studio', 'wardrobe', 'market'];
+  // Part II (ARCHITECTURE-MP.md §4.3): 'worlds' is the WorldSelect screen
+  // (My Worlds / Join a Game), routed exactly like wardrobe/studio/market.
+  var SCREENS = ['menu', 'game', 'studio', 'wardrobe', 'market', 'worlds'];
   var _current = null;        // active screen name (null until boot routes)
   var _booted = false;
 
@@ -59,11 +61,12 @@ var App = (function () {
     }
   }
 
-  // Lifecycle table (per contract §5.21):
+  // Lifecycle table (per contract §5.21; Part II adds 'worlds' — §4.3):
   //   menu     -> Menu.show()/Menu.hide()
   //   wardrobe -> Menu.showWardrobe()/Menu.hideWardrobe()  (wardrobe lives in menu.js)
   //   studio   -> SkinStudio.show(opts)/SkinStudio.hide()
   //   market   -> Market.show()/Market.hide()
+  //   worlds   -> WorldSelect.show()/WorldSelect.hide()
   //   game     -> none: Game.start()/Game.stop() are the explicit entry/exit.
   function lifecycleHide(name) {
     if (!name) return;
@@ -72,6 +75,7 @@ var App = (function () {
       else if (name === 'wardrobe' && typeof Menu !== 'undefined' && Menu.hideWardrobe) Menu.hideWardrobe();
       else if (name === 'studio' && typeof SkinStudio !== 'undefined' && SkinStudio.hide) SkinStudio.hide();
       else if (name === 'market' && typeof Market !== 'undefined' && Market.hide) Market.hide();
+      else if (name === 'worlds' && typeof WorldSelect !== 'undefined' && WorldSelect.hide) WorldSelect.hide();
     } catch (e) { /* a module's teardown must never block navigation */ }
   }
 
@@ -81,6 +85,7 @@ var App = (function () {
       else if (name === 'wardrobe' && typeof Menu !== 'undefined' && Menu.showWardrobe) Menu.showWardrobe(opts);
       else if (name === 'studio' && typeof SkinStudio !== 'undefined' && SkinStudio.show) SkinStudio.show(opts);
       else if (name === 'market' && typeof Market !== 'undefined' && Market.show) Market.show(opts);
+      else if (name === 'worlds' && typeof WorldSelect !== 'undefined' && WorldSelect.show) WorldSelect.show(opts);
     } catch (e) { /* module owns its DOM; a failed show leaves the screen blank, not the app dead */ }
   }
 

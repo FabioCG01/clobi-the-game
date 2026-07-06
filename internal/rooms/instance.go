@@ -83,6 +83,18 @@ func (p *Player) snapshot() (pos [3]float64, yaw, pitch, swing float64, crouch, 
 	return p.Pos, p.Yaw, p.Pitch, p.Swing, p.Crouch, p.Fly
 }
 
+// modeSnapshot returns the player's current gamemode under its lock. Mode is
+// written by handleMode (on that player's own read-loop goroutine) but read
+// by playerView from OTHER goroutines building a roster/join/welcome frame
+// (e.g. a joining player's welcome roster reads every already-connected
+// player's Mode), so it needs the same lock discipline as the transform
+// fields even though it is logically unrelated to movement.
+func (p *Player) modeSnapshot() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Mode
+}
+
 // Instance is one live, in-memory room: the runtime for a single world being
 // played right now. Exactly one Instance may exist per world at a time,
 // which Manager enforces (see rooms.go). Instance state mirrors the
@@ -529,22 +541,6 @@ func floorDiv16(v int) int {
 		return v / 16
 	}
 	return -((-v + 15) / 16)
-}
-
-// deltasSnapshotB64 returns the FULL welcome payload: every chunk's
-// compacted records, base64-encoded, keyed "cx,cz" — the contract's
-// "ALL deltas of the world" join payload.
-func (inst *Instance) deltasSnapshotB64() map[string]string {
-	inst.mu.Lock()
-	defer inst.mu.Unlock()
-	out := make(map[string]string, len(inst.deltas))
-	for key, chunk := range inst.deltas {
-		if len(chunk) == 0 {
-			continue
-		}
-		out[key] = base64Encode(encodeRecords(chunk))
-	}
-	return out
 }
 
 func mustMarshal(v interface{}) []byte {

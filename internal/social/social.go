@@ -152,6 +152,21 @@ func (s *Store) AreFriends(a, b string) (bool, error) {
 	return r.status == statusAccepted, nil
 }
 
+// FriendsOf returns username's accepted friends only (no incoming/outgoing),
+// silently returning an empty slice on any lookup error. This is the exact
+// `func(host string) []string` shape rooms.Manager.List's friendsOf callback
+// wants (contract §3.1: "friends → only if viewer ∈ host's accepted
+// friends") — a thin convenience wrapper over ListFriends kept error-free at
+// this boundary because List is a best-effort visibility filter, not a
+// request that should ever fail a whole room listing over one lookup hiccup.
+func (s *Store) FriendsOf(username string) []string {
+	friends, _, _, err := s.ListFriends(username)
+	if err != nil {
+		return []string{}
+	}
+	return friends
+}
+
 // ---- mutations --------------------------------------------------------------
 
 // Request sends a friend request from -> to. Returns ErrNotFound if `to`

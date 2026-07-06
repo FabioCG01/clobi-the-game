@@ -116,11 +116,18 @@ explicit Close, or by a janitor when **empty for 60 s**; on close: flush deltas 
 settings (spawn/time), release lock. Server shutdown flushes all instances.
 Autoflush ticker: 10 s, dirty chunks only (Delta Saving).
 
-Join permission (`CanJoin(user, guest bool)`): banned=no v1; `private` → host only
-(and world owner); `friends` → host's accepted friends ∪ world members ∪ owner;
+Join permission (`CanJoin(user, guest bool)`): banned=no v1. Members and the
+owner ALWAYS pass, at ANY access level, including `private` — "private" means
+"not discoverable/joinable by the general public," not "excludes your own
+invited members" (world memberships exist precisely so an owner can share a
+world; a private room that locked out its own members would defeat that).
+For everyone else (non-member, non-owner accounts, and guests): `private` →
+host only; `friends` → host's accepted friends (world members/owner already
+covered by the always-pass rule above, so this branch is strangers-only);
 `password` → anyone with correct PIN (bcrypt compare); `public` → anyone incl.
-guests. Members and the owner ALWAYS pass access checks (any access level).
-Guests may join only `public` (and never host). Cap enforced (settings.cap).
+guests. Guests may join only `public` (and never host, and never match a
+member/owner check since they have no account username). Cap enforced
+(settings.cap).
 
 ### 3.2 REST endpoints (same mux/auth/JSON patterns as Part I)
 
@@ -320,4 +327,15 @@ Same rule: every string `I18n.t(key, 'English fallback')`; translation pass at t
 6. Friend request → accept flow works both directions; auto-accept on mutual request.
 7. Local world untouched for guests; “Upload to server” produces a working server
    world whose deltas equal the local edits.
-8. `go build/vet/test ./...` green including `internal/ws` frame tests.
+8. `go build/vet/test ./...` green including `internal/ws` frame tests. **Run
+   DB-gated tests with `go test -p 1 ./...`** (not the default concurrent
+   per-package run) when `TEST_DATABASE_URL` is set: `accounts`/`worlds`/
+   `social` share a real FK graph rooted at `accounts.username`, and each
+   truncates only its own tables for isolation (deliberately, so no suite's
+   truncate cascades into tables another suite owns) — correct sequentially,
+   but running them as concurrent OS processes against the same live
+   Postgres (Go's default) causes them to deadlock/race truncating
+   overlapping rows. `-p 1` is the standard, zero-code-change fix for
+   integration suites that share one database; do not "fix" this by widening
+   any single suite's truncate list to cover the others' tables — that
+   was tried and makes the deadlock worse, not better (verified 2026-07-06).

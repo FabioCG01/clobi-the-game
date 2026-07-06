@@ -201,8 +201,11 @@ func (m *Manager) Open(world worlds.World, host, access, pin string) (*Instance,
 		return nil, ErrAlreadyHosted{Host: existing.HostUsername(), RoomID: existing.RoomID}
 	}
 	roomID := m.newRoomID()
-	for _, collide := m.byRoom[roomID]; collide; _, collide = m.byRoom[roomID] {
-		roomID = m.newRoomID() // extremely unlikely collision guard
+	for { // extremely unlikely collision guard
+		if _, taken := m.byRoom[roomID]; !taken {
+			break
+		}
+		roomID = m.newRoomID()
 	}
 	inst := newInstance(instanceConfig{
 		roomID:    roomID,

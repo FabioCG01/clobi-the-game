@@ -29,18 +29,28 @@ const (
 	CloseInternalError   uint16 = 1011
 )
 
-// MaxFramePayload is the hard cap on a single frame's payload length. Frames
-// (and, by extension, reassembled messages built from many frames) larger
-// than this are rejected rather than buffered, so a hostile or buggy peer
-// cannot OOM the server by claiming a huge length.
+// MaxFramePayload is the hard cap on a single frame's payload length,
+// enforced on every frame this package reads regardless of direction. Frames
+// larger than this are rejected (declared length alone is enough to reject —
+// we never buffer up to it first) so a hostile or buggy peer cannot OOM the
+// server by claiming a huge length.
 const MaxFramePayload = 256 * 1024 // 256 KiB
 
-// MaxMessageSize is the hard cap on a reassembled (possibly fragmented) text
-// message. Kept equal to MaxFramePayload: nothing this server sends or
-// expects needs multi-frame messages larger than one frame's worth anyway,
-// but fragmentation is still fully supported for correctness against peers
-// that split large sends into many small frames.
+// MaxMessageSize is the hard cap on a reassembled (possibly fragmented)
+// INCOMING text message, i.e. what ReadMessage will accept from a peer. Kept
+// equal to MaxFramePayload: nothing a client legitimately sends this server
+// needs to be bigger than one frame's worth, so capping the reassembled total
+// at the same limit closes off "OOM via many small continuation frames"
+// alongside the single-frame check.
 const MaxMessageSize = MaxFramePayload
+
+// MaxOutgoingMessage is the hard cap on a message passed to WriteMessage.
+// It is deliberately more generous than MaxMessageSize/MaxFramePayload:
+// outgoing data is server-authored (never attacker-controlled), so the
+// OOM concern that motivates the tight incoming caps does not apply, and
+// WriteMessage transparently fragments anything over MaxFramePayload into
+// multiple frames per RFC 6455 §5.4.
+const MaxOutgoingMessage = 1024 * 1024 // 1 MiB
 
 // frameHeader is a fully parsed frame header (everything except the payload
 // bytes themselves, which the caller streams/copies separately).

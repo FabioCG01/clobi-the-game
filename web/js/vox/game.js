@@ -23,6 +23,23 @@
 //
 // URL dev hooks: ?seed=N&mode=creative&dist=3&dev=1 (dev=1 skips the
 // pointer-lock requirement and exposes window.__vox = {Game, World: world}).
+//
+// ---- Part II (ARCHITECTURE-MP.md §4.5): multiplayer additions ----
+//
+//   Game.startMultiplayer({welcome, skinRec}) -> Promise   Game.isMultiplayer
+//
+// Sibling entry point to start(): reuses the same one-time GPU bootstrap
+// (factored into the private bootEngine() helper) and the same idempotent
+// Input/HUD/Interact/Commands wiring, but sources the world from an
+// already-resolved `welcome` payload (World.createRemote — no IndexedDB) and
+// wires Net event handlers ('join'/'leave'/'moves'/'block'/'chat'/'sys'/
+// 'mode'/'time'/'host'/'kick'/'close') + world.onLocalEdit -> Net.send('block').
+// Autosave/IDB writes are disabled in MP (guarded inside saveNow()); /regen
+// and /setspawn are disabled with a toast+chat error (guarded inside regen()/
+// api.setSpawn); /time and /gamemode route their network side-effects through
+// api.setTime/setMode. Additionally consumes (guarded as optional, since they
+// load after game.js in index.html): Net, RemotePlayers, Menu (for the
+// kick/close toast).
 
 var Game = (function () {
   'use strict';
@@ -100,6 +117,15 @@ var Game = (function () {
   var dev = false;
 
   var paused = false, dead = false;
+
+  // ---- Part II (ARCHITECTURE-MP.md §4.5): multiplayer session state --------
+  var isMultiplayer = false;
+  var myNetId = null;             // welcome.youId — used to skip self-echoes
+  var netHandlers = null;         // {type: fn} registered via Net.on, unwired on stop()
+  var _moveState = {              // reused scratch object for Net.sendMove (no per-frame alloc)
+    p: [0, 0, 0], yaw: 0, pitch: 0,
+    anim: { swing: 0, crouch: false, fly: false }
+  };
 
   var player = {
     body: null, yaw: 0, pitch: 0, health: 20, air: 10,
@@ -562,6 +588,11 @@ var Game = (function () {
     HUD.toast(name);
     HUD.chatPrint(t('vox.msg.modeChanged', 'Game mode: {mode}').replace('{mode}', name), 'sys');
     saveNow();
+    // Part II: broadcast the player's own gamemode so others render it correctly
+    // (§3.3 'mode' — affects their rendering only, still client-authoritative).
+    if (isMultiplayer && typeof Net !== 'undefined' && Net.isConnected) {
+      try { Net.send('mode', { mode: m }); } catch (e) { /* connection hiccup — next echo self-heals */ }
+    }
   }
 
   // ---- pause ------------------------------------------------------------------------
@@ -636,6 +667,7 @@ var Game = (function () {
 
   function saveNow() {
     if (!world) return Promise.resolve();
+    if (isMultiplayer) return Promise.resolve();   // Part II: server owns persistence in MP — no IDB writes
     try {
       readVec(player.body.pos, _p);
       world.setMeta({
@@ -819,6 +851,20 @@ var Game = (function () {
     meshChunks();
     if ((frameNo & 31) === 0) dropFarMeshes();
 
+    // -- Part II: send our own move state, advance remote-player interpolation --
+    if (isMultiplayer) {
+      if (typeof Net !== 'undefined' && Net.isConnected && Net.sendMove) {
+        readVec(player.body.pos, _moveState.p);
+        _moveState.yaw = player.yaw;
+        _moveState.pitch = player.pitch;
+        _moveState.anim.swing = walkPhase;
+        _moveState.anim.crouch = !player.flying && typeof Input !== 'undefined' && !!Input.state && !!Input.state.sneak;
+        _moveState.anim.fly = !!player.flying;
+        Net.sendMove(_moveState);
+      }
+      if (typeof RemotePlayers !== 'undefined' && RemotePlayers.update) RemotePlayers.update(dt);
+    }
+
     // -- render (pass order pinned in §5.15/§5.16) --
     var env = Renderer.computeEnv(timeTicks, renderDist);
     var under = eyeUnderwater();
@@ -828,6 +874,9 @@ var Game = (function () {
     Renderer.drawChunks(renderCam, env, 'opaque');
     if (player.perspective !== 0 && skinTex) drawOwnPlayer(env);
     Renderer.drawSelection(renderCam, interactSys ? interactSys.target : null);
+    if (isMultiplayer && typeof RemotePlayers !== 'undefined' && RemotePlayers.draw) {
+      RemotePlayers.draw(gl, renderCam, env);
+    }
     Renderer.drawChunks(renderCam, env, 'translucent');
     Renderer.drawClouds(env, renderCam, nowMs);
     if (player.perspective === 0 && skinTex && active && !uiBlocked()) drawArm(env);
@@ -838,6 +887,10 @@ var Game = (function () {
       underwater: under,
       vignette: 0.15
     });
+
+    if (isMultiplayer && typeof RemotePlayers !== 'undefined' && RemotePlayers.nametags) {
+      RemotePlayers.nametags(renderCam, hudRoot);
+    }
 
     HUD.update(fillHudState());
     frameNo++;
@@ -851,6 +904,18 @@ var Game = (function () {
       ((typeof Input !== 'undefined' && Input.isTouch) ? 4 : 6), 2, 10);
     fovDeg = clamp(s.fov || 70, 30, 110);
     lutAmount = clamp((typeof s.lut === 'number' ? s.lut : 85) / 100, 0, 1);
+  }
+
+  // GPU-side one-time boot shared by start() and startMultiplayer() (Part II):
+  // atlas + LUT texture + Renderer/PlayerModel init are identical regardless
+  // of where the world data comes from. Returns the atlas (HUD.init wants it
+  // for hotbar icon drawing).
+  function bootEngine(glCtx) {
+    var atlas = Blocks.buildAtlas(glCtx);
+    var lutTex = LUT.texture(glCtx);
+    Renderer.init(glCtx, { atlas: atlas, lutTex: lutTex });
+    PlayerModel.init(glCtx);
+    return atlas;
   }
 
   function start(opts) {
@@ -873,11 +938,8 @@ var Game = (function () {
 
     applyStoredSettings(q);
 
-    // GPU-side one-offs
-    var atlas = Blocks.buildAtlas(gl);
-    var lutTex = LUT.texture(gl);
-    Renderer.init(gl, { atlas: atlas, lutTex: lutTex });
-    PlayerModel.init(gl);
+    // GPU-side one-offs (shared with startMultiplayer via bootEngine)
+    var atlas = bootEngine(gl);
 
     // skin: the app-wide active skin if the shell resolved one, else default
     var skinP = (typeof App !== 'undefined' && App.skin)
@@ -990,6 +1052,218 @@ var Game = (function () {
     });
   }
 
+  // ---- Part II (ARCHITECTURE-MP.md §4.5): multiplayer entry point ----------
+  //
+  // Sibling to start(): same GL/engine/input/HUD bootstrap (bootEngine +
+  // Input.init/wireInputEvents/HUD.init/Interact.create/Commands.init are
+  // reused verbatim — those are already idempotent, mode-agnostic shared
+  // helpers), but the world comes from an already-resolved `welcome` (the
+  // caller — WorldSelect — already did Store.roomsOpen -> Net.connect and is
+  // handing us the resolved welcome payload + the resolved skin to wear) and
+  // everything is synchronous (no IndexedDB probing, no saved-meta merge).
+
+  // Net.on(type, fn) handlers, wired once per startMultiplayer() call and
+  // unwired symmetrically in stop(). Kept as named functions on `netHandlers`
+  // so unwireNetHandlers() can pass the exact same reference to Net.off().
+  function wireNetHandlers() {
+    if (typeof Net === 'undefined' || !Net.on) return;
+    netHandlers = {
+      join: function (msg) {
+        if (msg && msg.player && msg.player.id !== myNetId && typeof RemotePlayers !== 'undefined') {
+          RemotePlayers.add(msg.player);
+        }
+      },
+      leave: function (msg) {
+        if (msg && msg.id !== myNetId && typeof RemotePlayers !== 'undefined') {
+          RemotePlayers.remove(msg.id);
+        }
+      },
+      moves: function (msg) {
+        if (!msg || !msg.m || typeof RemotePlayers === 'undefined') return;
+        var batch = msg.m.filter(function (row) { return row && row[0] !== myNetId; });
+        RemotePlayers.applyMoves(batch);
+      },
+      block: function (msg) {
+        if (msg && world) world.setBlockSilent(msg.x, msg.y, msg.z, msg.id);
+      },
+      chat: function (msg) {
+        if (msg) HUD.chatPrint('<' + msg.from + '> ' + msg.text);
+      },
+      sys: function (msg) {
+        if (msg) HUD.chatPrint(msg.text, msg.cls || 'sys');
+      },
+      mode: function (msg) {
+        if (msg && msg.id !== myNetId && typeof RemotePlayers !== 'undefined' && RemotePlayers.setMode) {
+          RemotePlayers.setMode(msg.id, msg.mode);
+        }
+      },
+      time: function (msg) {
+        if (msg && typeof msg.ticks === 'number') applyTimeLocal(msg.ticks);
+      },
+      host: function (msg) {
+        if (msg && msg.name) {
+          HUD.chatPrint(t('mp.chat.newHost', '{name} is now the host').replace('{name}', msg.name), 'sys');
+        }
+      },
+      kick: function (msg) {
+        var reason = (msg && msg.reason) || t('mp.err.kicked', 'You were disconnected from the server');
+        stop();
+        if (typeof Menu !== 'undefined' && Menu.toast) Menu.toast(reason, 'danger');
+      },
+      close: function (msg) {
+        stop();
+        if (typeof Menu !== 'undefined' && Menu.toast) {
+          Menu.toast((msg && msg.reason) || t('mp.err.disconnected', 'Disconnected from the server'), 'warn');
+        }
+      }
+    };
+    for (var type in netHandlers) {
+      if (Object.prototype.hasOwnProperty.call(netHandlers, type)) Net.on(type, netHandlers[type]);
+    }
+  }
+
+  function unwireNetHandlers() {
+    if (!netHandlers || typeof Net === 'undefined' || !Net.off) { netHandlers = null; return; }
+    for (var type in netHandlers) {
+      if (Object.prototype.hasOwnProperty.call(netHandlers, type)) Net.off(type, netHandlers[type]);
+    }
+    netHandlers = null;
+  }
+
+  function startMultiplayer(opts) {
+    opts = opts || {};
+    if (running || starting) return Promise.resolve();
+    starting = true;
+
+    try {
+      var welcome = opts.welcome || {};
+      var wWorld = welcome.world || {};
+
+      var q = urlParams();
+      dev = q.dev === '1';
+
+      ensureDom();
+      showGameScreen();
+
+      gl = GLX.getContext(canvas);
+      if (!gl) {
+        showWebglError();
+        starting = false;
+        return Promise.resolve();
+      }
+
+      applyStoredSettings(q);
+
+      // GPU-side one-offs (shared with start() via bootEngine)
+      var atlas = bootEngine(gl);
+      if (typeof RemotePlayers !== 'undefined' && RemotePlayers.init) RemotePlayers.init(gl);
+
+      // skin: whatever the caller already resolved (App.skin, typically)
+      setSkinInternal(opts.skinRec || (typeof App !== 'undefined' ? App.skin : null));
+
+      // world: server-authoritative, generated from seed + the welcome deltas
+      seed = (typeof wWorld.seed === 'number') ? (wWorld.seed | 0) : 0;
+      world = World.createRemote({ seed: seed, name: wWorld.name || welcome.roomId || 'remote', deltas: welcome.deltas });
+      gen = world.gen;
+
+      // own mode: whatever the server accepted at hello time (see our entry
+      // in welcome.players), defaulting to survival if not found.
+      mode = 'survival';
+      var myEntry = null;
+      if (Array.isArray(welcome.players)) {
+        for (var i = 0; i < welcome.players.length; i++) {
+          if (welcome.players[i] && welcome.players[i].id === welcome.youId) { myEntry = welcome.players[i]; break; }
+        }
+      }
+      if (myEntry && (myEntry.mode === 'survival' || myEntry.mode === 'creative')) mode = myEntry.mode;
+
+      timeTicks = (typeof wWorld.time === 'number') ? ((wWorld.time % DAY_TICKS) + DAY_TICKS) % DAY_TICKS : 0;
+
+      if (Array.isArray(wWorld.spawn) && wWorld.spawn.length === 3) {
+        player.spawn = wWorld.spawn.slice();
+      } else {
+        player.spawn = [0.5, (gen && gen.surfaceHeight ? gen.surfaceHeight(0, 0) : 68) + 2, 0.5];
+      }
+      var startPos = player.spawn;
+      pregenAround(startPos[0], startPos[2]);
+
+      player.body = Physics.createBody({ x: startPos[0], y: startPos[1], z: startPos[2] });
+      player.yaw = (myEntry && typeof myEntry.yaw === 'number') ? myEntry.yaw : 0;
+      player.pitch = (myEntry && typeof myEntry.pitch === 'number') ? myEntry.pitch : 0;
+      player.health = 20;
+      player.air = 10;
+      player.flying = false;
+      player.speedMult = 1;
+      player.perspective = 0;
+
+      inv = Inventory.create(mode);
+      if (mode === 'creative') inv.setCreativeDefaults();
+      else inv.setSurvivalDefaults();
+
+      // input / hud / interact / commands (Input listeners installed once —
+      // exactly the same shared, idempotent bootstrap as solo start())
+      if (!inputInited) {
+        Input.init({ canvas: canvas, hudRoot: hudRoot });
+        inputInited = true;
+      }
+      wireInputEvents();
+      Input.setTouchVisible(true);
+      Input.setUIMode(false);
+
+      HUD.init({ root: hudRoot, game: api, atlas: atlas });
+      interactSys = Interact.create({ world: world, player: player, inventory: inv, hud: HUD, game: api });
+      Commands.init({ game: api, hud: HUD });
+
+      canvas.removeEventListener('click', onCanvasClick);
+      canvas.addEventListener('click', onCanvasClick);
+
+      if (dev) window.__vox = { Game: api, World: world };
+
+      // ---- multiplayer-only wiring ----
+      isMultiplayer = true;
+      myNetId = welcome.youId;
+
+      if (typeof RemotePlayers !== 'undefined' && RemotePlayers.sync) {
+        var others = Array.isArray(welcome.players)
+          ? welcome.players.filter(function (p) { return p && p.id !== myNetId; })
+          : [];
+        RemotePlayers.sync(others);
+      }
+
+      // forward every LOCAL (non-silent) block edit to the server; the
+      // server's authoritative echo comes back through the 'block' handler
+      // above and applies via setBlockSilent (no loop — see world.js).
+      world.onLocalEdit(function (x, y, z, id) {
+        if (isMultiplayer && typeof Net !== 'undefined' && Net.isConnected) {
+          try { Net.send('block', { x: x, y: y, z: z, id: id }); } catch (e) { /* connection hiccup */ }
+        }
+      });
+
+      wireNetHandlers();
+
+      if (typeof Input !== 'undefined' && !Input.isTouch) {
+        HUD.chatPrint(t('vox.chat.hint', 'Press T to chat, / for commands, F3 for debug'), 'sys');
+      }
+      HUD.chatPrint(t('mp.chat.connected', 'Connected to {world}').replace('{world}', wWorld.name || t('mp.world.unnamed', 'the world')), 'sys');
+
+      // reset loop state and go (identical to start()'s reset block)
+      paused = false; dead = false;
+      physAcc = 0; lastMs = 0; frameNo = 0;
+      fpsFrames = 0; fpsTime = 0; fpsVal = 0;
+      lastW = 0; lastH = 0; lastDpr = 0;
+      fallDist = 0; wasOnGround = true; drownAcc = 0; regenAcc = 0;
+      lastDamageMs = -1e9; armSwingT = 99; wasBreaking = false;
+      running = true;
+      starting = false;
+      rafId = requestAnimationFrame(frame);
+      return Promise.resolve();
+    } catch (e) {
+      starting = false;
+      isMultiplayer = false;
+      return Promise.reject(e);
+    }
+  }
+
   function stop() {
     if (!running && !starting) return;
     running = false;
@@ -998,6 +1272,20 @@ var Game = (function () {
     document.removeEventListener('visibilitychange', onVisibility);
     window.removeEventListener('pagehide', onPageHide);
     saveNow();
+
+    // Part II: leave the room + drop remote-player GL resources before the
+    // context itself goes away (Renderer.destroyAll() below).
+    if (isMultiplayer) {
+      unwireNetHandlers();
+      if (typeof Net !== 'undefined' && Net.disconnect) {
+        try { Net.disconnect(); } catch (e) { /* already gone */ }
+      }
+      if (typeof RemotePlayers !== 'undefined' && RemotePlayers.destroy) {
+        try { RemotePlayers.destroy(); } catch (e) { /* ignore */ }
+      }
+      isMultiplayer = false;
+      myNetId = null;
+    }
 
     Renderer.destroyAll();
     generated = {}; meshed = {}; pendingMesh = {};
@@ -1020,6 +1308,10 @@ var Game = (function () {
 
   function regen(newSeed) {
     if (!running) return Promise.resolve();
+    if (isMultiplayer) {
+      HUD.toast(t('mp.err.regenDisabled', 'World regen is disabled in multiplayer'));
+      return Promise.reject(new Error(t('mp.err.regenDisabled', 'World regen is disabled in multiplayer')));
+    }
     return World.wipe(WORLD_NAME).then(function () {
       // drop every uploaded mesh, forget all streaming state
       for (var key in meshed) {
@@ -1056,15 +1348,32 @@ var Game = (function () {
     if (gl) skinTex = Skins.texture(gl, s);
   }
 
+  // Local time mutation only — never re-forwards to the network. This is the
+  // function the Part II Net 'time' handler calls to apply the server's
+  // authoritative tick (see wireNetHandlers below); api.setTime (below) is the
+  // command-facing entry point that forwards instead of mutating when in MP.
+  function applyTimeLocal(tv) {
+    timeTicks = ((tv % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;
+  }
+
   // ---- public API --------------------------------------------------------------------------------
 
   var api = {
     start: start,
+    startMultiplayer: startMultiplayer,
     stop: stop,
     setMode: setMode,
 
     setTime: function (tv) {
-      timeTicks = ((tv % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;
+      // Part II (§4.5): the /time command routes through the network when
+      // connected (host-only server-side; a non-host gets an 'error' event
+      // back and nothing changes locally until/unless the host actually sets
+      // it — the periodic 'time' broadcast then applies via applyTimeLocal).
+      if (isMultiplayer && typeof Net !== 'undefined' && Net.isConnected) {
+        Net.send('time', { set: ((tv % DAY_TICKS) + DAY_TICKS) % DAY_TICKS });
+        return;
+      }
+      applyTimeLocal(tv);
     },
     addTime: function (dtT) {
       api.setTime(timeTicks + dtT);
@@ -1092,6 +1401,14 @@ var Game = (function () {
     },
 
     setSpawn: function (x, y, z) {
+      // Part II (§4.5): disabled in multiplayer (v1 does not build the
+      // host-writes-world-settings path) — surface it loudly since the
+      // command itself (owned by commands.js) always prints a success line.
+      if (isMultiplayer) {
+        HUD.toast(t('mp.err.setspawnDisabled', 'Spawn changes are disabled in multiplayer'));
+        HUD.chatPrint(t('mp.err.setspawnDisabled', 'Spawn changes are disabled in multiplayer'), 'err');
+        return;
+      }
       player.spawn = [x, y, z];
       saveNow();
     },
@@ -1146,7 +1463,8 @@ var Game = (function () {
     player: { get: function () { return player; }, enumerable: true },
     world: { get: function () { return world; }, enumerable: true },
     inventory: { get: function () { return inv; }, enumerable: true },
-    timeTicks: { get: function () { return timeTicks; }, enumerable: true }
+    timeTicks: { get: function () { return timeTicks; }, enumerable: true },
+    isMultiplayer: { get: function () { return isMultiplayer; }, enumerable: true }
   });
 
   return api;

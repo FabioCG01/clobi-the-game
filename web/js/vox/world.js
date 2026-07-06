@@ -389,6 +389,18 @@ var World = (function () {
     function exportLocalDeltas() {
       var out = {};
       if (!gen || !gen.generateChunk) return Promise.resolve(out);
+      // Materialize every not-yet-streamed-in edited chunk from pendingEdits
+      // first: exportLocalDeltas() is typically called right after hydrating
+      // a fresh World.create({seed, gen, edits}) purely to upload it (nothing
+      // has actually streamed in yet — every edited chunk still sits in
+      // pendingEdits until ensureChunk() is called for that key), so without
+      // this the diff below would see an empty `chunks` Map and silently
+      // export {}. Safe to call on a live, partially-streamed world too —
+      // ensureChunk() is a no-op for keys already in `chunks`.
+      Object.keys(pendingEdits).forEach(function (k) {
+        var parts = k.split(',');
+        ensureChunk(parts[0] | 0, parts[1] | 0);
+      });
       chunks.forEach(function (ch) {
         if (!ch.edited) return;
         var pristine = gen.generateChunk(ch.cx, ch.cz);
