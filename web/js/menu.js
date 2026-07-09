@@ -49,6 +49,36 @@ const Menu = (function () {
   let inWardShow = false;     // re-entrancy guard for showWardrobe()
   let friendsWired = false;   // 'clobi:friends-changed' listener attached once (Part II)
 
+  // ---- "Install App" (PWA/TWA) -------------------------------------------
+  // Chrome/Edge fire `beforeinstallprompt` when the PWA is installable and
+  // NOT yet installed; we stash the event so the menu button can trigger the
+  // native install dialog. Captured at module load — the event often fires
+  // before the menu is even built.
+  let deferredInstall = null;
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferredInstall = e;
+  });
+  window.addEventListener('appinstalled', function () {
+    deferredInstall = null;
+    const b = byId('menu-install-btn');
+    if (b) b.style.display = 'none';
+  });
+
+  // Already running AS the installed app (PWA standalone / TWA / iOS
+  // home-screen)? Then the button is pointless — hide it.
+  function isInstalledApp() {
+    try {
+      if (window.matchMedia &&
+          (window.matchMedia('(display-mode: standalone)').matches ||
+           window.matchMedia('(display-mode: fullscreen)').matches ||
+           window.matchMedia('(display-mode: minimal-ui)').matches)) return true;
+    } catch (e) { /* ignore */ }
+    if (window.navigator.standalone) return true;                 // iOS Safari
+    if (/[?&]source=(pwa|twa)(&|$)/.test(window.location.search)) return true;
+    return false;
+  }
+
   const skinCache = {};       // rec.id|png -> Promise<skin> (thumbnail loads)
 
   // ---- i18n shortcut -----------------------------------------------------
@@ -268,7 +298,14 @@ const Menu = (function () {
       id: 'menu-market-btn', class: 'pixbtn', type: 'button', onclick: onClickMarketplace
     }, [icon('store', 16), el('span', { text: t('nav.marketplace', 'Marketplace') })]);
 
-    const actionRow = el('div', { class: 'menu-actions' }, [wardBtn, studioBtn, marketBtn]);
+    // ---------- Install App (PWA/TWA) — main-menu only, hidden once the ----
+    // ---------- game already runs as an installed app ----------------------
+    const installBtn = el('button', {
+      id: 'menu-install-btn', class: 'pixbtn', type: 'button', onclick: onClickInstall
+    }, [icon('download', 16), el('span', { text: t('menu.install', 'Install App') })]);
+    if (isInstalledApp()) installBtn.style.display = 'none';
+
+    const actionRow = el('div', { class: 'menu-actions' }, [wardBtn, studioBtn, marketBtn, installBtn]);
 
     // ---------- Footer tribute (comedy, respectful) -------------------------
     const footer = el('div', { id: 'menu-footer', class: 'menu-footer' }, footerNodes());
@@ -308,6 +345,7 @@ const Menu = (function () {
     setBtnLabel('menu-play-btn', t('menu.play', 'Play'));
     setBtnLabel('menu-ward-btn', t('menu.wardrobe', 'Wardrobe'));
     setBtnLabel('menu-studio-btn', t('menu.skinStudio', 'Skin Studio'));
+    setBtnLabel('menu-install-btn', t('menu.install', 'Install App'));
     setBtnLabel('menu-market-btn', t('nav.marketplace', 'Marketplace'));
     updateHeroCaption();
 
@@ -569,6 +607,68 @@ const Menu = (function () {
     }
     if (typeof App !== 'undefined' && App.showScreen) App.showScreen('market');
     else Market.show();
+  }
+
+  // ---- Install App ---------------------------------------------------------
+  // Preferred path: the stashed beforeinstallprompt event -> native Chrome/
+  // Edge install dialog (Android + desktop). Fallback: a platform-aware modal
+  // (iOS has NO programmatic install — Apple only allows Share -> Add to Home
+  // Screen; Android without the event gets the signed APK download).
+  function onClickInstall() {
+    click();
+    if (deferredInstall) {
+      const ev = deferredInstall;
+      deferredInstall = null;    // a BIP event is one-shot; Chrome re-fires later if dismissed
+      try {
+        ev.prompt();
+        if (ev.userChoice && ev.userChoice.then) {
+          ev.userChoice.then(function (choice) {
+            if (choice && choice.outcome === 'accepted') {
+              toast(t('install.installing', 'Installing CLOBI CRAFT…'), 'info');
+              const b = byId('menu-install-btn');
+              if (b) b.style.display = 'none';
+            }
+          }).catch(function () { /* dismissed — keep the button */ });
+        }
+        return;
+      } catch (e) { /* prompt() refused (already used) — fall through to modal */ }
+    }
+    openInstallModal();
+  }
+
+  function openInstallModal() {
+    const ua = navigator.userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua) ||
+      (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);   // iPadOS masquerades as macOS
+    const isAndroid = /Android/.test(ua);
+
+    const body = [];
+    if (isIOS) {
+      body.push(el('p', { class: 'modal-lead', text: t('install.iosLead', 'On iPhone/iPad, install from Safari:') }));
+      body.push(el('p', { class: 'modal-lead', text: t('install.ios1', '1. Tap the Share button (square with arrow)') }));
+      body.push(el('p', { class: 'modal-lead', text: t('install.ios2', '2. Choose "Add to Home Screen"') }));
+      body.push(el('p', { class: 'modal-lead', text: t('install.ios3', '3. Tap Add — done!') }));
+    } else {
+      if (isAndroid) {
+        body.push(el('p', { class: 'modal-lead', text: t('install.androidLead', 'Get the Android app:') }));
+        body.push(el('div', { class: 'modal-actions' }, [
+          el('a', {
+            class: 'pixbtn pixbtn-primary', href: 'download/clobi-craft.apk',
+            download: 'clobi-craft.apk', id: 'install-apk-link'
+          }, [icon('download', 16), el('span', { text: t('install.apk', 'Download APK') })])
+        ]));
+        body.push(el('p', { class: 'modal-lead', text: t('install.androidAlt', 'Or in Chrome: menu ⋮ → "Install app". (The APK needs "Install unknown apps" allowed once.)') }));
+      } else {
+        body.push(el('p', { class: 'modal-lead', text: t('install.desktopLead', 'In Chrome or Edge: click the install icon in the address bar, or menu → "Install CLOBI CRAFT". On an Android phone you can also grab the APK:') }));
+        body.push(el('div', { class: 'modal-actions' }, [
+          el('a', {
+            class: 'pixbtn', href: 'download/clobi-craft.apk',
+            download: 'clobi-craft.apk', id: 'install-apk-link'
+          }, [icon('download', 16), el('span', { text: t('install.apk', 'Download APK') })])
+        ]));
+      }
+    }
+    openModal(modalShell(t('install.title', 'Install CLOBI CRAFT'), body));
   }
 
   // =========================================================================
