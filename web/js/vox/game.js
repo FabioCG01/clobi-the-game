@@ -127,6 +127,12 @@ var Game = (function () {
   var mode = 'survival';
   var timeTicks = 0;
 
+  // audio: stride accumulators for terrain footsteps / swim strokes (metres
+  // travelled since the last step sound; see the audio block in update()).
+  var stepAcc = 0, swimAcc = 0;
+  var _stepV = [0, 0, 0];
+  var STEP_STRIDE = 2.0, SWIM_STRIDE = 2.6;
+
   var skin = null, skinTex = null, skinModel = 'classic';
 
   var renderDist = 6, fovDeg = 70, lutAmount = 0.85;
@@ -200,6 +206,17 @@ var Game = (function () {
       }
     } catch (e) { /* ok */ }
     return out;
+  }
+
+  // The block the player is standing ON (feet cell minus epsilon) -- the
+  // surface that footstep/landing sounds should sound like. Mid-air edge
+  // cases (block corner) fall back to stone.
+  function blockUnderFeet() {
+    var b = player.body;
+    if (!b || !world) return 3; // stone
+    readVec(b.pos, _stepV);
+    var id = world.getBlock(Math.floor(_stepV[0]), Math.floor(_stepV[1] - 0.05), Math.floor(_stepV[2]));
+    return id || 3;
   }
 
   // ---- screen switching ---------------------------------------------------------
@@ -582,7 +599,13 @@ var Game = (function () {
         if (dmg > 0) damage(dmg);
         // feel: a real fall (>= LAND_DIP_MIN_FALL blocks -- never a 1-block
         // step) kicks off the brief eased camera dip (see computeCameras)
-        if (fallDist >= LAND_DIP_MIN_FALL) landDipT = 0;
+        // + a landing footstep on the surface hit (audio)
+        if (fallDist >= LAND_DIP_MIN_FALL) {
+          landDipT = 0;
+          if (typeof Sound !== 'undefined' && Sound && Sound.step) {
+            try { Sound.step(blockUnderFeet()); } catch (e) { /* ok */ }
+          }
+        }
       }
       fallDist = 0;
     }
@@ -1156,6 +1179,34 @@ var Game = (function () {
     // -- world time (+20 ticks/s) --
     if (active) timeTicks = (timeTicks + TICKS_PER_SEC * dt) % DAY_TICKS;
 
+    // -- audio: world time -> day/night music pool + terrain footsteps --
+    // Distance-based stride: a step sound every STEP_STRIDE metres of ground
+    // travel (so sprinting naturally steps faster), surface picked from the
+    // block under the feet; swimming plays water strokes instead. Airborne /
+    // idle resets the stride so landing+walking starts fresh.
+    if (active && typeof Sound !== 'undefined' && Sound) {
+      if (Sound.setTimeOfDay) Sound.setTimeOfDay(timeTicks / DAY_TICKS);
+      var sb = player.body;
+      if (sb && Sound.step) {
+        readVec(sb.vel, _stepV);
+        var shs = Math.sqrt(_stepV[0] * _stepV[0] + _stepV[2] * _stepV[2]);
+        if (sb.inWater && shs > 0.4) {
+          swimAcc += shs * dt;
+          if (swimAcc >= SWIM_STRIDE) { swimAcc = 0; try { Sound.step('water'); } catch (e) { /* ok */ } }
+          stepAcc = 0;
+        } else if (sb.onGround && !player.flying && shs > 0.5) {
+          stepAcc += shs * dt;
+          if (stepAcc >= STEP_STRIDE) {
+            stepAcc = 0;
+            try { Sound.step(blockUnderFeet()); } catch (e) { /* ok */ }
+          }
+          swimAcc = 0;
+        } else {
+          stepAcc = 0; swimAcc = 0;
+        }
+      }
+    }
+
     // -- chunk streaming --
     streamChunks();
     meshChunks();
@@ -1425,6 +1476,9 @@ var Game = (function () {
 
       // reset loop state and go
       paused = false; dead = false;
+      // audio: crossfade from the menu track into the in-game day/night music
+      // (pausing later does NOT touch this -- pause keeps the current music)
+      if (typeof Sound !== 'undefined' && Sound && Sound.music) { try { Sound.music('game'); } catch (e) { /* ok */ } }
       physAcc = 0; lastMs = 0; frameNo = 0;
       fpsFrames = 0; fpsTime = 0; fpsVal = 0;
       lastW = 0; lastH = 0; lastDpr = 0;
@@ -1753,6 +1807,9 @@ var Game = (function () {
 
       // reset loop state and go (identical to start()'s reset block)
       paused = false; dead = false;
+      // audio: crossfade from the menu track into the in-game day/night music
+      // (pausing later does NOT touch this -- pause keeps the current music)
+      if (typeof Sound !== 'undefined' && Sound && Sound.music) { try { Sound.music('game'); } catch (e) { /* ok */ } }
       physAcc = 0; lastMs = 0; frameNo = 0;
       fpsFrames = 0; fpsTime = 0; fpsVal = 0;
       lastW = 0; lastH = 0; lastDpr = 0;

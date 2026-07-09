@@ -19,7 +19,7 @@
  */
 'use strict';
 
-var CACHE_VERSION = 'clobi-v2-2026-07-10';
+var CACHE_VERSION = 'clobi-v3-2026-07-10';
 var SHELL_CACHE = CACHE_VERSION + '-shell';
 var RUNTIME_CACHE = CACHE_VERSION + '-runtime';
 

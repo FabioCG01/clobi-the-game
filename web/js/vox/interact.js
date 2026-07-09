@@ -61,9 +61,18 @@ var Interact = (function () {
     return id === 11 || (id >= 27 && id <= 29); // water / flowers / tallgrass
   }
 
-  function playSound(name) {
+  function playSound(name, blockId) {
     if (typeof Sound !== 'undefined' && Sound && typeof Sound.play === 'function') {
-      try { Sound.play(name); } catch (e) { /* audio must never break gameplay */ }
+      try {
+        // Block-aware routing: dig/place/mine carry the block id so the
+        // sound matches the material (stone vs wood vs sand…, sound.js §map).
+        if (typeof Sound.block === 'function' &&
+            (name === 'dig' || name === 'place' || name === 'mine')) {
+          Sound.block(name === 'dig' ? 'break' : (name === 'mine' ? 'hit' : 'place'), blockId);
+          return;
+        }
+        Sound.play(name);
+      } catch (e) { /* audio must never break gameplay */ }
     }
   }
 
@@ -152,6 +161,8 @@ var Interact = (function () {
     var tapBreak = null;         // {px, py} while a touch long-press is active
     var progress = 0;
     var lastBreak = null;        // {x,y,z,id} progress belongs to
+    var mineTickT = 0;           // throttle for the while-mining material tick
+    var MINE_TICK_SEC = 0.25;
     var creativeTimer = 0;
     var canvasEl = null;
 
@@ -230,7 +241,7 @@ var Interact = (function () {
         var drop = def ? (typeof def.drops === 'number' ? def.drops : def.id) : id;
         if (drop > 0) inventory.add(drop, 1);
       }
-      playSound('dig');
+      playSound('dig', id);
       resetProgress();
     }
 
@@ -272,7 +283,7 @@ var Interact = (function () {
       if (mode !== 'creative' && typeof inventory.consumeSelected === 'function') {
         inventory.consumeSelected();
       }
-      playSound('place');
+      playSound('place', id);
     }
 
     // ---- pick-block (MMB) ----
@@ -382,6 +393,13 @@ var Interact = (function () {
           if (hard <= 0) hard = 0.05;
           if (isFinite(hard)) {
             progress += dt / hard;
+            // soft material tick while actively mining (Minecraft-style),
+            // throttled so long digs don't machine-gun the sound
+            mineTickT -= dt;
+            if (mineTickT <= 0 && progress < 1) {
+              playSound('mine', id);
+              mineTickT = MINE_TICK_SEC;
+            }
             if (progress >= 1) doBreak(tgt, mode);
           } else {
             progress = 0; // bedrock and friends: never

@@ -1400,6 +1400,12 @@ func contentTypeFor(full string) string {
 		return "application/json; charset=utf-8"
 	case ".webmanifest":
 		return "application/manifest+json; charset=utf-8"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".ogg":
+		return "audio/ogg"
+	case ".wav":
+		return "audio/wav"
 	case ".svg":
 		return "image/svg+xml"
 	case ".ico":
