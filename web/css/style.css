@@ -75,7 +75,24 @@
    scroll, no matter where an absolutely-positioned HUD/modal element ends
    up ("UI renders past the screen"). Screens that need scrolling
    self-scroll via overflow:auto on their own #screen-* box below. */
-html, body { height: 100%; overflow: hidden; }
+html, body {
+  height: 100%;
+  overflow: hidden;
+  /* PWA/mobile: kill pull-to-refresh and scroll-chaining so a swipe during
+     play never bounces the page or reloads the app; the game/HUD own every
+     gesture. Harmless on desktop. */
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+  -webkit-tap-highlight-color: transparent;
+  /* Fill the notch/safe-area with the brand color in standalone mode. */
+  background-color: var(--bg-deep);
+}
+/* When launched as an installed app (Android TWA / iOS home screen), pin the
+   viewport to the dynamic viewport height so the URL-bar-less window fills the
+   screen exactly (dvh accounts for mobile browser chrome collapse). */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  html, body { height: 100dvh; }
+}
 
 body {
   font-family: var(--font-display);

@@ -7,6 +7,26 @@
   <meta name="description" content="CLOBI CRAFT: a fully 3D voxel sandbox in your browser. Mine, build, and dress your blocky self with Minecraft-compatible skins, an in-game skin studio, and an always-free community skin marketplace. A tribute to Clobi: vim, Linux, and Fisherman's Friend forever.">
   <title>CLOBI CRAFT · 3D Voxel Sandbox &amp; Skin Marketplace</title>
 
+  <!-- ============================================================= -->
+  <!-- PWA / installable app (Android TWA + iOS home-screen).        -->
+  <!-- The manifest drives Android install + the TWA; the apple-*    -->
+  <!-- meta tags below give iOS the same standalone, full-screen,    -->
+  <!-- home-screen-launch behaviour (iOS ignores the manifest for    -->
+  <!-- display/icon, so it needs its own tags).                      -->
+  <!-- ============================================================= -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <!-- iOS: run full-screen from the home screen, dark status bar -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="CLOBI CRAFT">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/icons/icon-152.png">
+  <link rel="apple-touch-icon" sizes="167x167" href="/icons/icon-167.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+
   <!-- Fonts: Press Start 2P for DISPLAY (titles/nav/buttons), VT323 for readable body copy. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -104,5 +124,42 @@
   <script src="js/friends.js"></script>
   <script src="js/menu.js"></script>
   <script src="js/main.js"></script>
+
+  <!-- ============================================================= -->
+  <!-- Service worker registration (PWA offline shell + fast loads). -->
+  <!-- Registered AFTER the app boots so it never delays first paint; -->
+  <!-- silently no-ops where unsupported (old browsers, http origin).-->
+  <!-- ============================================================= -->
+  <script>
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      // Only over secure contexts (https / localhost). file:// and plain http
+      // (other than localhost) can't host a SW — skip quietly.
+      if (!window.isSecureContext) return;
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js').then(function (reg) {
+          // When a new SW is found and installed while one already controls the
+          // page, activate it on next load automatically (skipWaiting in sw.js
+          // + reload-on-controllerchange keeps clients on the newest shell).
+          reg.addEventListener('updatefound', function () {
+            var nw = reg.installing;
+            if (!nw) return;
+            nw.addEventListener('statechange', function () {
+              if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                nw.postMessage && reg.waiting && reg.waiting.postMessage('skipWaiting');
+              }
+            });
+          });
+        }).catch(function () { /* registration is best-effort */ });
+
+        var refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

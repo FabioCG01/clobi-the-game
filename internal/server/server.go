@@ -1398,6 +1398,8 @@ func contentTypeFor(full string) string {
 		return "text/css; charset=utf-8"
 	case ".json":
 		return "application/json; charset=utf-8"
+	case ".webmanifest":
+		return "application/manifest+json; charset=utf-8"
 	case ".svg":
 		return "image/svg+xml"
 	case ".ico":

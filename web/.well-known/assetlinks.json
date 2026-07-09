@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.fabiocg.clobicraft",
+      "sha256_cert_fingerprints": [
+        "D4:5C:09:2E:C1:4B:7D:50:A7:41:8F:8D:FB:C6:02:C7:83:F0:08:A4:02:31:00:1E:20:FD:72:67:F9:9E:65:A2"
+      ]
+    }
+  }
+]
