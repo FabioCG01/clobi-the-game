@@ -1031,6 +1031,45 @@ body::after {
 .vox-inv-cell canvas, .vox-inv-cell img { max-width: 100%; max-height: 100%; }
 .vox-inv-cell .vox-slot-count { right: 2px; bottom: 1px; }
 
+/* ---- crafting section inside the survival inventory panel (COMBAT §12) ---- */
+.vox-craft-panel {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--line);
+}
+.vox-craft-title {
+  margin-bottom: 10px;
+  font-size: 11px;
+  color: var(--cy);
+  text-shadow: 2px 2px 0 var(--ink);
+}
+.vox-craft-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(34px, 48px));
+  gap: 4px;
+}
+.vox-craft-arrow {
+  font-size: 18px;
+  color: var(--muted);
+  text-shadow: 2px 2px 0 var(--ink);
+}
+.vox-craft-out { width: 48px; height: 48px; }
+.vox-craft-out.empty { opacity: .45; cursor: default; }
+.vox-craft-btn {
+  font-family: var(--font-display);
+  font-size: 10px;
+  padding: 9px 16px;
+  color: var(--ink);
+  background: var(--gold);
+  border: 2px solid var(--ink);
+  cursor: pointer;
+  box-shadow: 3px 3px 0 0 rgba(0, 0, 0, .45);
+  transition: transform .08s, box-shadow .08s;
+}
+.vox-craft-btn:hover:not(:disabled) { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 0 rgba(0, 0, 0, .45); }
+.vox-craft-btn:active:not(:disabled) { transform: translate(1px, 1px); box-shadow: 1px 1px 0 0 rgba(0, 0, 0, .45); }
+.vox-craft-btn:disabled { opacity: .45; cursor: default; }
+
 /* ---- item tooltip ---- */
 .vox-tooltip {
   position: absolute;

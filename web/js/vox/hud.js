@@ -4,12 +4,13 @@
 // Owns every game-screen element inside #hud-root: crosshair, hotbar (with
 // fake-iso block icons drawn from the Blocks atlas canvas), hearts + bubbles,
 // chat (log + input + history), debug panel, inventory panel (creative palette
-// or survival backpack), pause overlay with settings sliders, death overlay,
-// mode badge and title toast. Touch control DOM is owned by Input (§5.10) —
-// HUD never touches it.
+// or survival backpack + the §12 crafting section), pause overlay with
+// settings sliders, death overlay, mode badge and title toast. Touch control
+// DOM is owned by Input (§5.10) — HUD never touches it.
 //
 // Consumes: I18n (guarded), Input (setUIMode / isTouch / pointer lock, guarded),
 //           Commands (chat Enter -> exec, guarded), Blocks (icons + names),
+//           Craft (crafting section: match/craftOnce, guarded),
 //           the Game api object handed to init (setters, debugSnapshot, ...).
 //
 // Pinned API:
@@ -133,7 +134,15 @@ var HUD = (function () {
     '.vox-hitflash.on{opacity:1;transition:opacity 0s;}',
     '.vox-armor-row{position:absolute;left:50%;bottom:calc(96px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);display:flex;gap:4px;pointer-events:none;}',
     '.vox-armor-slot{position:relative;width:28px;height:28px;box-sizing:border-box;overflow:hidden;}',
-    '.vox-armor-slot canvas{display:block;width:100%;height:100%;image-rendering:pixelated;}'
+    '.vox-armor-slot canvas{display:block;width:100%;height:100%;image-rendering:pixelated;}',
+    /* ---- Part III crafting section (ARCHITECTURE-COMBAT.md §12) ---- */
+    '.vox-craft-panel{margin-bottom:10px;}',
+    '.vox-craft-title{margin-bottom:8px;}',
+    '.vox-craft-area{display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;}',
+    '.vox-craft-grid{display:grid;grid-template-columns:repeat(3,46px);gap:4px;}',
+    '.vox-craft-side{display:flex;flex-direction:column;align-items:center;gap:8px;}',
+    '.vox-craft-out{width:46px;height:46px;}',
+    '.vox-craft-btn{font:inherit;cursor:pointer;pointer-events:auto;}'
   ].join('\n');
 
   function injectCSS() {
@@ -173,6 +182,8 @@ var HUD = (function () {
 
   var swapSrc = null;      // survival inventory pending-swap {arr, idx, el}
   var iconCache = {};      // block id -> 40x40 master canvas
+  var craftGrid = null;    // §12 crafting 3x3 staging grid [[{id,count,kind}|null x3] x3] -- NOT part of Inventory
+  var stickIcon = null;    // lazily-built 40x40 icon for Craft's 'stick' (not Items-registered)
   var lastMode = null;
   var lastHealth = -1;
   var lastAir = 'x';
@@ -310,12 +321,51 @@ var HUD = (function () {
     ctx.imageSmoothingEnabled = false;
     var isItem = kind ? kind === 'item' : typeof id === 'string';
     if (isItem) {
+      // Craft's 'stick' is a craft-only id with no Items registration
+      // (crafting fodder, see craft.js) -- Items.icon() would hand back a
+      // blank canvas, so it gets a locally-drawn icon instead.
+      if (id === craftStickId()) {
+        ctx.drawImage(getStickIcon(), 0, 0, canvas.width, canvas.height);
+        return;
+      }
       if (typeof Items === 'undefined' || !Items || typeof Items.icon !== 'function') return;
       var itemCanvas = Items.icon(id);
       if (itemCanvas) ctx.drawImage(itemCanvas, 0, 0, canvas.width, canvas.height);
       return;
     }
     ctx.drawImage(getIcon(id), 0, 0, canvas.width, canvas.height);
+  }
+
+  // ---- 'stick' icon + id (§12) ----------------------------------------------
+  // Craft's one intermediate material lives outside the Items registry, so
+  // HUD supplies its icon and display name itself (the ONLY id with that
+  // property -- everything else in a slot is a Blocks id or an Items id).
+
+  function craftStickId() {
+    return (typeof Craft !== 'undefined' && Craft && Craft.STICK_ID) || 'stick';
+  }
+
+  // Simple pixel-art diagonal rod, same 16-grid-scaled-x2.5 family as the
+  // Items tool icons so it doesn't clash sitting next to them in a grid.
+  function getStickIcon() {
+    if (stickIcon) return stickIcon;
+    var c = document.createElement('canvas');
+    c.width = 40; c.height = 40;
+    var ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    function px(x, y, w, h, col) {
+      ctx.fillStyle = col;
+      ctx.fillRect(x * 2.5, y * 2.5, w * 2.5, h * 2.5);
+    }
+    for (var i = 0; i < 8; i++) {
+      px(4 + i, 11 - i, 2, 2, '#8a5c2e');   // rod body, bottom-left -> top-right
+    }
+    for (i = 0; i < 8; i++) {
+      px(4 + i, 11 - i, 1, 1, '#b08a4f');   // lit top-left edge
+      px(5 + i, 12 - i, 1, 1, '#5d3d1e');   // shadowed lower edge
+    }
+    stickIcon = c;
+    return c;
   }
 
   // ---- DOM construction --------------------------------------------------------
@@ -599,6 +649,7 @@ var HUD = (function () {
   // string) when Items isn't loaded, matching blockName's own empty-string
   // contract for an unknown id.
   function itemName(id) {
+    if (id === craftStickId()) return t('vox.item.stick', 'Stick'); // craft-only id, not in Items (§12)
     if (typeof Items === 'undefined' || !Items) return '';
     var def = Items.def ? Items.def(id) : null;
     if (!def) return '';
@@ -641,9 +692,10 @@ var HUD = (function () {
   }
 
   // Write a hotbar/backpack slot, preferring an inventory setter if one exists.
+  // which:'craft' targets the local §12 staging grid, never an Inventory slot.
   function setSlot(arr, idx, val, which) {
     var inv = game.inventory;
-    if (inv && typeof inv.setSlot === 'function') {
+    if (which !== 'craft' && inv && typeof inv.setSlot === 'function') {
       try { inv.setSlot(which, idx, val); return; } catch (e) { /* fall through */ }
     }
     arr[idx] = val;
@@ -685,8 +737,8 @@ var HUD = (function () {
         }, t(def.i18nKey, def.name));
       });
     } else {
-      // -- survival: backpack grid + hotbar row; click to swap two slots
-      var bp = el('div', 'vox-inv-grid', dom.inv);
+      // -- survival: crafting section (§12) + backpack grid + hotbar row;
+      //    click to swap two slots (craft-grid cells join the same mechanic)
       var i;
       var makeSwap = function (arr, idx, which) {
         return function (ev) {
@@ -710,6 +762,13 @@ var HUD = (function () {
           buildInventoryPanel();
         };
       };
+      // Crafting sits ABOVE the backpack (Minecraft survival-inventory
+      // order). Creative mode deliberately has NO craft section: the palette
+      // already grants every block, and there would be no backpack cells on
+      // screen to tap-move ingredients from (vanilla-MC parity: the creative
+      // inventory has no crafting grid either).
+      buildCraftSection(dom.inv, makeSwap);
+      var bp = el('div', 'vox-inv-grid', dom.inv);
       for (i = 0; i < 27; i++) {
         invCell(bp, inv.backpack ? inv.backpack[i] : null, makeSwap(inv.backpack, i, 'backpack'));
       }
@@ -735,9 +794,114 @@ var HUD = (function () {
     if (!invOpen) return;
     invOpen = false;
     hideTooltip();
+    returnCraftGridToInventory();
     dom.inv.style.display = 'none';
     setUIMode(false);
     if (game && typeof game.resumePointerLock === 'function') game.resumePointerLock();
+  }
+
+  // ---- crafting section (Part III §12 -- pinned class .vox-craft-panel) ------
+  // A 3x3 STAGING grid separate from hotbar/backpack (contract §12): the
+  // player tap-moves ingredients from the backpack/hotbar cells into these 9
+  // cells with the exact same swapSrc click-to-move mechanic the survival
+  // panel already uses, Craft.match() re-runs on every grid change (each
+  // move rebuilds the panel, which rebuilds this section), and the matched
+  // recipe's output is previewed live in the result cell. "Craft" commits
+  // via Craft.craftOnce -- craft.js consumes 1x the inputs from this same
+  // staged grid (consumeFromGrid nulls the emptied cells of craftGrid in
+  // place, since craftGrid IS the 3x3 array handed to match/craftOnce) and
+  // adds the output to the inventory.
+
+  function newCraftGrid() {
+    return [[null, null, null], [null, null, null], [null, null, null]];
+  }
+
+  function buildCraftSection(parent, makeSwap) {
+    if (typeof Craft === 'undefined' || !Craft || typeof Craft.match !== 'function') return;
+    if (!craftGrid) craftGrid = newCraftGrid();
+
+    var wrap = el('div', 'vox-craft-panel', parent);
+    var title = el('div', 'vox-craft-title', wrap);
+    title.textContent = t('vox.craft.title', 'Crafting');
+
+    var area = el('div', 'vox-craft-area', wrap);
+    var grid = el('div', 'vox-craft-grid', area);
+    for (var r = 0; r < 3; r++) {
+      for (var c = 0; c < 3; c++) {
+        invCell(grid, craftGrid[r][c], makeSwap(craftGrid[r], c, 'craft'));
+      }
+    }
+
+    // Live match preview: this section is rebuilt after every grid mutation,
+    // so calling match() here IS the "recompute on every grid change".
+    var matched = Craft.match(craftGrid);
+
+    var arrow = el('span', 'vox-craft-arrow', area);
+    arrow.textContent = '→';
+
+    var side = el('div', 'vox-craft-side', area);
+    var out = el('div', 'vox-inv-cell vox-craft-out' + (matched ? '' : ' empty'), side);
+    var cv = document.createElement('canvas');
+    cv.width = 40; cv.height = 40;
+    out.appendChild(cv);
+    if (matched) {
+      paintIconInto(cv, matched.output.id, matched.output.kind);
+      if (matched.output.count > 1) {
+        var cnt = el('span', 'vox-slot-count', out);
+        cnt.textContent = matched.output.count;
+      }
+      var label = slotName({ id: matched.output.id, kind: matched.output.kind });
+      if (label) {
+        out.addEventListener('mouseenter', function () { showTooltip(out, label); });
+        out.addEventListener('mouseleave', hideTooltip);
+      }
+    }
+    // Clicking the result crafts too (familiar MC affordance); the button is
+    // the primary, contract-named entry point. doCraft no-ops on no match.
+    out.addEventListener('click', doCraft);
+
+    var btn = el('button', 'vox-craft-btn', side);
+    btn.textContent = t('vox.craft.btn', 'Craft');
+    btn.disabled = !matched;
+    btn.addEventListener('click', doCraft);
+  }
+
+  function doCraft() {
+    var inv = game && game.inventory;
+    if (!inv || typeof Craft === 'undefined' || !Craft) return;
+    var recipe = Craft.match(craftGrid);
+    if (!recipe) return;
+    // Explicit grid argument (supported by craftOnce, see craft.js) so there
+    // is zero ambiguity about which staged grid gets consumed. On success
+    // consumeFromGrid already decremented/nulled the consumed cells of
+    // craftGrid itself, so the rebuild below shows them cleared.
+    if (Craft.craftOnce(inv, recipe, craftGrid)) {
+      var label = slotName({ id: recipe.output.id, kind: recipe.output.kind });
+      toast('+' + recipe.output.count + (label ? ' ' + label : ''));
+      hideTooltip();
+      pokeInventory();
+      buildInventoryPanel();
+    } else {
+      toast(t('vox.craft.noRoom', 'No room in inventory!'));
+    }
+  }
+
+  // Closing the panel hands staged ingredients back to the inventory
+  // (Minecraft behaviour) so nothing sits invisibly in the hidden grid;
+  // whatever doesn't fit (inventory full) stays staged for the next open
+  // rather than being destroyed.
+  function returnCraftGridToInventory() {
+    var inv = game && game.inventory;
+    if (!inv || !craftGrid || typeof inv.add !== 'function') return;
+    for (var r = 0; r < 3; r++) {
+      for (var c = 0; c < 3; c++) {
+        var s = craftGrid[r][c];
+        if (!s) continue;
+        var left = inv.add(s.id, s.count);
+        if (left <= 0) craftGrid[r][c] = null;
+        else s.count = left;
+      }
+    }
   }
 
   // ---- pause overlay + settings ------------------------------------------------
@@ -1078,6 +1242,9 @@ var HUD = (function () {
         : t('vox.mode.survival', 'Survival'));
       lastHealth = -1;   // hearts may have been hidden; force refresh
       lastHotbarSig = '';
+      // §12: the creative panel has no craft section, so staged ingredients
+      // would be unreachable there -- hand them back on any gamemode switch.
+      returnCraftGridToInventory();
       if (invOpen) buildInventoryPanel();
     }
     lastMode = state.mode;
@@ -1108,6 +1275,7 @@ var HUD = (function () {
       chatOpen = false; invOpen = false; pausedOpen = false; deathOpen = false;
       lastMode = null; lastHealth = -1; lastAir = 'x'; lastHotbarSig = ''; lastTarget = '';
       lastArmorSig = ''; hotbarTooltipSelected = -1; combatWired = false;
+      craftGrid = newCraftGrid();
       atlasCanvas = resolveAtlasCanvas(opts);
       buildDom();
       applyTouchSize(loadSettings().touch || 'm');
@@ -1151,6 +1319,7 @@ var HUD = (function () {
       dom = {};
       game = null;
       root = null;
+      craftGrid = null;
     },
 
     // Part III (§8): explicit entry points, in case Game prefers to drive
