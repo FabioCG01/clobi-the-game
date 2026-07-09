@@ -32,8 +32,9 @@
 // (factored into the private bootEngine() helper) and the same idempotent
 // Input/HUD/Interact/Commands wiring, but sources the world from an
 // already-resolved `welcome` payload (World.createRemote — no IndexedDB) and
-// wires Net event handlers ('join'/'leave'/'moves'/'block'/'chat'/'sys'/
-// 'mode'/'time'/'host'/'kick'/'close') + world.onLocalEdit -> Net.send('block').
+// wires Net event handlers ('welcome' (reconnect rebuild — see applyWelcome)/
+// 'join'/'leave'/'moves'/'block'/'chat'/'sys'/'mode'/'time'/'host'/'kick'/
+// 'close') + world.onLocalEdit -> Net.send('block').
 // Autosave/IDB writes are disabled in MP (guarded inside saveNow()); /regen
 // and /setspawn are disabled with a toast+chat error (guarded inside regen()/
 // api.setSpawn); /time and /gamemode route their network side-effects through
@@ -203,7 +204,13 @@ var Game = (function () {
 
   // ---- screen switching ---------------------------------------------------------
 
-  var SCREENS = ['menu', 'game', 'studio', 'wardrobe', 'market'];
+  // Must list EVERY #screen-* id, or showGameScreen() leaves a stale screen
+  // .active on top of the game HUD. 'worlds' (the WorldSelect / "Play" + "Join
+  // a Game" screen, added in Part II) was missing — so starting a world from
+  // it left #screen-worlds rendered over the HUD, swallowing clicks and
+  // blocking pointer lock (you couldn't walk). Keep this in sync with the
+  // screen list in main.js and the #screen-* divs in index.html.
+  var SCREENS = ['menu', 'game', 'studio', 'wardrobe', 'market', 'worlds'];
 
   function showGameScreen() {
     // Direct .active toggle (calling App.showScreen('game') here could recurse
@@ -1444,12 +1451,71 @@ var Game = (function () {
   // handing us the resolved welcome payload + the resolved skin to wear) and
   // everything is synchronous (no IndexedDB probing, no saved-meta merge).
 
+  // Shared consumer of a 'welcome' payload's room state — everything that
+  // must be applied BOTH on the initial connect (startMultiplayer below) and
+  // again when Net's single auto-reconnect succeeds and re-emits 'welcome'
+  // (net.js §4.1). The server treats a reconnect as a brand-new join
+  // (tryJoin assigns a fresh player id, builds a fresh roster, snapshots ALL
+  // deltas), so everything keyed on the old id or drifted during the gap is
+  // rebuilt here. World identity (seed/name/spawn) is deliberately NOT here:
+  // it is immutable for the life of a session — a reconnect rejoins the same
+  // world, and only startMultiplayer() ever creates one.
+  function applyWelcome(welcome) {
+    welcome = welcome || {};
+    var wWorld = welcome.world || {};
+
+    // Our id is reassigned by every (re)join; every self-echo filter (the
+    // join/leave/moves/mode handlers below, Combat's self-hit exclusion and
+    // health/death routing) keys off it.
+    if (welcome.youId != null) myNetId = welcome.youId;
+    if (typeof Combat !== 'undefined' && Combat.setLocalPlayerId) Combat.setLocalPlayerId(myNetId);
+
+    // Full roster replace: anyone who left while we were gone falls out, and
+    // on a reconnect so does the ghost of our own OLD player id.
+    if (typeof RemotePlayers !== 'undefined' && RemotePlayers.sync) {
+      var others = Array.isArray(welcome.players)
+        ? welcome.players.filter(function (p) { return p && p.id !== myNetId; })
+        : [];
+      RemotePlayers.sync(others);
+    }
+
+    // Server-authoritative block state. On the initial connect
+    // World.createRemote already consumed this same snapshot, making this an
+    // idempotent no-op; on a reconnect it replays every server-known cell
+    // (only genuinely changed blocks dirty meshes — see world.js).
+    if (world && world.applyRemoteDeltas) world.applyRemoteDeltas(welcome.deltas);
+
+    if (typeof wWorld.time === 'number') applyTimeLocal(wWorld.time);
+    if (typeof welcome.difficulty === 'string') applyDifficultyLocal(welcome.difficulty);
+    if (typeof welcome.keepInventory === 'boolean') applyKeepInventoryLocal(!!welcome.keepInventory);
+
+    // Mob/drop sets rebuild exactly like a fresh joiner's: the server sends
+    // no entity snapshot in welcome (welcome.mobs is forward-compat only) and
+    // mobState batches drop unknown ids, so whatever the gap made stale would
+    // otherwise linger as ghosts the server will never despawn for us.
+    if (typeof Mobs !== 'undefined' && Mobs.sync) Mobs.sync(welcome.mobs);
+    if (typeof Drops !== 'undefined' && Drops.clear) Drops.clear();
+  }
+
   // Net.on(type, fn) handlers, wired once per startMultiplayer() call and
   // unwired symmetrically in stop(). Kept as named functions on `netHandlers`
   // so unwireNetHandlers() can pass the exact same reference to Net.off().
   function wireNetHandlers() {
     if (typeof Net === 'undefined' || !Net.on) return;
     netHandlers = {
+      welcome: function (msg) {
+        // Only ever fires when net.js's single auto-reconnect succeeds — the
+        // INITIAL welcome resolves connect()'s Promise instead of emitting
+        // (see net.js). The server treated the reconnect as a brand-new join,
+        // so rebuild everything the disconnect gap could have drifted.
+        if (!msg) return;
+        applyWelcome(msg);
+        // The reconnect hello re-sent our ORIGINAL requested gamemode (Net
+        // kept its connect params); if /gamemode changed it mid-session,
+        // re-assert the current one so the server and other players agree.
+        if (typeof Net !== 'undefined' && Net.isConnected) Net.send('mode', { mode: mode });
+        HUD.chatPrint(t('mp.chat.reconnected', 'Reconnected to the server'), 'sys');
+      },
       join: function (msg) {
         if (msg && msg.player && msg.player.id !== myNetId && typeof RemotePlayers !== 'undefined') {
           RemotePlayers.add(msg.player);
@@ -1665,14 +1731,9 @@ var Game = (function () {
 
       // ---- multiplayer-only wiring ----
       isMultiplayer = true;
-      myNetId = welcome.youId;
-
-      if (typeof RemotePlayers !== 'undefined' && RemotePlayers.sync) {
-        var others = Array.isArray(welcome.players)
-          ? welcome.players.filter(function (p) { return p && p.id !== myNetId; })
-          : [];
-        RemotePlayers.sync(others);
-      }
+      // myNetId, roster sync, time/difficulty/keepInventory, mob/drop reset —
+      // shared with the reconnect re-'welcome' handler (see applyWelcome).
+      applyWelcome(welcome);
 
       // forward every LOCAL (non-silent) block edit to the server; the
       // server's authoritative echo comes back through the 'block' handler
